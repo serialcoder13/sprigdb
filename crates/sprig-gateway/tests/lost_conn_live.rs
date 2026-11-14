@@ -1,10 +1,9 @@
-//! A backend connection killed between statements (chapter 06, "Failure
-//! handling", "When a lost connection is retried"): when nothing pinned the
+//! A backend connection killed between statements: when nothing pinned the
 //! session to it, the next statement runs on a new connection with the
 //! session's state replayed, and the client sees nothing. Inside a
 //! transaction, with other pinned state, or when the connection dies while
-//! a write runs, the client gets the chapter's error and the session goes
-//! on. Through both ports, against the single-node cluster.
+//! a write runs, the client gets an error (39032 or 39033) and the session
+//! goes on. Through both ports, against the single-node cluster.
 //!
 //! ```sh
 //! deploy/compose/gateway-dev.sh up   # SPRIG_GATEWAY_LOGIN_MODE=accounts_file

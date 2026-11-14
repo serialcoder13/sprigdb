@@ -73,7 +73,7 @@ fn no_gain_regression_and_write_cost_retire() {
         judge_watch(&base(), &[T], &now, 24.0, &rules(), 5, false).0,
         WatchVerdict::Retire(DropReason::NoGain)
     );
-    // Another reader now uses it and got 44% slower (worked example 3).
+    // Another reader now uses it and got 44% slower.
     let now: BTreeMap<_, _> = [
         (T, l(500, 4.0, 3.0, Some(true), false)),
         (R, l(40, 144.0, 120.0, Some(true), false)),
@@ -156,7 +156,7 @@ fn user_and_migrated_indexes_supersede_ours() {
     assert!(!supersedes(&[short], &[long]));
 }
 
-// ---- decision O1: usage, never days ----
+// ---- usage, never days ----
 
 use super::usage::{
     Before, ReadUse, Remembered, UsageRules, UsageVerdict, before_of, entry_changes, judge,

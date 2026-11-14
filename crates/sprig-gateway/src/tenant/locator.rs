@@ -1,23 +1,21 @@
-//! Where a tenant's catalog lives, as the gateway finds it (chapter 08,
-//! "Where the catalog lives"): the shard map `shardmaps/<tenant>/0` in this
-//! DC's tier names the cluster; the cluster record names its nodes and the
-//! `sprig_ctl` credential reference; the gateway's own writer tracking
-//! ([`Backends::writer`]) picks the node.
+//! Where a tenant's catalog lives, as the gateway finds it: the shard map
+//! `shardmaps/<tenant>/0` in this DC's tier names the cluster; the cluster
+//! record names its nodes and the `sprig_ctl` credential reference; the
+//! gateway's own writer tracking ([`Backends::writer`]) picks the node.
 //!
-//! The same lookup decides where a tenant's data goes in R0: every
-//! database of a tenant lives on its catalog's cluster (decision N4,
-//! "R0 placement"), so [`GatewayLocator::cluster`] is also the cluster of
-//! the session's backend target.
+//! The same lookup gives a tenant's default data placement: a database's
+//! shards start on its catalog's cluster, so [`GatewayLocator::cluster`]
+//! is also the cluster of the session's backend target.
 //!
-//! **Remote homes (chapter 24).** A tenant's map lives in its home DC's
-//! tier. When this DC has no home map for the tenant (it was never homed
-//! here, or it moved away, leaving a `quarantined` forwarding map), the
-//! locator reads the directory entry's `home_dc` and the home DC's map
-//! from that DC's tier of the one etcd (single-etcd mode; the relay's
-//! `RemoteMaps` in R2), and follows that map from then on: holds and moves
-//! reach this gateway whatever DC the tenant is homed in. A followed map
-//! that turns `quarantined` (the tenant moved on) makes the locator read
-//! the directory again.
+//! **Remote homes.** A tenant's map lives in its home DC's tier. When this
+//! DC has no home map for the tenant (it was never homed here, or it moved
+//! away, leaving a `quarantined` forwarding map), the locator reads the
+//! directory entry's `home_dc` and the home DC's map from that DC's tier of
+//! the one etcd (single-etcd mode; otherwise the relay's `RemoteMaps`), and
+//! follows that map from then on: holds and moves reach this gateway
+//! whatever DC the tenant is homed in. A followed map that turns
+//! `quarantined` (the tenant moved on) makes the locator read the directory
+//! again.
 //!
 //! Catalog reads and writes, and database-level DDL (`CREATE DATABASE`
 //! needs an account that may create `t<id>_d...` schemas), run as the
@@ -54,14 +52,14 @@ pub struct GatewayLocator {
     backends: Arc<Backends>,
     pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
     /// `sprig_ctl` pools for catalog reads and changes only, which keep
-    /// their connections' prepared statements (decision PF3).
+    /// their connections' prepared statements.
     catalog_pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
     clusters: Mutex<HashMap<TenantId, ClusterId>>,
     ctl_users: Mutex<HashMap<ClusterId, String>>,
     /// Every tenant map in this DC tier (`shardmaps/`), fed by a watch,
-    /// started at first use: holds and moves (chapter 10).
+    /// started at first use: holds and moves.
     maps: OnceLock<Mirror>,
-    /// The same for other DCs' tiers, for tenants homed there (chapter 24).
+    /// The same for other DCs' tiers, for tenants homed there.
     remote_maps: Mutex<HashMap<DcId, Mirror>>,
     /// The global tier, for directory entries; `None`: this DC only.
     global: Option<Arc<dyn MetaStore>>,
@@ -71,9 +69,9 @@ pub struct GatewayLocator {
     /// `quarantined` (at most once a second).
     refreshed: Mutex<HashMap<TenantId, std::time::Instant>>,
     /// Decoded maps by key and etcd revision: every statement reads its
-    /// tenant's map three times (holds, roles, RL14's token), and decoding
-    /// the record each time was a tenth of a MongoDB point read's gateway
-    /// CPU (R5 round 4).
+    /// tenant's map three times (holds, roles, the maps token), and
+    /// decoding the record each time was a tenth of a MongoDB point read's
+    /// gateway CPU.
     decoded: Mutex<HashMap<String, (u64, Arc<ShardMap>)>>,
 }
 
@@ -109,7 +107,7 @@ impl GatewayLocator {
     }
 
     /// The same locator, reading tenants' home DCs from `global`'s
-    /// directory (chapter 24), with `routing` noting each home.
+    /// directory, with `routing` noting each home.
     #[must_use]
     pub fn with_homes(
         mut self,
@@ -179,19 +177,19 @@ impl GatewayLocator {
         Some(m)
     }
 
-    /// The role of the map this gateway follows for `tenant` (chapter 25:
-    /// a `quarantined` map is a fenced copy); `None` until it has loaded.
+    /// The role of the map this gateway follows for `tenant` (a
+    /// `quarantined` map is a fenced copy); `None` until it has loaded.
     #[must_use]
     pub fn followed_role(&self, tenant: TenantId) -> Option<MapRole> {
         self.mirrored_map_arc(&self.home_of(tenant), tenant)
             .map(|m| m.role)
     }
 
-    /// RL14 (r2harden): a token of every map of `tenant` in the DC it is
-    /// followed in (the sum of their etcd revisions, so any hold, release,
-    /// cutover or split changes it), with that DC, and whether one of them
-    /// holds a range now. A statement that failed with 1146 or 1049 while
-    /// the token moved met a mover's fence, not a missing table.
+    /// A token of every map of `tenant` in the DC it is followed in (the
+    /// sum of their etcd revisions, so any hold, release, cutover or split
+    /// changes it), with that DC, and whether one of them holds a range
+    /// now. A statement that failed with 1146 or 1049 while the token moved
+    /// met a mover's fence, not a missing table.
     #[must_use]
     pub fn maps_token(&self, tenant: TenantId) -> (DcId, u64, bool) {
         let dc = self.home_of(tenant);
@@ -219,11 +217,11 @@ impl GatewayLocator {
         (dc, sum, held)
     }
 
-    /// R34 (bugfix5): [`Self::maps_token`] read from etcd itself rather than
-    /// from the watched copy: one linearizable listing of `tenant`'s maps in
-    /// the DC they are followed in. A mover writes its hold before it
-    /// fences, so a listing made after a statement met the fence shows the
-    /// hold (or the cutover after it), however far the watch lags.
+    /// [`Self::maps_token`] read from etcd itself rather than from the
+    /// watched copy: one linearizable listing of `tenant`'s maps in the DC
+    /// they are followed in. A mover writes its hold before it fences, so a
+    /// listing made after a statement met the fence shows the hold (or the
+    /// cutover after it), however far the watch lags.
     ///
     /// # Errors
     /// The store's.
@@ -309,9 +307,8 @@ impl GatewayLocator {
     }
 
     /// Where `tenant`'s map points and whether a mover cutover holds it,
-    /// following its home DC (chapter 24): reads the directory again when
-    /// the followed map turned `quarantined`. `None` until a map copy has
-    /// loaded.
+    /// following its home DC: reads the directory again when the followed
+    /// map turned `quarantined`. `None` until a map copy has loaded.
     pub async fn placement_followed(&self, tenant: TenantId) -> Option<Placement> {
         let dc = self.home_of(tenant);
         let map = self.mirrored_map_arc(&dc, tenant);
@@ -329,9 +326,9 @@ impl GatewayLocator {
         Placement::of(&*map?).ok()
     }
 
-    /// The DC `tenant` is followed in and its map mirror's generation
-    /// (perf1, S148): while both stay the same, so does everything the
-    /// mirror says about the tenant's maps.
+    /// The DC `tenant` is followed in and its map mirror's generation:
+    /// while both stay the same, so does everything the mirror says about
+    /// the tenant's maps.
     #[must_use]
     pub fn maps_generation(&self, tenant: TenantId) -> (DcId, u64) {
         let dc = self.home_of(tenant);
@@ -373,7 +370,7 @@ impl GatewayLocator {
         self.maps().changes()
     }
 
-    /// The cluster holding `tenant`'s catalog (and, in R0, its data),
+    /// The cluster holding `tenant`'s catalog (and, by default, its data),
     /// read from the shard map and remembered for [`Self::cached_cluster`].
     ///
     /// # Errors
@@ -389,7 +386,7 @@ impl GatewayLocator {
                 self.routing.set_home(tenant, self.my_dc().clone());
                 m
             }
-            // Not homed here (chapter 24): the directory names the home.
+            // Not homed here: the directory names the home.
             local => match self.remote_map(tenant).await {
                 Ok(m) => m,
                 // The directory or the home's tier can't be read: a
@@ -451,7 +448,7 @@ impl GatewayLocator {
     }
 
     /// Whether `cluster`'s published capability profile says XA works
-    /// (chapter 09's `derived.xa`); `false` without a profile.
+    /// (its `derived.xa`); `false` without a profile.
     ///
     /// # Errors
     /// The registry's errors.
@@ -464,8 +461,8 @@ impl GatewayLocator {
             .unwrap_or(false))
     }
 
-    /// Connection options of `sprig_ctl` on `cluster`'s writer (chapter
-    /// 18's resolver-side admin statements).
+    /// Connection options of `sprig_ctl` on `cluster`'s writer (for the
+    /// resolver's admin statements).
     ///
     /// # Errors
     /// As [`Self::ctl_pool`].
@@ -494,8 +491,8 @@ impl GatewayLocator {
     }
 
     /// Connection options of `sprig_ctl` on `cluster`'s replicas: its
-    /// nodes other than the writer, for a primary with replicas (chapter
-    /// 50's `queue.confirm_mode = replica`). Empty for one node, Galera
+    /// nodes other than the writer, for a primary with replicas (the
+    /// queues' `queue.confirm_mode = replica`). Empty for one node, Galera
     /// (a commit is on every node already) and external clusters.
     ///
     /// # Errors
@@ -538,15 +535,51 @@ impl GatewayLocator {
         self.pool_of(cluster, false).await
     }
 
+    /// A `sprig_ctl` connection to `cluster`'s writer outside the pools:
+    /// one a session holds across its transaction (record hierarchy
+    /// locks). A pooled one could be held by every
+    /// pool slot while each holder waits for another.
+    ///
+    /// # Errors
+    /// As [`Self::ctl_pool`]; 39101 when the writer doesn't answer.
+    pub async fn ctl_conn(&self, cluster: &ClusterId) -> Result<mysql_async::Conn> {
+        let stored = self.registry.get(cluster).await?.ok_or_else(|| {
+            SprigError::new(
+                SprigCode::ClusterNotFound,
+                format!("no cluster {cluster} in dc {}", self.registry.dc()),
+            )
+        })?;
+        let rec = stored.body();
+        let writer = match self.backends.writer(cluster, ShardId(0)).await {
+            Ok(n) => rec.nodes.iter().find(|s| s.node == n.node).cloned(),
+            Err(_) => None,
+        }
+        .or_else(|| rec.nodes.first().cloned())
+        .ok_or_else(|| {
+            SprigError::new(
+                SprigCode::ClusterUnavailable,
+                format!("cluster {cluster} has no writer"),
+            )
+        })?;
+        let ep = CredentialConnector::ctl(&rec.secrets).endpoint(&writer)?;
+        mysql_async::Conn::new(ep.opts).await.map_err(|e| {
+            SprigError::new(
+                SprigCode::BackendUnavailable,
+                format!("cluster {cluster} unreachable"),
+            )
+            .with_source(e)
+        })
+    }
+
     /// The pool of `sprig_ctl` connections to `cluster`'s writer that the
     /// tenant catalogs there use ([`CatalogLocator::writer`]). Its
     /// connections are not reset when they go back to the pool, so their
     /// server-side prepared statements stay cached: with the reset (the
     /// driver's default) every catalog statement was prepared again, about
-    /// 80 of a DDL statement's 160 round trips (decision PF3). Catalog work
-    /// leaves no session state behind: its statements name their schema,
-    /// lock waits are `SET STATEMENT`, transactions roll back when dropped,
-    /// and a migration run resets its own connection.
+    /// 80 of a DDL statement's 160 round trips. Catalog work leaves no
+    /// session state behind: its statements name their schema, lock waits
+    /// are `SET STATEMENT`, transactions roll back when dropped, and a
+    /// migration run resets its own connection.
     ///
     /// # Errors
     /// As [`Self::ctl_pool`].
@@ -610,8 +643,8 @@ impl GatewayLocator {
                 // With mysql_async's default TTL of 0, every connection
                 // returned to a pool with a minimum of 0 is closed, so each
                 // catalog read or login-state write opened a new connection
-                // (found in M0.7: thousands of TIME_WAIT sockets per minute
-                // under HTTP load, one per request).
+                // (thousands of TIME_WAIT sockets per minute under HTTP
+                // load, one per request).
                 .pool_opts(
                     PoolOpts::new()
                         .with_constraints(constraints)
@@ -642,15 +675,15 @@ impl GatewayLocator {
             .cloned()
     }
 
-    /// Retires the pooled backend connections of `account` (chapter 29:
-    /// its grants changed).
+    /// Retires the pooled backend connections of `account` (its grants
+    /// changed).
     pub fn retire_account(&self, account: &str) {
         self.backends.pools().retire_account(account);
     }
 
     /// Closes the pooled backend connections of every account of
     /// `tenant` (`t<tenant>_...`; `t3_` never matches `t30_`): the tenant
-    /// was deleted (decision bugfix-29).
+    /// was deleted.
     pub fn retire_tenant(&self, tenant: TenantId) {
         let prefix = format!("t{tenant}_");
         self.backends

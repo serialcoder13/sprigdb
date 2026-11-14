@@ -1,12 +1,11 @@
-//! Least-busy DC placement (chapter 24, "Least-busy placement"; build step
-//! 8, r2last).
+//! Least-busy DC placement.
 //!
 //! ```text
 //! dc-load/<dc> (global tier), written by that DC's leader after each
 //! balancer run when a value moved 2 points, the DC's lease epoch or state
 //! changed, or the record is 2 minutes old:
 //!   storage_spare, cpu_spare, conn_spare = 1 - used/capacity over the DC's
-//!     placeable clusters (chapter 11's fleet view); cpu counts busy time
+//!     placeable clusters (the balancer's fleet view); cpu counts busy time
 //!     and probe pressure; a dimension no cluster declares is 1 (unknown:
 //!     no preference)
 //!   clusters = placeable clusters; stable_since_ms = when the DC last
@@ -449,8 +448,8 @@ mod tests {
     }
 
     /// A recovered DC looks idle: until it has been active for
-    /// `recovery.stability_minutes`, new tenants go elsewhere (chapter 24:
-    /// no wave of tenants into a DC still catching up).
+    /// `recovery.stability_minutes`, new tenants go elsewhere (no wave of
+    /// tenants into a DC still catching up).
     #[tokio::test]
     async fn a_recovered_dc_gets_no_wave_of_new_tenants() {
         use sprig_meta::bootstrap::DcRecord;

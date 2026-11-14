@@ -1,5 +1,4 @@
-//! The mover's Admin API (chapter 10, `sprigctl shard move` and
-//! `sprigctl job`): submit a tenant move, list, show, cancel, and let a
+//! The mover's Admin API (`sprigctl shard move` and `sprigctl job`): submit a tenant move, list, show, cancel, and let a
 //! manual move cut over. Jobs are records in the DC tier
 //! (`sprig_mover::MetaMover`); workers run them. Any controller answers.
 //!
@@ -93,7 +92,7 @@ impl AdminService {
         let m = self.mover();
         let id = m.submit(spec).await?;
         let st = m.status(&id).await?;
-        // Chapter 11: an operator move is a decision too.
+        // An operator move is a decision too.
         self.record_operator_move(&st).await;
         Ok(st)
     }

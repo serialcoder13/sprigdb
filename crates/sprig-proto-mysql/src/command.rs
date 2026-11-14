@@ -1,5 +1,4 @@
-//! Commands (chapter 05, "Command table", "Prepared statements" and "Query
-//! attributes"): [`Command::parse`] decodes a command-phase payload without
+//! Commands: [`Command::parse`] decodes a command-phase payload without
 //! panicking on any input, and [`Command::encode`] builds one for the
 //! backend client.
 //!

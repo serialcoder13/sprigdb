@@ -62,7 +62,7 @@ fn lateral_in_a_view_and_a_procedure() {
     let p = rw(&written).unwrap().unwrap();
     assert!(p.contains("IF x > 0 THEN\n    /*sprig:o:"), "{p}");
     assert!(p.contains("*/SELECT c.name, l.amt FROM c, (SELECT"), "{p}");
-    // R4 round 5 (gaps row 69): the text as written comes back.
+    // The text as written comes back.
     assert_eq!(
         String::from_utf8(restore_original(p.as_bytes()).unwrap()).unwrap(),
         written
@@ -143,7 +143,7 @@ fn others_are_left_alone() {
 
 #[test]
 fn write_targets_of_bodies() {
-    // R4 round 5: what the gateway resolves for chapter 31's collection rule.
+    // What the gateway resolves for the collection write rule.
     let o = LexOptions::mysql84();
     let w = |s: &str| write_targets(s.as_bytes(), &o);
     let n = |d: Option<&str>, t: &str| (d.map(str::to_owned), t.to_owned());

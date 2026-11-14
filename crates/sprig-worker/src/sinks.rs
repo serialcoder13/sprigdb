@@ -126,6 +126,46 @@ impl RlsCatalogs {
             .any(|o| r.tables.contains_key(&sprig_common::ids::ObjectId(*o))))
     }
 
+    /// Chapter 51 (39229, authfix2): why sink owner `owner` can no longer
+    /// read `sources`, from the tenant's catalog (at most 2 s old).
+    pub(crate) async fn owner_lost(
+        &self,
+        tenant: TenantId,
+        owner: u32,
+        sources: &[sprig_sinks::job::OwnerRead],
+        settings: Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)>,
+    ) -> Result<Option<String>> {
+        use sprig_auth::authz::owner::{ReadSource, lost_read};
+        let cat = self.catalog(tenant).await?;
+        let lctn = settings.is_some_and(|(snap, dc)| {
+            cat.settings
+                .resolve(
+                    &snap,
+                    sprig_catalog::ddl::LOWER_CASE_TABLE_NAMES.key,
+                    &cat.settings.ctx(&dc),
+                )
+                .ok()
+                .and_then(|r| r.value.as_f64())
+                == Some(1.0)
+        });
+        let reads: Vec<ReadSource> = sources
+            .iter()
+            .map(|s| match s {
+                sprig_sinks::job::OwnerRead::Named { db, name } => ReadSource::Named {
+                    db: *db,
+                    name: name.clone(),
+                },
+                sprig_sinks::job::OwnerRead::Object(id) => ReadSource::Object(*id),
+            })
+            .collect();
+        Ok(lost_read(
+            &cat,
+            sprig_common::ids::UserId(owner),
+            &reads,
+            lctn,
+        ))
+    }
+
     /// The `@sprig_rls` context of user `user` (chapter 29's JSON, as the
     /// gateway builds it for a session; RL42): what MariaDB's policy views
     /// and write triggers apply while worker-run code of that definer runs.
@@ -300,6 +340,18 @@ impl SinkEnv for SinksEnv {
 
     fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
         Some((self.settings.snapshot(), self.settings.dc().clone()))
+    }
+
+    async fn owner_lost(
+        &self,
+        tenant: TenantId,
+        owner: u32,
+        sources: &[sprig_sinks::job::OwnerRead],
+    ) -> Result<Option<String>> {
+        match &self.rls {
+            Some(r) => r.owner_lost(tenant, owner, sources, self.settings()).await,
+            None => Ok(None),
+        }
     }
 }
 

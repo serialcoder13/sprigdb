@@ -1,12 +1,11 @@
-//! `sprig.v1.Analytics` (chapter 35, "Analytics query"; chapter 37):
-//! dimensional models and their queries over REST
+//! `sprig.v1.Analytics`: dimensional models and their queries over REST
 //! (`/v1/databases/{db}/models[/{model}[:query|:explain|:drill]]`) and gRPC.
 //!
 //! A call opens the caller's own executor session, as the key-value API
-//! does; the work is `sprig-dim`'s. Admission control (chapter 35,
-//! "Admission control"): at most `analytics.max_concurrent_per_tenant` (2)
-//! queries per tenant and `analytics.max_concurrent_per_gateway` (8) per
-//! gateway; a query waits up to 1 s for a slot, then gets 39780.
+//! does; the work is `sprig-dim`'s. Admission control: at most
+//! `analytics.max_concurrent_per_tenant` (2) queries per tenant and
+//! `analytics.max_concurrent_per_gateway` (8) per gateway; a query waits up
+//! to 1 s for a slot, then gets 39780.
 
 use std::sync::Arc;
 
@@ -132,8 +131,8 @@ async fn answer(
     body: &Value,
 ) -> Result<(&'static str, Vec<OutRow>)> {
     let q = Query::parse(body)?;
-    // Live `analytics.*` settings (R6 round 3), at the tenant's and the
-    // database's scopes (R6 round 4).
+    // Live `analytics.*` settings, at the tenant's and the
+    // database's scopes.
     let limits = super::model_settings::analytics_for(engine, caller, database);
     let _admitted =
         super::model_settings::admit(caller.principal.tenant.map_or(0, |t| t.0), limits).await?;
@@ -180,11 +179,11 @@ pub enum Part {
     Error(SprigError),
 }
 
-/// `Analytics.Query` as a stream (chapter 37: gRPC server streaming, REST
-/// NDJSON): the merged answer goes out [`STREAM_BATCH_ROWS`] rows at a
-/// time, each batch turned into JSON or protobuf only when the receiver
-/// takes it. The merge itself holds every group (at most
-/// `analytics.max_groups`), since subtotals need them all.
+/// `Analytics.Query` as a stream (gRPC server streaming, REST NDJSON): the
+/// merged answer goes out [`STREAM_BATCH_ROWS`] rows at a time, each batch
+/// turned into JSON or protobuf only when the receiver takes it. The merge
+/// itself holds every group (at most `analytics.max_groups`), since
+/// subtotals need them all.
 #[must_use]
 pub fn query_stream(
     engine: Arc<SqlEngine>,

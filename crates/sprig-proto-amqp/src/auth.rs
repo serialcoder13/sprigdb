@@ -23,6 +23,10 @@ pub struct ConnInfo {
     /// The verified client certificate's login name (its common name or
     /// distinguished name, per `amqp.cert_login_field`), for `EXTERNAL`.
     pub cert_login: Option<String>,
+    /// That certificate's subject and issuer in MySQL's form
+    /// (`/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER` (authfix2);
+    /// `None` without a verified certificate.
+    pub client_dn: Option<(String, String)>,
 }
 
 /// Who logged in.
@@ -207,6 +211,7 @@ mod tests {
             tls: true,
             sni: None,
             cert_login: cert.map(str::to_owned),
+            client_dn: None,
         }
     }
 

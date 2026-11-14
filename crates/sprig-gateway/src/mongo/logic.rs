@@ -1,8 +1,7 @@
 //! `db.runCommand({sprigCall: "quote", args: [7, 3]})`: logic-layer
-//! functions from MongoDB drivers (chapter 41, "Calling code"; chapter 30;
-//! R7).
+//! functions from MongoDB drivers.
 //!
-//! The command becomes chapter 41's function call statement on the
+//! The command becomes the logic layer's function call statement on the
 //! command's executor session (the connection's own, or the transaction's
 //! for a command inside `startTransaction`), exactly as `Functions.Call`
 //! over HTTP: the session finds the function in the command's database
@@ -14,7 +13,7 @@
 //!
 //! The reply is `{event, result, ok: 1}`, as HTTP's `{event, result}`.
 //! Errors keep their SprigDB codes, except that a validation's 39863 is
-//! MongoDB's 121 `DocumentValidationFailure` (chapter 41, "Errors").
+//! MongoDB's 121 `DocumentValidationFailure`.
 
 use bson::{Bson, Document, doc};
 use serde_json::Value;

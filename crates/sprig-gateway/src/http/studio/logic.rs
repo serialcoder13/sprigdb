@@ -1,6 +1,5 @@
-//! The logic editors' routes (chapter 44 step 26; chapter 37's `Logic`
-//! service, Studio part: `Logic.Compile` and the module views; decision
-//! ST42), for the caller's own tenant.
+//! The logic editors' routes (the `Logic` service's `Logic.Compile` and
+//! the module views), for the caller's own tenant.
 //!
 //! | Route | Does |
 //! |---|---|
@@ -8,7 +7,7 @@
 //! | `GET /v1/databases/{db}/logic/{kind}/{name}` | One module with its versions (tier, placement, state, compiler), the active version's source, its binding and schedule, and, for routine administrators, the generated PL/SQL |
 //! | `GET /v1/databases/{db}/logic/{kind}/{name}/versions/{v}` | One version's source (and PL/SQL for routine administrators) |
 //! | `POST /v1/databases/{db}/logic:compile` | `Logic.Compile`: a dry run of a `CREATE FUNCTION | PROCEDURE ... LANGUAGE ...` declaration against the database's columns: tier, reasons with where they are, lints, cost, tables read and written, the signature, and the PL/SQL for routine administrators. Nothing is recorded or deployed |
-//! | `GET .../{kind}/{name}/rollout` | A function's or procedure's staged rollout (active and candidate versions, share, key) and each version's calls, errors, mean, p95 and latency histogram (R7 follow-ups) |
+//! | `GET .../{kind}/{name}/rollout` | A function's or procedure's staged rollout (active and candidate versions, share, key) and each version's calls, errors, mean, p95 and latency histogram |
 //! | `GET .../{kind}/{name}/logs?after=&limit=` | `Logic.TailLogs`: what the module's triggers and schedules did (`logic_log`), newest first, after an id (Studio polls it) |
 //! | `GET .../{kind}/{name}/deadLetters?state=` | The module's dead letters (`logic_dead_letters` of its binding) |
 //! | `POST .../{kind}/{name}/deadLetters:replay`, `:discard` | `{ids: [..]}` or `{all: true}`: back to the trigger's worker, in order with the active version, or discarded |
@@ -24,8 +23,8 @@
 //! database (or `*.*`, or `SPRIG_TENANT_ADMIN`), as the workload views
 //! decide. Source, PL/SQL, logs and dead letters (which hold row data) need
 //! `ALTER ROUTINE`, `CREATE ROUTINE` or `ALL` on the database or `*.*`, or
-//! `SPRIG_TENANT_ADMIN` (1044 otherwise): chapter 44 shows the generated
-//! PL/SQL "to users with alter routine".
+//! `SPRIG_TENANT_ADMIN` (1044 otherwise): Studio shows the generated PL/SQL
+//! only to users with alter routine.
 
 use std::sync::Arc;
 
@@ -44,7 +43,7 @@ use super::{hdr, invalid, json_response, parse_json, quote_literal, read_body, r
 
 /// Rows of logs and dead letters returned at most.
 const MAX_ROWS: u32 = 500;
-/// `logic.max_loop_iterations`'s default (chapter 41), for dry runs.
+/// `logic.max_loop_iterations`'s default, for dry runs.
 const MAX_LOOP_ITERATIONS: u64 = 100_000;
 /// `logic.compile_max_cost`'s default.
 const COMPILE_MAX_COST: u64 = 100_000;
@@ -348,10 +347,10 @@ async fn show(
     Ok(json_response(200, &out))
 }
 
-/// `GET .../{kind}/{name}/rollout`: the staged rollout (or `null`) and
-/// each version's numbers (R7 follow-ups). Stages change through
-/// statements: `CREATE OR REPLACE ... WITH (SPRIG_ROLLOUT = n)`, `ALTER
-/// ... ROLLOUT TO n | PROMOTE | ABORT`.
+/// `GET .../{kind}/{name}/rollout`: the staged rollout (or `null`) and each
+/// version's numbers. Stages change through statements:
+/// `CREATE OR REPLACE ... WITH (SPRIG_ROLLOUT = n)`,
+/// `ALTER ... ROLLOUT TO n | PROMOTE | ABORT`.
 async fn rollout(
     core: &Arc<Core>,
     caller: &Caller,
@@ -462,9 +461,9 @@ async fn dead_letters(
     let mut rows = st
         .dead_letters(&mut conn, Some(b.binding_id), state, MAX_ROWS)
         .await?;
-    // Chapter 29 (RL39): a trigger's dead letters hold table rows (an
-    // after-commit trigger's images, a change topic's records): hidden
-    // from a caller the table's policies bind.
+    // A trigger's dead letters hold table rows (an after-commit trigger's
+    // images, a change topic's records): hidden from a caller the table's
+    // policies bind.
     let hidden = match table_source(core, caller, &mut conn, &b).await? {
         Some(object) => !unbound(core, caller, object).await,
         None => false,
@@ -522,7 +521,7 @@ async fn table_source(
 }
 
 /// Whether policies on table `object` don't bind the caller (a session of
-/// its own, as search's facets ask; RL39). `false` when it can't tell.
+/// its own, as search's facets ask). `false` when it can't tell.
 async fn unbound(core: &Arc<Core>, caller: &Caller, object: u64) -> bool {
     use sprig_doc::engine::SqlRunner as _;
     // 0: the table isn't known.

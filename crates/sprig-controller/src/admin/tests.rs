@@ -103,8 +103,8 @@ async fn registration_is_refused_with_the_right_codes() {
         code(&a.svc.register_cluster(other).await.unwrap_err()),
         Some(SprigCode::AdminRequestInvalid)
     );
-    // Kubernetes clusters register through the same prechecks (chapter
-    // 27's operator); VM clusters come from their provisioning job.
+    // Kubernetes clusters register through the same prechecks (the
+    // operator's); VM clusters come from their provisioning job.
     let mut vm = request("c");
     vm.provisioner = ProvisionerKind::Vm;
     assert_eq!(
@@ -195,7 +195,7 @@ async fn cluster_calls_on_a_registered_record() {
         p.cluster.record.health.as_ref().unwrap().state,
         sprig_cluster::health::ClusterHealth::Unknown
     );
-    // No shard map names it: drained at once (r2opfix).
+    // No shard map names it: drained at once.
     let d = a.svc.drain_cluster(&id).await.unwrap();
     assert_eq!(d.record.admin_state, AdminState::Drained);
     assert_eq!(
@@ -218,7 +218,7 @@ async fn cluster_calls_on_a_registered_record() {
     );
 }
 
-/// r2opfix: drain waits for the shard maps, retire needs drained, and
+/// Drain waits for the shard maps, retire needs drained, and
 /// `setNodes` replaces the nodes and forgets moved nodes' identities.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]

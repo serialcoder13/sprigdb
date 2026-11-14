@@ -1,5 +1,4 @@
-//! `WITH ROLLUP` with `ORDER BY` and `GROUPING()` on port 3306 (chapter
-//! 28, "`GROUPING()` with `WITH ROLLUP`", build step 9).
+//! `WITH ROLLUP` with `ORDER BY` and `GROUPING()` on port 3306.
 //!
 //! MariaDB 11.8 refuses `ORDER BY` after `WITH ROLLUP` (1221) and has no
 //! `GROUPING()` (MDEV-22269, 1305). MySQL 8.4 has both. Two rewrites:

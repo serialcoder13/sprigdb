@@ -1,24 +1,21 @@
-//! Inherited messaging objects in the gateway (chapter 42, "Inherited
-//! messaging objects (`FOR EACH TENANT`)"; R9): what is shared by the
-//! statements of [`crate::exec`] and the protocol front ends.
+//! Inherited messaging objects (`FOR EACH TENANT`) in the gateway: what is
+//! shared by the statements of [`crate::exec`] and the protocol front ends.
 //!
 //! ```text
 //! chain(T):  T's snapshot, then each ancestor's (root last), each with its
 //!            inherit_msg rows: definitions, overrides, instances
 //! resolve:   the nearest definition of kind db.name whose scope reaches T
-//! instance:  streams::ensure (lazy, on first publish), with the race rule
-//!            of chapter 42 ("Instances: created on first use"), then the
-//!            member's inherited triggers (triggers::ensure_for_stream)
+//! instance:  streams::ensure (lazy, on first publish, with its race rule),
+//!            then the member's inherited triggers (triggers::ensure_for_stream)
 //! index:     inherit-instances/<tenant>/<def tenant>.<def object> in the DC
 //!            tier: every instance of a definition, for SHOW, IMMEDIATE
 //!            drops and (later) broadcasts and fan-in
 //! ```
 //!
-//! **As built.** Definitions have no `objects` row (as streams have none,
-//! r9streams decision 8). A stream instance is an ordinary `streams` row of
-//! the member, created in a versioned catalog change of the member (its
-//! `inherited_instances` row is written before, unversioned), so every
-//! stream reader finds it as before.
+//! **As built.** Definitions have no `objects` row (as streams have none). A
+//! stream instance is an ordinary `streams` row of the member, created in a
+//! versioned catalog change of the member (its `inherited_instances` row is
+//! written before, unversioned), so every stream reader finds it as before.
 
 pub mod broadcast;
 pub mod fanin;
@@ -128,7 +125,7 @@ pub struct DirEntry {
     /// The home data center.
     #[serde(default)]
     pub home_dc: String,
-    /// Chapter 26's block.
+    /// The residency block.
     #[serde(default)]
     pub residency: Value,
 }

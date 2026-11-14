@@ -1,8 +1,7 @@
-//! Pools (chapter 06, "Pools and connections", "Acquire, sync and
-//! release"; build step 2): one pool per [`PoolKey`], idle connections in
-//! LIFO buckets keyed by the digest of their applied state, a limit per
-//! pool and per node, lifetimes and idle timeouts. Connections return
-//! without `COM_RESET_CONNECTION`: sync makes a reset unnecessary.
+//! Pools: one pool per [`PoolKey`], idle connections in LIFO buckets keyed by
+//! the digest of their applied state, a limit per pool and per node,
+//! lifetimes and idle timeouts. Connections return without
+//! `COM_RESET_CONNECTION`: sync makes a reset unnecessary.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -16,7 +15,7 @@ use super::cluster::NodeKey;
 use super::conn::BackendConn;
 use super::state::Baseline;
 
-/// The key of one pool (chapter 06, "Interfaces").
+/// The key of one pool.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PoolKey {
     /// The cluster.
@@ -28,7 +27,7 @@ pub struct PoolKey {
     /// `CLIENT_FOUND_ROWS` changes affected-row counts.
     pub found_rows: bool,
     /// MariaDB extended capability bits the connections negotiate (only
-    /// for 3307 sessions whose client has them, chapter 05).
+    /// for 3307 sessions whose client has them).
     pub mariadb_caps: u64,
 }
 
@@ -154,7 +153,7 @@ struct Inner {
     pools: HashMap<PoolKey, Pool>,
     nodes: HashMap<NodeKey, NodeCount>,
     seq: u64,
-    /// Accounts whose grants changed (chapter 29): connections opened
+    /// Accounts whose grants changed: connections opened
     /// before the instant are closed instead of reused.
     retired: HashMap<String, Instant>,
 }
@@ -328,7 +327,7 @@ impl BackendPools {
                     // A connection the server closed while it sat idle
                     // (KILL CONNECTION, a restart) is never handed out: a
                     // statement sent on it would fail without reaching the
-                    // server (chapter 06, "Failure handling").
+                    // server.
                     if c.conn.age() > limits.max_lifetime
                         || !c.conn.client.is_idle()
                         || c.conn.client.closed_while_idle()
@@ -508,27 +507,25 @@ impl BackendPools {
         close_all(closed);
     }
 
-    /// Retires the connections of backend `account` (chapter 29: its
-    /// grants changed, and MariaDB keeps a connection's database
-    /// privileges until its next `USE`): idle ones close now, leased ones
-    /// on release.
+    /// Retires the connections of backend `account` (its grants changed, and
+    /// MariaDB keeps a connection's database privileges until its next
+    /// `USE`): idle ones close now, leased ones on release.
     pub fn retire_account(&self, account: &str) {
         self.retire_where(|a| a == account);
     }
 
     /// When `account`'s connections were last retired (its grants
     /// changed), if ever: a session pinned to a connection opened earlier
-    /// sends `USE` again (bugfix-64).
+    /// sends `USE` again.
     #[must_use]
     pub fn retired_at(&self, account: &str) -> Option<Instant> {
         self.shared.lock().retired.get(account).copied()
     }
 
-    /// [`Self::retire_account`] for every account `which` names, and
-    /// the pools of those accounts forgotten once nothing is leased from
-    /// them: a deleted tenant's accounts (decision bugfix-29), whose idle
-    /// connections would otherwise stay open until
-    /// `backend.idle_timeout_seconds`.
+    /// [`Self::retire_account`] for every account `which` names, and the
+    /// pools of those accounts forgotten once nothing is leased from them: a
+    /// deleted tenant's accounts, whose idle connections would otherwise stay
+    /// open until `backend.idle_timeout_seconds`.
     pub fn retire_where(&self, which: impl Fn(&str) -> bool) {
         let mut closed = Vec::new();
         {

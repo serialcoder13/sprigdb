@@ -1,10 +1,9 @@
-//! The boundary between the listener manager and the protocol front ends
-//! (chapter 04, "Interfaces").
+//! The boundary between the listener manager and the protocol front ends.
 //!
 //! The listener manager accepts a socket, applies the PROXY header and the
 //! listener's TLS mode, and hands the front end a [`ClientConn`]. Front ends
-//! (MySQL and MariaDB in chapter 05, MongoDB in 30, Redis in 40, HTTP in 37)
-//! implement [`Frontend`].
+//! (MySQL and MariaDB, MongoDB, Redis, HTTP, Bolt, Kafka and AMQP) implement
+//! [`Frontend`].
 
 use std::fmt;
 use std::io;
@@ -31,17 +30,17 @@ pub enum Protocol {
     MySql84,
     /// MariaDB persona, 3307.
     MariaDb,
-    /// MongoDB, 27017 (R5).
+    /// MongoDB, 27017.
     Mongo,
-    /// RESP2 and RESP3, 6379 (R6).
+    /// RESP2 and RESP3, 6379.
     Redis,
     /// REST and gRPC, 8080 and 8443.
     Http,
-    /// Bolt for Neo4j drivers, 7687 (R8).
+    /// Bolt for Neo4j drivers, 7687.
     Bolt,
-    /// Kafka protocol, 9092 (R9).
+    /// Kafka protocol, 9092.
     Kafka,
-    /// AMQP 0-9-1 and 1.0, 5672 and 5671 (R9).
+    /// AMQP 0-9-1 and 1.0, 5672 and 5671.
     Amqp,
 }
 
@@ -58,8 +57,7 @@ impl Protocol {
     /// current statement or transaction) when its listener is made stricter.
     /// The listener manager then waits twice `listener.drain_seconds` before
     /// forcing the older generation's connections closed, so the safe-point
-    /// close at `drain_seconds` gets its chance first (chapter 04, "Live
-    /// listener changes").
+    /// close at `drain_seconds` gets its chance first.
     #[must_use]
     pub const fn closes_at_safe_points(self) -> bool {
         matches!(self, Protocol::MySql84 | Protocol::MariaDb | Protocol::Http)
@@ -87,22 +85,21 @@ impl fmt::Display for Protocol {
     }
 }
 
-/// What every front end shares. Chapter 04 lists the full set (settings,
-/// `MetaStore`, catalogs, auth, logic, executor, backends, limits,
-/// sessions); fields arrive with the build steps that implement them.
+/// What every front end shares: the clock, the sessions, and (when built
+/// with them) the backends, peers and limits.
 #[non_exhaustive]
 pub struct GatewayContext {
     /// The clock every component reads time through.
     pub clock: Arc<dyn Clock>,
     /// Every open session: connection ids, `SHOW PROCESSLIST`, `KILL`.
     pub sessions: Arc<SessionTable>,
-    /// Backend pools, routing and read-your-writes (chapter 06); `None`
+    /// Backend pools, routing and read-your-writes; `None`
     /// in contexts built without them (tests of the listener layer).
     pub backends: Option<Arc<crate::backend::Backends>>,
-    /// The other gateways of the DC, through the peer service (chapter 04
-    /// step 10): cross-gateway `KILL`. `None` without registration.
+    /// The other gateways of the DC, through the peer service:
+    /// cross-gateway `KILL`. `None` without registration.
     pub peers: Option<Arc<crate::peer::Peers>>,
-    /// Connection, admission and memory limits (chapter 04 step 7); `None`
+    /// Connection, admission and memory limits; `None`
     /// for no limits (tests of the listener layer).
     pub limits: Option<Arc<crate::limits::Limiter>>,
 }
@@ -170,7 +167,7 @@ pub trait Frontend: Send + Sync + 'static {
 }
 
 /// TLS the front end negotiates inside its own protocol, after the
-/// greeting. Only the MySQL family does this (`CLIENT_SSL`, chapter 05);
+/// greeting. Only the MySQL family does this (`CLIENT_SSL`);
 /// every other listener has finished TLS before the front end runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InProtocolTls {
@@ -278,8 +275,8 @@ pub struct TlsInfo {
     pub cipher: &'static str,
     /// The server name the client asked for, if any.
     pub sni: Option<String>,
-    /// The client presented a certificate the listener verified (chapter
-    /// 14's `REQUIRE X509`).
+    /// The client presented a certificate the listener verified (for
+    /// `REQUIRE X509`).
     pub client_cert: bool,
     /// That certificate's subject and issuer (`REQUIRE SUBJECT`, `ISSUER`).
     pub client_dn: Option<sprig_auth::mysql::ClientDn>,
@@ -288,8 +285,7 @@ pub struct TlsInfo {
 /// What a connection runs over now: plaintext or a TLS version. Set by the
 /// listener after its TLS handshake and by [`ClientConn::start_tls`] after
 /// an in-protocol one; read when a listener is made stricter, to keep the
-/// connections that already meet the new spec (chapter 04, "Live listener
-/// changes").
+/// connections that already meet the new spec.
 #[derive(Debug, Default)]
 pub struct ConnTransport(AtomicU8);
 

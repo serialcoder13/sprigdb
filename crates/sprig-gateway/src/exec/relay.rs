@@ -1,11 +1,10 @@
-//! The relay engine (chapter 05, "Resultsets: relay and rewrite"; build
-//! step 7): streams one backend response into the client's sink.
+//! The relay engine: streams one backend response into the client's sink.
 //!
 //! - **Rows** pass through as the backend's bytes ([`ResultSink::raw_row`]):
 //!   text and binary rows don't depend on capabilities.
 //! - **Column definitions** pass through unchanged when the client and the
 //!   backend connection encode them alike (MariaDB extended metadata on
-//!   both or neither, which the pool key guarantees in M0.2); otherwise
+//!   both or neither, which the pool key guarantees); otherwise
 //!   they are decoded with the backend's capabilities and re-encoded for
 //!   the client's (extended metadata stripped on 3306).
 //! - **Terminators** become EOF or the OK form, whichever the client's
@@ -78,8 +77,7 @@ pub(crate) struct Relay<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConnStatus {
     vars: Vec<(&'static str, String)>,
-    /// 3306's `SHOW VARIABLES`: `collation_*` values in MySQL's names
-    /// (chapter 28, R4 round 3; gaps row 60).
+    /// 3306's `SHOW VARIABLES`: `collation_*` values in MySQL's names.
     mysql_collations: bool,
 }
 
@@ -142,14 +140,13 @@ impl ConnStatus {
         }
     }
 
-    /// More rows to rewrite (the session's own counters, gaps row 46).
+    /// More rows to rewrite (the session's own counters).
     pub(crate) fn with_rows(mut self, rows: Vec<(&'static str, String)>) -> Self {
         self.vars.extend(rows);
         self
     }
 
-    /// The rows, by name (3306's `performance_schema.session_status`, R4
-    /// round 4).
+    /// The rows, by name (3306's `performance_schema.session_status`).
     pub(crate) fn into_rows(self) -> Vec<(&'static str, String)> {
         self.vars
     }
@@ -195,7 +192,7 @@ pub(crate) struct Infile<'a> {
     pub allowed: bool,
 }
 
-/// Chapter 07's output mapping for one response (tenant sessions): column
+/// The name layer's output mapping for one response (tenant sessions): column
 /// definitions through the statement's [`ResultMapper`], rows through it
 /// when it needs them (else relayed as bytes), and physical names in
 /// errors, `OK` schema changes and messages mapped back to logical ones.
@@ -280,7 +277,7 @@ pub(crate) fn map_error(mut e: SprigError, ctx: &OutputCtx<'_>) -> SprigError {
     if let std::borrow::Cow::Owned(m) = map_message(&e.message, ctx) {
         e.message = m;
     }
-    // Chapter 41: a validation's CHECK failure is 39863 (R7 order 3).
+    // A validation's CHECK failure is 39863.
     sprig_logic::triggers::map_check_error(e)
 }
 
@@ -367,7 +364,7 @@ fn decode_defs(defs: &[Bytes], caps: Caps, renames: &[Renamed]) -> Result<Vec<Co
 }
 
 /// Column definitions as a MySQL 8.4 client gets them: JSON as type 245
-/// (chapter 28, [`sprig_sql::compat::meta`]).
+/// ([`sprig_sql::compat::meta`]).
 fn mysql_defs(cols: &mut [ColumnDef]) {
     for c in cols {
         sprig_sql::compat::meta::mysql_column(c);
@@ -481,7 +478,7 @@ pub(crate) async fn relay(
                         RowFormat::Text => {
                             let mut rows = Vec::new();
                             // A large row is decoded off the worker
-                            // thread (chapter 04, "Large statements").
+                            // thread.
                             crate::offload::cpu(p.payload.len(), || {
                                 n.mapper
                                     .row_packet(&p.payload, cols.len(), &n.ctx, &mut rows)

@@ -1,13 +1,11 @@
-//! `sprig.v1.Vectors` (chapter 34, "Vectors API"; chapter 37): standalone
-//! vector indexes over REST (`/v1/databases/{db}/vectorIndexes...`) and
-//! gRPC.
+//! `sprig.v1.Vectors`: standalone vector indexes over REST
+//! (`/v1/databases/{db}/vectorIndexes...`) and gRPC.
 //!
 //! A call opens the caller's own executor session, as the key-value API
 //! does, so privileges, name virtualization and the router apply; the
 //! work is `sprig-vector`'s. An `ann_mode = auto` index gets its HNSW graph
 //! in the background once it holds `vector.ann_min_rows` rows, kept only
-//! when its recall at 10 reaches `vector.min_recall` (chapter 34,
-//! "Automatic vector indexes").
+//! when its recall at 10 reaches `vector.min_recall`.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -140,7 +138,7 @@ fn building() -> &'static Mutex<HashSet<String>> {
     B.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// What chapter 52's gate said about an automatic graph.
+/// What the recommendations gate said about an automatic graph.
 enum AnnGate {
     /// Build it; report with the ticket when an item tracks it.
     Go(Option<Value>),
@@ -155,7 +153,7 @@ fn next_ask() -> &'static Mutex<std::collections::HashMap<String, std::time::Ins
     N.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Chapter 52 for `vector.auto_ann`: `on` builds as before; `off` never;
+/// The recommendations gate for `vector.auto_ann`: `on` builds as before; `off` never;
 /// `approve` and `recommend` ask the controller's gate once the index is
 /// due (`vector.ann_min_rows`), at most once a minute per index while it
 /// waits. Unreachable approvals hold the graph.
@@ -270,15 +268,15 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
     };
     let mut def = def.clone();
     let settings = super::model_settings::vector_for(engine, caller, &def.database);
-    // Chapter 52: `vector.auto_ann` holds the graph for an approval.
+    // `vector.auto_ann` holds the graph for an approval.
     let mode = super::model_settings::vector_auto_ann(engine, caller, &def.database);
     let tenant = caller.principal.tenant;
     let (engine, caller) = (Arc::clone(engine), caller.clone());
     tokio::spawn(async move {
         // `on` builds at once: once the index is due, read the mode again
         // from a catalog at least as new as the directory's, so an
-        // `approve` set a moment ago holds the graph (approvals round 3).
-        // Not due yet: nothing to build; the next write asks again.
+        // `approve` set a moment ago holds the graph. Not due yet: nothing
+        // to build; the next write asks again.
         let mode = if mode == "on" {
             if index::rows(&mut sql, &def)
                 .await
@@ -358,8 +356,8 @@ pub async fn call(
 ) -> Result<Value> {
     let database = s(body, "database");
     let name = s(body, "index");
-    // Live `vector.*` settings (R6 round 3), at the tenant's and the
-    // database's scopes (R6 round 4).
+    // Live `vector.*` settings, at the tenant's and the
+    // database's scopes.
     let settings = super::model_settings::vector_for(engine, caller, &database);
     let mut sql = open(engine, caller)?;
     match rpc {

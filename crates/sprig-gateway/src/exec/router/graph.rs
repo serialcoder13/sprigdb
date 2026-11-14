@@ -1,12 +1,11 @@
-//! `GRAPH_TABLE` in the router path (chapter 17's `Plan::Graph`, chapter
-//! 43; R8 round 6, decision G52).
+//! `GRAPH_TABLE` in the router path (the router's `Plan::Graph`).
 //!
 //! ```text
 //! tenant_text (before the pipeline, exec/graph_ddl.rs):
 //!   a single SELECT (or EXPLAIN FORMAT=SPRIG SELECT) with GRAPH_TABLE
 //!     → its calls kept here (Pending), each replaced by a placeholder
-//!   other statements → their rows bound before the pipeline, as round 3 did
-//! routed (after chapter 07's rewrite and the rest of the pipeline):
+//!   other statements → their rows bound before the pipeline
+//! routed (after the name rewrite and the rest of the pipeline):
 //!   the text holds this statement's placeholders:
 //!     each call's graph resolved: its shards (the router's map cache) and
 //!       the executor's EXPLAIN lines (tiers)
@@ -74,7 +73,7 @@ fn lit(v: &sprig_graph::value::Value) -> GraphLit {
 }
 
 /// A prepared statement's value as a Cypher literal, for a `?` inside a
-/// `GRAPH_TABLE` call (R8 round 7, G63): numbers as numbers, text as a
+/// `GRAPH_TABLE` call: numbers as numbers, text as a
 /// quoted string, dates and times as their text; a value Cypher can't
 /// write (NaN, infinity, bytes that aren't UTF-8) is refused.
 ///
@@ -141,7 +140,7 @@ fn step(call: usize, g: &crate::graphs::GraphRef, cypher: &str) -> GraphStep {
     let mut tiers = sprig_graph::parser::parse(cypher)
         .map(|q| sprig_graph::exec::explain(&q))
         .unwrap_or_default();
-    // R8 round 8 (G69): the call's hops are router routes over this group.
+    // The call's hops are router routes over this group.
     tiers.extend(sprig_router::graph_route::explain_lines(
         &g.shards.group(),
         g.shards.mirror_async,
@@ -315,7 +314,7 @@ impl PassSession {
                 metrics::counter!("sprig_router_statements_total", "plan" => "graph").increment(1);
                 let mut rows = Vec::with_capacity(g.calls.len());
                 let mut bytes = 0usize;
-                // R8 round 7 (G62): past the inline limit, a statement
+                // Past the inline limit, a statement
                 // that reads no distributed table (it runs on this
                 // session's connection) takes its rows from temporary
                 // tables there instead of its text.
@@ -331,7 +330,7 @@ impl PassSession {
                     && tmp_schema.is_some();
                 for (i, (c, db)) in g.calls.iter().zip(&dbs).enumerate() {
                     // The outer statement's filters on the call's columns
-                    // run in the graph (R8 round 7, G61).
+                    // run in the graph.
                     let cypher = g.cypher(i);
                     if g.filters.get(i).is_some_and(|f| !f.is_empty()) {
                         metrics::counter!("sprig_router_graph_filters_pushed_total").increment(1);
@@ -415,19 +414,19 @@ impl PassSession {
 }
 
 /// Rows per `INSERT` into a graph statement's temporary table: at most
-/// this many bytes of SQL text (R8 round 7, G62).
+/// this many bytes of SQL text.
 const GRAPH_TMP_CHUNK: usize = 1 << 20;
 
 impl PassSession {
     /// Runs `sql` on the session's own connection (a graph statement's
-    /// temporary table, G62).
+    /// temporary table).
     async fn graph_tmp_run(&mut self, cx: &mut ExecCtx<'_>, sql: &str) -> Result<()> {
         let bs = self.bs(cx);
         super::backend::run_on(bs, sql, &mut sprig_router::Budget::mb(64)).await?;
         Ok(())
     }
 
-    /// Drops the last graph statement's temporary tables (G62).
+    /// Drops the last graph statement's temporary tables.
     async fn graph_tmp_drop(&mut self, cx: &mut ExecCtx<'_>) {
         let names = std::mem::take(&mut self.router.graph_tmp);
         if names.is_empty() {

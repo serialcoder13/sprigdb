@@ -1,4 +1,4 @@
-//! The `auto_index` loop's validation step (chapter 13 build steps 7-9):
+//! The `auto_index` loop's validation step:
 //! [`SampleValidation`] turns a `validating` row into a validation plan
 //! and runs the cluster's validator.
 //!
@@ -15,7 +15,7 @@
 //!   method     := method_for(derived.validation, any target sample)
 //!                 replica:          the first replica
 //!                 galera_rsu:       the first node that isn't the writer
-//!                 estimate_canary:  the writer (R0: the tenant's only shard)
+//!                 estimate_canary:  the writer
 //!   reports    := validate_with_covering_retry
 //!   each report → an auto_index_validations row
 //!   accepted                       → Accepted (the loop rolls it out)
@@ -27,18 +27,18 @@
 //!                                    a canary kept for observation → Accepted
 //! ```
 //!
-//! **Node marking (R0).** Chapter 06's read routing has no "validating"
-//! mark yet and a Galera writer weight is set by hand, so the controller's
-//! [`LogMarker`] only logs. That is safe in R0: a replica or Galera node
-//! under validation carries an extra index only on that node, with the
-//! binary log off, and gateways send R0 sessions to the cluster's writer,
-//! which is never chosen as the validation node.
+//! **Node marking.** The gateways' read routing has no "validating" mark
+//! yet and a Galera writer weight is set by hand, so the controller's
+//! [`LogMarker`] only logs. That is safe while gateways send sessions to
+//! the cluster's writer: a replica or Galera node under validation carries
+//! an extra index only on that node, with the binary log off, and the
+//! writer is never chosen as the validation node.
 //!
 //! **Canary.** On a single node the canary is the tenant's only shard, so a
 //! kept canary *is* the rollout: the row is accepted (the validation row
 //! records `accepted`, its reason says the canary is kept) and the observer
-//! watches it for `observe_days`, which covers chapter 13's
-//! `canary_hours` observation in R0.
+//! watches it for `observe_days`, which also covers the canary's
+//! `canary_hours` observation.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -68,7 +68,7 @@ use sprig_workload::keyring::TenantKeyring;
 use crate::autoindex_loop::{ObjectEnv, Validated, ValidationHook};
 use crate::autoindex_workload::{name_map, statements, tenant_catalog};
 
-/// A [`NodeMarker`] that only logs (R0; module docs).
+/// A [`NodeMarker`] that only logs (see the module docs).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogMarker;
 
@@ -211,7 +211,7 @@ fn validator(
                 replicas.first().ok_or_else(no_node)?.clone(),
                 Arc::clone(marker),
             )
-            // bugfix-61: a cut-off validation's leftover is dropped first.
+            // A cut-off validation's leftover is dropped first.
             .with_writer(writer.clone()),
         ),
         (Method::GaleraRsu, Nodes::Galera { nodes, writer }) => {
@@ -225,7 +225,7 @@ fn validator(
                 .cloned()
                 .collect();
             let mut v = RsuValidator::new(node.clone(), peers, Arc::clone(marker));
-            // bugfix-61: a cut-off validation's leftover is dropped first.
+            // A cut-off validation's leftover is dropped first.
             if let Some(w) = nodes.iter().find(|n| &n.node == writer) {
                 v = v.with_writer(w.clone());
             }
@@ -278,7 +278,7 @@ impl ValidationHook for SampleValidation {
         let store = AutoIndexStore::of(&ep.store);
         // One short catalog connection at a time: the catalog snapshot and
         // the samples below take their own, and the validation itself can
-        // run for minutes (the R0 catalog-connection deadlock).
+        // run for minutes (holding one would deadlock the catalog pool).
         let cand_row = {
             let mut q = crate::catalogs::acquire(&ep.pool, "auto_index validation").await?;
             store.candidate(&mut q, row.candidate_id).await?

@@ -24,7 +24,7 @@ Commands:
   stream     Event streams
   queue      Queues
   top        Live dashboards; --once prints one poll
-  approvals  The approvals inbox
+  approvals  The approvals inbox: recommendations waiting for a decision
   admin      Every sprigctl command: sprig admin <sprigctl arguments>
   help       Print this message or the help of the given subcommand(s)
 
@@ -450,7 +450,7 @@ Options:
 ### `sprig approvals`
 
 ```text
-The approvals inbox
+The approvals inbox: recommendations waiting for a decision
 
 Usage: sprig approvals [OPTIONS] <COMMAND>
 
@@ -629,8 +629,6 @@ Commands:
   whoami           Who the Admin API takes you for
   operator         Named platform and DC operators
   token            Tokens you issue for scripts and services
-  feed             Change feeds
-  import           Copy data and index definitions from a live source
   help             Print this message or the help of the given subcommand(s)
 
 Options:

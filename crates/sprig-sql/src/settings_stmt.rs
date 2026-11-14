@@ -1,5 +1,4 @@
-//! Settings in SQL (chapter 08, "Interfaces" and "Setting a value"; build
-//! step 8): parsing `SPRIG SET`, `RESET`, `BOUNDS` and `SHOW SPRIG
+//! Settings in SQL: parsing `SPRIG SET`, `RESET`, `BOUNDS` and `SHOW SPRIG
 //! SETTINGS`, including `ALTER TENANT <name>` for descendants.
 //!
 //! ```sql
@@ -38,8 +37,8 @@
 //! its key's type ([`parse_value`]) and writes through the catalog's
 //! `TenantSettingsWriter`.
 //!
-//! Not yet: `ALTER FUNCTION f SPRIG SET` (logic functions, chapter 41,
-//! R7) fails with 39051.
+//! Not yet: `ALTER FUNCTION f SPRIG SET` (logic functions)
+//! fails with 39051.
 
 use sprig_settings::{AnySetting, Value, ValueKind};
 
@@ -84,7 +83,7 @@ impl Literal {
 }
 
 /// The bounds one item of `SET BOUNDS` names; parts it doesn't name are
-/// kept (chapter 08, "Bounds changes").
+/// kept.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BoundsSpec {
     /// `MIN n`.
@@ -429,12 +428,12 @@ fn is_settings(sql: &[u8], toks: &[&Token]) -> bool {
         })
     };
     // `SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION` and `SHOW SPRIG
-    // RECOMMENDATIONS` are chapter 52's (`rec_stmt`).
+    // RECOMMENDATIONS` belong to `rec_stmt`.
     if crate::rec_stmt::is_rec(sql, toks) {
         return false;
     }
     if w(0, "SPRIG") {
-        // `SPRIG PIN`, `UNPIN` and `SHOW` are chapter 16's (`pin_stmt`).
+        // `SPRIG PIN`, `UNPIN` and `SHOW` belong to `pin_stmt`.
         return !(w(1, "PIN") || w(1, "UNPIN") || w(1, "SHOW"));
     }
     if w(0, "SHOW") && w(1, "SPRIG") {

@@ -1,5 +1,6 @@
 # SprigDB operational alerts: replication lag, stuck data movement, metadata propagation,
-# the audit pipeline, certificates, etcd, cluster health and thrashing.
+# the audit pipeline, certificates, etcd, cluster health, stream sequencers
+# and thrashing.
 # Tested with `promtool test rules` (deploy/alerts/test.sh).
 groups:
   - name: sprig-replication
@@ -147,6 +148,18 @@ groups:
         annotations:
           summary: Trace spans are being dropped (collector down or too slow)
           runbook: "The trace collector is down or too slow: check telemetry.otlp_endpoint and the collector"
+
+  - name: sprig-streams
+    rules:
+      # Each worker exports how many of its stream sequencers are further
+      # behind than stream.sequencer_lag_alert_seconds (decision r9-132).
+      - alert: SprigStreamSequencersLagging
+        expr: max by (instance) (sprig_stream_sequencers_lagging) > 0
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: Stream sequencers on a worker stay behind their feed
+          runbook: "The Admin API's GET /admin/v1/jobs?kind=stream_sequencer shows each sequencer's lag_ms in its progress; check the worker's load and logs, the tenant's cluster (binlog reader, slow appends) and sprig_stream_sequencer_lag_max_seconds"
 
   - name: sprig-thrash
     rules:

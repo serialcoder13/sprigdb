@@ -64,7 +64,7 @@ fn method_per_topology() {
         BuildMethod::CopySwap
     );
 
-    // The M0.4 default: TOI for small tables, a recommendation above.
+    // The default: TOI for small tables, a recommendation above.
     assert_eq!(p.switch, GaleraSwitch::ToiOnly);
     let g = view(galera(3), DdlMethod::CopySwap);
     assert_eq!(

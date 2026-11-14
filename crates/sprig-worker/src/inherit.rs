@@ -262,6 +262,9 @@ fn spawn_tail(
                 }
             },
         };
+        // Read in a task of its own; the only race is with the stop, which
+        // drops the tail for good: the next run resumes from the last
+        // acknowledged token (cancel-safe as it is; decision r9-131).
         loop {
             let item = tokio::select! {
                 () = stop.cancelled() => return,
@@ -564,7 +567,11 @@ impl LiveEnv {
         pools: Arc<dyn ClusterPools>,
         clusters: Arc<RegistryClusters>,
     ) -> Result<Self> {
-        let ext: Vec<Arc<dyn CatalogExtension>> = vec![Arc::new(sprig_inherit::InheritExtension)];
+        // The types too: child tenants' record hierarchies (decision T28).
+        let ext: Vec<Arc<dyn CatalogExtension>> = vec![
+            Arc::new(sprig_inherit::InheritExtension),
+            Arc::new(sprig_inherit::TypesExtension),
+        ];
         let source = MariaSource::new(Arc::clone(&locator) as Arc<dyn CatalogLocator>, ext)?;
         Ok(Self {
             dc,

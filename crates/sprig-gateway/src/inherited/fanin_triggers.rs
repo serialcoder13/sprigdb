@@ -1,7 +1,6 @@
-//! Fan-in triggers (chapter 41, "Fan-in triggers"; chapter 42, "Fan-in";
-//! R9, r9next): `CREATE TRIGGER g ON STREAM s FAN IN` in tenant P runs once,
-//! in P, with P's definer, over every member instance of the inherited
-//! stream `s` below P.
+//! Fan-in triggers: `CREATE TRIGGER g ON STREAM s FAN IN` in tenant P runs once,
+//! in P, with P's definer, over every member instance of the inherited stream
+//! `s` below P.
 //!
 //! ```text
 //! declare (P, binding b, definition D):

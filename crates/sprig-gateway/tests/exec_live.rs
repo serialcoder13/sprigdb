@@ -1,5 +1,4 @@
-//! The pass-through executor end to end (decision D3; chapter 05 build
-//! steps 7-9): real clients through a running gateway against each Compose
+//! The pass-through executor end to end: real clients through a running gateway against each Compose
 //! topology. Start the gateway first, then:
 //!
 //! ```sh
@@ -241,8 +240,8 @@ async fn text_and_binary_results_match_the_backend() {
             );
             // Column metadata: names, types and flags as the server sent them,
             // except that port 3306 reports a JSON column as MySQL 8.4 does:
-            // type 245 (MYSQL_TYPE_JSON), `BLOB BINARY` (chapter 28, "Output
-            // on port 3306"); MariaDB sends a BLOB.
+            // type 245 (MYSQL_TYPE_JSON), `BLOB BINARY`; MariaDB sends a
+            // BLOB.
             let cols = |rows: &[Row]| {
                 rows[0]
                     .columns_ref()
@@ -300,7 +299,7 @@ const BIG_PACKET: u64 = 64 << 20;
 /// with, so one the gateway pooled before the test raised the global is
 /// killed (from `side`, on its own server) and the session tries again:
 /// the gateway discards a connection the server closed while it was idle
-/// (chapter 06, "Failure handling") and opens a new one.
+/// and opens a new one.
 async fn begin_with_big_packet(c: &mut Conn, side: &mut [Conn]) {
     let mut ids = Vec::new();
     for s in side.iter_mut() {
@@ -1177,7 +1176,7 @@ async fn bulk_execute_on_mariadb() {
     }
 }
 
-/// Decision D9: a `REPEATABLE READ` update of a row another transaction
+/// A `REPEATABLE READ` update of a row another transaction
 /// changed after the snapshot succeeds on 3306 (MySQL has no snapshot
 /// isolation check) and fails with 1020 on 3307 (MariaDB's default); a 3306
 /// session can ask for MariaDB's behaviour, and keeps it across pooled

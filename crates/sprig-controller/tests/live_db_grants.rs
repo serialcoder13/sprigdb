@@ -1,4 +1,4 @@
-//! bugfix-19 and bugfix-20 (decisions/bugfix-interim.md): backend grants
+//! Backend grants
 //! follow every schema of a database, and gathered and analytic reads
 //! work for a user who may only `SELECT`.
 //!
@@ -466,7 +466,7 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
             t.ok, t.errors, t.first
         );
         // 1205: the gateway's fence wait running out while the data kept
-        // moving (H3); drivers retry it. Anything else is a failure.
+        // moving; drivers retry it. Anything else is a failure.
         for (k, v) in &t.errors {
             if k != "1205" {
                 failed.push(format!("db.* user: {v} x {k}: {}", t.first[k]));

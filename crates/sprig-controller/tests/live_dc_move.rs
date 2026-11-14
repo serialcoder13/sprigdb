@@ -1,5 +1,4 @@
-//! A tenant moves between two simulated data centers under load (chapter
-//! 24 build step 6; milestone M0.7's first done-when).
+//! A tenant moves between two simulated data centers under load.
 //!
 //! ```sh
 //! cargo build -p sprigdb -p sprigctl
@@ -14,7 +13,7 @@
 //! back. (The cluster it left keeps the fenced source for
 //! `mover.source_retain_hours`, so a move back picks another cluster:
 //! the bed has two in mum1.) Probe
-//! sessions opened before each move check what chapter 24 promises:
+//! sessions opened before each move check what a move promises:
 //! an idle session with a variable, a default database and a prepared
 //! statement follows transparently; one holding a temporary table gets
 //! 39502 (or 39033) and must reconnect. Afterwards every acknowledged

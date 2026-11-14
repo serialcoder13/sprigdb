@@ -1,5 +1,4 @@
-//! Atlas's search index commands on collections (chapter 34, "MongoDB
-//! `$vectorSearch`"; R6 round 3): `createSearchIndexes`,
+//! Atlas's search index commands on collections: `createSearchIndexes`,
 //! `updateSearchIndex` and `dropSearchIndex`, for indexes of type
 //! `vectorSearch`. `$listSearchIndexes` and `$vectorSearch` are
 //! aggregation stages the document engine runs.

@@ -1,5 +1,4 @@
-//! Identifier newtypes (chapter 03, "Identifiers"; sizes per the writing
-//! guide, 12.12).
+//! Identifier newtypes.
 //!
 //! Two kinds of id can't be mixed up, and each has one textual form, used in
 //! names, logs and etcd keys: `Display` writes it and `FromStr` reads it back.
@@ -105,11 +104,11 @@ numeric_id! {
 }
 numeric_id! {
     /// A client connection within a DC. Only 32 bits because MySQL's wire
-    /// format fixes the connection id at 32 bits (chapter 04).
+    /// format fixes the connection id at 32 bits.
     ConnId(u32)
 }
 
-/// Checks a data-center id against `[a-z][a-z0-9-]{1,31}` (chapters 03 and 23):
+/// Checks a data-center id against `[a-z][a-z0-9-]{1,31}`:
 /// 2 to 32 characters, starting with a letter.
 fn check_dc_id(s: &str) -> Result<(), IdParseError> {
     check_slug("DcId", s, 32)?;
@@ -246,7 +245,7 @@ impl FromStr for JobId {
 }
 
 /// A distributed transaction: 16 bytes, the issuing gateway's id plus a
-/// monotonic counter (chapter 18). Global; used as the XA `gtrid`. Textual
+/// monotonic counter. Global; used as the XA `gtrid`. Textual
 /// form: 32 lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -282,7 +281,7 @@ impl FromStr for TxnId {
     }
 }
 
-/// A statement fingerprint: `xxh3_64` of the normalized text (chapter 12).
+/// A statement fingerprint: `xxh3_64` of the normalized text.
 /// Within a tenant. Textual form: 16 lowercase hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

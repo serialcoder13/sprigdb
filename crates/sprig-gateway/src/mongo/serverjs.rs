@@ -1,5 +1,4 @@
-//! Server-side JavaScript for MongoDB commands (chapter 30, "Server-side
-//! JavaScript"; decisions S110–S113): the scope [`sprig_doc::serverjs`]
+//! Server-side JavaScript for MongoDB commands: the scope [`sprig_doc::serverjs`]
 //! runs `$where`, `$function` and `$accumulator` in, on SprigDB's QuickJS
 //! (`sprig_logic_js::mongo`).
 //!
@@ -82,7 +81,7 @@ pub(crate) fn scope_for(
         ) && sprig_doc::serverjs::mentions_js(body));
     let tenants = c.shared.d.tenants.clone();
     let tenant = c.sql.as_ref().map(SqlRunner::tenant).filter(|t| *t != 0);
-    // The command's maxTimeMS bounds its code too (bugfix-57); a getMore's
+    // The command's maxTimeMS bounds its code too; a getMore's
     // is its wait for a tailable cursor, not a time limit.
     let max_time_ms = (name != "getMore").then(|| max_time_ms(body)).flatten();
     async move {

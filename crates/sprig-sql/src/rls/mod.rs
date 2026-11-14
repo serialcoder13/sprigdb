@@ -1,5 +1,4 @@
-//! Row-level security for SQL (chapter 29, "Row-level security"; build
-//! steps 21 to 23, the gateway's side):
+//! Row-level security for SQL, the gateway's side:
 //!
 //! - [`stmt`]: `CREATE`, `ALTER`, `DROP` and `SHOW [CREATE] POLICY`,
 //!   `ALTER TABLE ... ROW LEVEL SECURITY`;

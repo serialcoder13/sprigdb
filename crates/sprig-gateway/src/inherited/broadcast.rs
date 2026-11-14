@@ -1,5 +1,4 @@
-//! Broadcast: one publish for every member (chapter 42, "Broadcast: one
-//! publish for every member"):
+//! Broadcast: one publish for every member:
 //!
 //! ```text
 //! publish_broadcast(P, definition D, record r, form):
@@ -726,8 +725,8 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
     let acat = match catalog(svc, def_key.tenant).await {
         Ok(c) => c,
         Err(e) => {
-            // A deleted declarer (bugfix-46): its catalog and its
-            // definitions are gone, and so are its members (39362).
+            // A deleted declarer: its catalog and its definitions are gone,
+            // and so are its members (39362).
             if super::dir_entry(svc, def_key.tenant).await?.is_none() {
                 tracing::info!(def = %def_key, "broadcast log unlisted: the declarer is deleted");
                 unlist(svc, def_key).await?;
@@ -739,7 +738,7 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
     let Some(def) = super::state_of(&acat).def_by_id(def_key.object).cloned() else {
         // The definition is gone (its drop finished): unlisted once it
         // has been missing for a while, so a snapshot a moment behind a
-        // new definition never unlists its log (bugfix-46).
+        // new definition never unlists its log.
         if missing_long(def_key) {
             tracing::info!(def = %def_key, "broadcast log unlisted: the definition is gone");
             unlist(svc, def_key).await?;
@@ -1222,7 +1221,7 @@ pub async fn show(svc: &Arc<TenantServices>, def: &Definition) -> Result<Vec<Sho
 }
 
 /// How long a listed definition must be missing from its declarer's
-/// catalog before its log is unlisted (bugfix-46).
+/// catalog before its log is unlisted.
 const MISSING_FOR: Duration = Duration::from_secs(60);
 
 fn missing() -> &'static Mutex<std::collections::HashMap<DefKey, Instant>> {
@@ -1236,8 +1235,8 @@ fn missing_long(def: DefKey) -> bool {
     m.entry(def).or_insert_with(Instant::now).elapsed() >= MISSING_FOR
 }
 
-/// Removes `inherit-bcast/<def>` (bugfix-46: a deleted declarer's, or a
-/// dropped definition's, were listed for ever and looked at every 2 s by
+/// Removes `inherit-bcast/<def>` (otherwise a deleted declarer's, or a dropped
+/// definition's, would stay listed for ever and be looked at every 2 s by
 /// every gateway). The log's tables stay in the declarer's database and go
 /// with it.
 async fn unlist(svc: &TenantServices, def: DefKey) -> Result<()> {

@@ -1,4 +1,4 @@
-//! The MariaDB side of DC failover in the controller role (chapter 25):
+//! The MariaDB side of DC failover in the controller role:
 //! what the libraries leave to the deployment.
 //!
 //! - [`ClusterHooks`]: promotion's data-path steps 2 and 4 for standbys
@@ -15,14 +15,14 @@
 //!
 //! Two kinds of standby are promoted here:
 //!
-//! - **job standbys** (r2final, [`crate::standby`]): a `Continuous` mover
+//! - **job standbys** ([`crate::standby`]): a `Continuous` mover
 //!   job in the standby DC's tier keeps a copy of the tenant on a cluster
 //!   there. The promotion waits (up to 30 s) until the job has applied the
 //!   source's binlog position when the source still answers, so a fenced
 //!   home loses nothing, then stops the job (it ends `done`, the copy
 //!   kept) and records its `applied_source_gtid`. The copy is on a
 //!   primary of the standby DC already: nothing is reset;
-//! - **replica-cluster standbys** (decision W3): a cluster in the standby
+//! - **replica-cluster standbys**: a cluster in the standby
 //!   DC that replicates the home cluster (set up by the operator,
 //!   `sprigctl tenant standby`). Every tenant on such a cluster moves with
 //!   it: promoting one stops the replication for all of them, and the
@@ -128,11 +128,11 @@ async fn source_position(
     (!best.is_empty()).then(|| best.into_values().collect::<Vec<_>>().join(","))
 }
 
-/// RL13 (r2harden): before a promotion reads the position its job standby
+/// Before a promotion reads the position its job standby
 /// must reach, the old home's copy stops taking the tenant's writes, on
 /// every node of `source` that answers within 2 s: the tenant's accounts
 /// lose their write privileges there and their sessions end, as a
-/// returning DC's fence does (decision W7). A write a gateway still sent
+/// returning DC's fence does. A write a gateway still sent
 /// there either committed before its session ended, and so is in the
 /// position read next, or fails: none is acknowledged after it. The
 /// sessions are given up to 2 s to be gone before the position is read (a
@@ -232,7 +232,7 @@ pub fn ctl_endpoints(rec: &ClusterRecord) -> Result<Vec<NodeEndpoint>> {
 }
 
 /// The cluster's nodes as `sprig_repl` sees them (binlog dumps:
-/// `errant_extract`, chapter 25).
+/// `errant_extract`).
 ///
 /// # Errors
 /// The credentials can't be resolved or an address isn't `host:port`.
@@ -319,8 +319,8 @@ impl ClusterHooks {
             }
             if rec.state != JobState::Done {
                 // 1. Drain: a source that still answers (fenced, or frozen
-                //    above MariaDB) has nothing the copy must miss. RL13:
-                //    it is fenced for the tenant first, so no write is
+                //    above MariaDB) has nothing the copy must miss. It
+                //    is fenced for the tenant first, so no write is
                 //    acknowledged there after the position read next.
                 let t0 = std::time::Instant::now();
                 fence_source(&self.global, tier, &source, tenant).await;
@@ -373,10 +373,9 @@ impl ClusterHooks {
     }
 
     /// Gives a job standby's copy back the write privileges its target
-    /// revoked from the tenant's accounts (decision RF10, r2last; the
-    /// record is on the copy: `sprig_mover::mysql::standby`), on each
-    /// target cluster's writable node; replicas get the grants through
-    /// the binlog. Idempotent: a restored record is forgotten. Returns the
+    /// revoked from the tenant's accounts (the record is on the copy:
+    /// `sprig_mover::mysql::standby`), on each target cluster's writable
+    /// node; replicas get the grants through the binlog. Idempotent: a restored record is forgotten. Returns the
     /// grants restored.
     ///
     /// # Errors
@@ -481,7 +480,7 @@ impl PromoteHooks for ClusterHooks {
                 }
             }
         }
-        // Job standbys (r2final): drain, then stop.
+        // Job standbys: drain, then stop.
         let tier = (self.dc_tier)(to);
         let jobs = standby_jobs(&tier, Some(tenant)).await?;
         if !jobs.is_empty() {
@@ -490,7 +489,7 @@ impl PromoteHooks for ClusterHooks {
                 .filter_map(|r| r.spec.target_cluster().cloned())
                 .collect();
             let applied = self.stop_job_standbys(tenant, &tier, jobs).await?;
-            // RF10: the copies take writes again before the maps turn
+            // The copies take writes again before the maps turn
             // `home` (step 3), so no routed write meets a revoked grant.
             // Step 4 retries if a node didn't answer here.
             if let Err(e) = self.restore_standby_grants(tenant, &tier, &targets).await {
@@ -523,7 +522,7 @@ impl PromoteHooks for ClusterHooks {
             );
             // The relay log is applied before the copy stops, without ever
             // starting the SQL thread while the IO thread is stopped
-            // (MariaDB would discard the relay log; r2drain). A copy that
+            // (MariaDB would discard the relay log). A copy that
             // can't apply it stops the promotion here, nothing reset.
             let pos = match stop_drained(&mut s, STANDBY_DRAIN)
                 .await
@@ -548,7 +547,7 @@ impl PromoteHooks for ClusterHooks {
     async fn make_writable(&self, tenant: TenantId, to: &DcId) -> Result<()> {
         // A job standby's copy is on a primary of `to` already, which its
         // agent keeps writable: nothing to reset, but its accounts get
-        // their write privileges back (RF10; done at step 2 already unless
+        // their write privileges back (done at step 2 already unless
         // a node didn't answer then).
         let tier = (self.dc_tier)(to);
         let job_targets: BTreeSet<ClusterId> = standby_jobs(&tier, Some(tenant))
@@ -567,7 +566,7 @@ impl PromoteHooks for ClusterHooks {
                 .map_err(node_err)?;
             s.exec("RESET SLAVE ALL").await.map_err(node_err)?;
             // A primary acknowledges commits once a replica has them, when
-            // it has semi-sync replicas (chapter 25); harmless without.
+            // it has semi-sync replicas; harmless without.
             let _ = s.exec("SET GLOBAL rpl_semi_sync_master_enabled = ON").await;
             s.close().await;
             // `read_only` clears through the node's agent: it holds the
@@ -740,7 +739,7 @@ pub async fn standby_lags(
     }
     let mut lag_of: BTreeMap<ClusterId, u32> = BTreeMap::new();
     let mut out = Vec::new();
-    // Job standbys (r2final): the lag from the job's progress.
+    // Job standbys: the lag from the job's progress.
     let jobs = standby_jobs(tier, None).await?;
     let now = u64::try_from(
         std::time::SystemTime::now()
@@ -829,7 +828,7 @@ async fn cluster_lag(
         .map_or(u32::MAX, |s| s.saturating_mul(1000))
 }
 
-/// Chapter 25's diverged-transaction report for `tenant`'s copy on this
+/// The diverged-transaction report for `tenant`'s copy on this
 /// DC's clusters, after the DC returned: the transactions its writer
 /// logged past the position the standby had applied at the promotion
 /// (from the latest failover record that promoted the tenant), kept to

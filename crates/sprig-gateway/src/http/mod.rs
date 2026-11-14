@@ -1,9 +1,8 @@
-//! HTTP on 8080 and 8443 (chapter 04 step 4; chapter 37 steps 2-6): REST
-//! and gRPC on one port.
+//! HTTP on 8080 and 8443: REST and gRPC on one port.
 //!
 //! ```text
 //! serve(listener):                        -- listener "http" (8080) or "https" (8443)
-//!  1. accept a TCP connection; admission check (chapter 04)
+//!  1. accept a TCP connection; admission check
 //!  2. https: TLS handshake, ALPN offers h2 and http/1.1; certificate from the live store
 //!  3. hand the connection to hyper's auto server: HTTP/1.1, or HTTP/2 when the client
 //!     sends the h2 preface (h2c with prior knowledge on 8080, ALPN h2 on 8443)
@@ -24,7 +23,7 @@
 //! server has read fails; the forced close follows only if a request
 //! outlives the drain time. A request the client sends while the `GOAWAY`
 //! is on its way never reaches the server, and HTTP/2 clients retry it
-//! (tonic does not on its own: see chapter 37).
+//! (tonic does not on its own).
 //!
 //! The services: [`sql`] (SQL and transaction handles through the
 //! executor), [`admin`] (the Admin API, forwarded to the controllers, and
@@ -34,17 +33,17 @@
 pub mod admin;
 pub mod analytics;
 pub mod auth;
-// Chapter 37 step 11: change streams (gRPC, SSE, WebSocket, NDJSON).
+// Change streams (gRPC, SSE, WebSocket, NDJSON).
 pub mod changes;
 pub mod functions;
 pub mod grpc;
 pub mod kv;
-/// `language` on `Sql.Query`: Cypher, GQL and MongoDB commands (tui T2).
+/// `language` on `Sql.Query`: Cypher, GQL and MongoDB commands.
 pub mod lang;
-/// Live `vector.*` and `analytics.*` settings (R6 round 3).
+/// Live `vector.*` and `analytics.*` settings.
 pub mod model_settings;
 pub mod rest;
-// Chapter 39 (R5 round 6): Search.Query.
+// Search.Query.
 pub mod search;
 pub mod settings;
 pub mod sink;
@@ -101,6 +100,11 @@ impl ConnInfo {
             client_ip: self.peer.ip(),
             tls: self.tls.is_some(),
             client_cert: self.tls.as_ref().is_some_and(|t| t.client_cert),
+            client_dn: self
+                .tls
+                .as_ref()
+                .filter(|t| t.client_cert)
+                .and_then(|t| t.client_dn.clone()),
         }
     }
 }
@@ -113,7 +117,7 @@ pub struct Core {
     pub auth: Arc<dyn HttpAuthenticator>,
     /// The Admin API.
     pub admin: Arc<AdminApi>,
-    /// Studio: its files, browser sessions and API additions (chapter 44).
+    /// Studio: its files, browser sessions and API additions.
     pub studio: Arc<studio::StudioState>,
 }
 
@@ -137,8 +141,7 @@ impl Core {
         tenant: Option<String>,
         host: Option<String>,
     ) -> Result<Caller> {
-        // A Studio session token (chapter 44); anything else is chapter
-        // 14's Basic or API key.
+        // A Studio session token; anything else is Basic or an API key.
         if studio::is_session_token(authorization.as_deref()) {
             let token = studio::bearer(authorization.as_deref()).unwrap_or_default();
             let s = self
@@ -225,7 +228,7 @@ async fn route(
             }
         }
     } else {
-        // Studio's files and API additions first (chapter 44).
+        // Studio's files and API additions first.
         match studio::handle(&core, &info, req).await {
             Ok(r) => r,
             Err(req) => rest::handle(&core, &info, req).await,
@@ -361,7 +364,7 @@ where
     };
     let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
     builder.http2().max_concurrent_streams(max_streams);
-    // With upgrades: `GET .../changes` may become a WebSocket (chapter 37).
+    // With upgrades: `GET .../changes` may become a WebSocket.
     let served = builder.serve_connection_with_upgrades(TokioIo::new(conn.stream), svc);
     tokio::pin!(served);
     let r = tokio::select! {

@@ -1,14 +1,14 @@
-//! The settings the controller runtime and the job scheduler read (chapter
-//! 23, "Configuration"), declared next to the code (chapter 03, "Declaring
-//! a key"), and a typed snapshot of them.
+//! The settings the controller runtime and the job scheduler read,
+//! declared next to the code, and a typed snapshot of them.
 //!
-//! The three slot keys belong to chapters 10, 13 and 25; the copy key is
+//! The three slot keys belong to the mover, automatic indexing and
+//! recovery; the copy key is
 //! `sprig-mover`'s, and the recovery key is declared here until the
 //! recovery loops exist, and moves to that crate then. The build key,
 //! `auto_index.max_builds_per_cluster`, is `sprig-advisor`'s
 //! ([`MAX_BUILDS_PER_CLUSTER`]), registered there once.
 //!
-//! Until the etcd mirror of settings lands (chapter 23 step 8), the role
+//! Until the etcd mirror of settings lands, the role
 //! runs on [`ControlSettings::default`]; the runtime reads the snapshot
 //! through a `watch` channel so live values need no restart.
 
@@ -20,8 +20,6 @@ use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx
 
 /// Dc and global.
 const PROCESS: Scopes = Scopes::PROCESS;
-/// Tenant, dc and global.
-const TENANT_DC_GLOBAL: Scopes = Scopes(0b11_0100);
 
 macro_rules! key {
     ($(#[$doc:meta])* $name:ident: $t:ty = $key:literal, $default:expr, $scopes:expr, $min:expr, $max:expr, $owner:literal, $text:literal) => {
@@ -52,7 +50,7 @@ key! {
 }
 key! {
     /// `control.tenant_jobs_per_hour`.
-    TENANT_JOBS_PER_HOUR: u32 = "control.tenant_jobs_per_hour", 12, TENANT_DC_GLOBAL, 1, 10_000, 23,
+    TENANT_JOBS_PER_HOUR: u32 = "control.tenant_jobs_per_hour", 12, PROCESS, 1, 10_000, 23,
     "Automatic jobs a tenant may start per hour"
 }
 key! {
@@ -62,7 +60,7 @@ key! {
 }
 key! {
     /// `control.etcd_member_refresh_seconds`: endpoint discovery's period
-    /// (chapter 23 step 9; `sprig_meta::discovery`).
+    /// (`sprig_meta::discovery`).
     ETCD_MEMBER_REFRESH_SECONDS: u64 = "control.etcd_member_refresh_seconds", 60, PROCESS, 1, 3600, 23,
     "Endpoint discovery period"
 }
@@ -76,12 +74,12 @@ key! {
     REQUEST_TIMEOUT_MS: u64 = "meta.request_timeout_ms", 2000, PROCESS, 100, 60_000, 23,
     "Timeout per etcd request"
 }
-/// `mover.max_copies_per_cluster` (chapter 10): the `copy` slot pool,
+/// `mover.max_copies_per_cluster`: the `copy` slot pool,
 /// declared once by `sprig-mover` (a second declaration fails the
 /// registry when both crates are linked, as the balancer does).
 pub use sprig_mover::settings::MAX_COPIES_PER_CLUSTER;
 key! {
-    /// `recovery.max_rebuilds_per_cluster` (chapter 25): the `recovery`
+    /// `recovery.max_rebuilds_per_cluster`: the `recovery`
     /// slot pool.
     MAX_REBUILDS_PER_CLUSTER: u32 = "recovery.max_rebuilds_per_cluster", 1, Scopes::OPERATIONAL, 1, 64, 25,
     "Concurrent rebuilds or reseeds"
@@ -95,7 +93,7 @@ key! {
 key! {
     /// `tenant.id_min`: the lowest tenant id this deployment allocates.
     /// The id counter starts here, and only `t<id>_` schemas inside the
-    /// range raise it (chapter 23, "Tenant ids").
+    /// range raise it.
     TENANT_ID_MIN: u64 = "tenant.id_min", 1, Scopes(0b10_0000), 1, i64::MAX, 23,
     "Lowest tenant id this deployment allocates"
 }
@@ -115,7 +113,7 @@ pub struct ControlSettings {
     /// Attempts before a job fails.
     pub job_max_attempts: u32,
     /// Automatic jobs a tenant may start per hour (the DC's value; the
-    /// tenant scope needs the catalog, chapter 08).
+    /// tenant scope needs the catalog).
     pub tenant_jobs_per_hour: u32,
     /// DC leader session TTL.
     pub leader_lease: Duration,

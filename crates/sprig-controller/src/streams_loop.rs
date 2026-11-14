@@ -1,4 +1,4 @@
-//! The `streams` loop (chapter 45, "Sequencing and offsets"; R9), on the DC
+//! The `streams` loop (sequencing and offsets), on the DC
 //! leader, every second:
 //!
 //! ```text
@@ -104,7 +104,7 @@ impl Reconciler for StreamsLoop {
                 NewJob {
                     kind: JOB_KIND.into(),
                     // Their own pool: one job per stream, for as long as
-                    // it exists (r9triggers).
+                    // it exists.
                     class: JobClass::Consumer,
                     tenant_id: None,
                     clusters: Vec::new(),

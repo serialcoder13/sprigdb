@@ -1,5 +1,4 @@
-//! `information_schema` inline views (chapter 07, section `information_schema`;
-//! build step 5).
+//! `information_schema` inline views.
 //!
 //! Each reference to an `information_schema` table that names schemas is
 //! replaced by a derived table over the backend's view, restricted to the
@@ -19,9 +18,8 @@
 //! - **One equality per schema.** A tenant with several schemas gets one
 //!   `UNION ALL` branch per schema, each with `<restriction column> =
 //!   '<physical>'`: MariaDB opens only that schema, where an `IN` list or
-//!   `LIKE` scans every schema on the server
-//!   (`decisions/spike-schemas-per-cluster.md`). The restriction column is
-//!   the one MariaDB's lookup uses (verified with `EXPLAIN`'s `Scanned 1
+//!   `LIKE` scans every schema on the server (measured). The restriction
+//!   column is the one MariaDB's lookup uses (verified with `EXPLAIN`'s `Scanned 1
 //!   database`): `EVENT_OBJECT_SCHEMA` for `TRIGGERS`, `CONSTRAINT_SCHEMA`
 //!   for `REFERENTIAL_CONSTRAINTS` and `CHECK_CONSTRAINTS`, `TABLE_SCHEMA`
 //!   elsewhere.
@@ -36,7 +34,7 @@
 //!   sessions as literal rows).
 //! - **Pass-through** for tables without schema names; **1142** for
 //!   server-wide tables (`INNODB_*`, `GLOBAL_STATUS`, ...); **39051** for
-//!   the `SPRIG_` views (build step 11) and for mapped tables inside a
+//!   the `SPRIG_` views (not built yet) and for mapped tables inside a
 //!   view or stored program, which would bake physical names into it.
 
 use std::collections::HashMap;
@@ -54,7 +52,7 @@ use crate::compat::schema::{self, Src};
 use crate::lex::{self, LexOptions, Token, TokenKind, ident_value, string_value};
 
 /// The column lists of `information_schema` tables, in order, per backend
-/// version (chapter 07, rule 2), so `SELECT *` keeps its shape.
+/// version, so `SELECT *` keeps its shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ColumnRegistry {
     tables: HashMap<String, Vec<String>>,
@@ -337,10 +335,10 @@ const PASS_THROUGH: &[&str] = &[
     "ENABLED_ROLES",
     "APPLICABLE_ROLES",
     "USER_PRIVILEGES",
-    // R4 round 4: what `SHOW VARIABLES` and `SHOW SESSION STATUS` already
-    // show, and the sources of 3306's `performance_schema` variable and
-    // status tables (chapter 28, `compat::perfschema`). `GLOBAL_STATUS`
-    // stays denied: its counters add up every tenant's statements.
+    // What `SHOW VARIABLES` and `SHOW SESSION STATUS` already show, and the
+    // sources of 3306's `performance_schema` variable and status tables
+    // (`compat::perfschema`). `GLOBAL_STATUS` stays denied: its counters add
+    // up every tenant's statements.
     "SESSION_VARIABLES",
     "GLOBAL_VARIABLES",
     "SYSTEM_VARIABLES",
@@ -358,7 +356,7 @@ pub enum TableClass {
     Processlist,
     /// Relayed unchanged.
     PassThrough,
-    /// A SprigDB view (build step 11): 39051 until it exists.
+    /// A SprigDB view: 39051 until it exists.
     Sprig,
     /// A server-wide table: 1142.
     Denied,
@@ -396,14 +394,14 @@ pub struct InfoSchemaCtx<'a> {
     pub registry: &'a ColumnRegistry,
     /// The gateway's sessions, for `PROCESSLIST`.
     pub sessions: Option<&'a dyn SessionSource>,
-    /// Which databases the user may see (chapter 29); all without it.
+    /// Which databases the user may see; all without it.
     pub visible: Option<&'a (dyn Fn(&LogicalDb) -> bool + Sync)>,
     /// The session's current database is `information_schema`, so
     /// unqualified table names in `FROM` are its tables.
     pub in_information_schema: bool,
     /// The user and client address, for 1142 messages.
     pub user: Option<(&'a str, &'a str)>,
-    /// The cluster has chapter 07's name lookup
+    /// The cluster has the name lookup
     /// (`__sprig_sys.__sprig_names_v`, [`super::stored`]): `DEFINER` and
     /// `GRANTEE` are mapped to the tenant's user names inside MariaDB, so
     /// no expression over them (`HEX(DEFINER)`, `INSERT ... SELECT`) sees a
@@ -642,7 +640,7 @@ pub fn rewrite_information_schema(
     };
     for r in &refs {
         tables.push(r.table.clone());
-        // A table the persona answers in its own shape (chapter 28).
+        // A table the persona answers in its own shape.
         if let Some(view) = local(&r.table) {
             let (alias, _) = alias_at(&tk, r.last + 1);
             let range = tk.t[r.first].start as usize..tk.t[r.last].end as usize;
@@ -659,8 +657,8 @@ pub fn rewrite_information_schema(
                 if !ACCOUNT_TABLES.contains(&r.table.as_str()) {
                     continue;
                 }
-                // Chapter 07 step 12: backend accounts never reach a
-                // definition, where nothing maps them.
+                // Backend accounts never reach a definition, where nothing
+                // maps them.
                 if !runs_now(kind) {
                     return Err(NameError::Unsupported(format!(
                         "information_schema.{} in a view or stored program definition",
@@ -1062,13 +1060,13 @@ fn name_lit(s: &str, ctx: &InfoSchemaCtx<'_>) -> String {
 }
 
 /// The account tables MariaDB fills with backend accounts: refused inside
-/// definitions (chapter 07 rule 9), and their `GRANTEE` mapped at the
+/// definitions, and their `GRANTEE` mapped at the
 /// source with the name lookup.
 const ACCOUNT_TABLES: &[&str] = &["USER_PRIVILEGES", "APPLICABLE_ROLES", "ENABLED_ROLES"];
 
 /// `DEFINER` (`t42_u7@%`) as the tenant's account (`alice@%`), computed by
 /// MariaDB from the name lookup; an account the lookup doesn't know (the
-/// R0 provisioning account) stays for the output scrub.
+/// provisioning account) stays for the output scrub.
 fn definer_sql(col: &str) -> String {
     format!(
         "CONVERT(IFNULL((SELECT `account` FROM `{sys}`.`{v}` WHERE `name` = \
@@ -1229,7 +1227,7 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         let join = if mysql.is_some() && spec.table == "COLUMNS" {
             schema::json_join(&p, &|v| lit(v, ctx))
         } else if mysql.is_some() && spec.table == "STATISTICS" {
-            // R4 round 3: functional key parts' expressions.
+            // Functional key parts' expressions.
             schema::fx_join(&p, &|v| lit(v, ctx))
         } else {
             String::new()
@@ -1264,7 +1262,7 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
             let _ = write!(sql, " AND LEFT({}, 11) <> 'sprig_auto_'", quote(ix));
         }
         let mut col_cond = hidden_column_cond("COLUMN_NAME", *vis);
-        // 3306 shows functional key parts' indexes (R4 round 3): their
+        // 3306 shows functional key parts' indexes: their
         // hidden column is MySQL's own hidden column.
         if mysql.is_some()
             && matches!(spec.extra, Extra::Index)
@@ -1314,7 +1312,7 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         for (_, cond) in &push.names {
             let _ = write!(sql, " AND {cond}");
         }
-        // A schema on another cluster: the rows read there (bugfix-8).
+        // A schema on another cluster: the rows read there.
         if let Ok(s) = phys.parse::<SchemaName>()
             && let Some(rows) = ctx.map.remote_branch(&s, &sql[start..])
         {
@@ -1363,8 +1361,8 @@ fn column_sql(
             );
         }
         // Lock names scoped inside stored code read as written, and the
-        // aliases their rewrite added go (chapter 28, R4 round 3;
-        // `compat::locks::unscope` for `SHOW CREATE`).
+        // aliases their rewrite added go (`compat::locks::unscope` does the
+        // same for `SHOW CREATE`).
         for (pat, rep) in [
             (
                 r"CONCAT\('t[0-9]+:', LEFT\(SHA2\(LOWER\((.+?)\), 256\), 50\)\)",
@@ -1385,10 +1383,9 @@ fn column_sql(
             "COLLATION_CONNECTION" | "DATABASE_COLLATION" | "COLLATION_NAME"
         )
     {
-        // R4 round 6 (gaps row 67): the collations of stored programs,
-        // views and parameters (`ROUTINES`, `TRIGGERS`, `EVENTS`, `VIEWS`,
-        // `PARAMETERS`) in MySQL's names, as the tables 3306 reshapes
-        // already show them.
+        // The collations of stored programs, views and parameters (`ROUTINES`,
+        // `TRIGGERS`, `EVENTS`, `VIEWS`, `PARAMETERS`) in MySQL's names, as
+        // the tables 3306 reshapes already show them.
         crate::compat::collation::sql_case(&qc, &|v| lit(v, ctx))
     } else {
         qc

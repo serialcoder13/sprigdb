@@ -1,5 +1,5 @@
-//! One MongoDB connection (chapter 30, "Framing and compression",
-//! "Handshake as a `mongos`", "SCRAM-SHA-256", "Dispatch"; build steps 1-4).
+//! One MongoDB connection: framing and compression, the handshake as a
+//! `mongos`, SCRAM-SHA-256 and command dispatch.
 
 #![allow(clippy::too_many_lines)]
 
@@ -80,7 +80,7 @@ pub struct Conn {
     pub(crate) sql: Option<SqlSession>,
     /// The data center named by `appName` (`orders~mum1`).
     pub(crate) dc: Option<String>,
-    /// That DC when it is a known one (chapter 24): the connection's SQL
+    /// That DC when it is a known one: the connection's SQL
     /// sessions count their statements as traffic from it.
     pub(crate) client_dc: Option<sprig_common::ids::DcId>,
     /// A restore connection (`mongorestore`): indexes are `migrated`.
@@ -88,14 +88,13 @@ pub struct Conn {
     pub(crate) hello_done: bool,
     /// A fail point closes the connection without a reply.
     pub(crate) close_now: bool,
-    /// A reply a handler built as BSON bytes (R5 round 8: `find` by
-    /// `_id`), its fields before `ok`; the handler returned an empty
-    /// document, and [`Conn::dispatch`] answers with these bytes.
+    /// A reply a handler built as BSON bytes (`find` by `_id`), its fields
+    /// before `ok`; the handler returned an empty document, and
+    /// [`Conn::dispatch`] answers with these bytes.
     pub(crate) raw: Option<RawDocumentBuf>,
 }
 
-/// A command's reply: a document, or BSON bytes built directly (R5 round
-/// 8).
+/// A command's reply: a document, or BSON bytes built directly.
 #[derive(Debug)]
 pub(crate) enum Reply {
     Doc(Document),
@@ -167,12 +166,11 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
     };
     let close = conn.close_soon.clone();
     let mut next_id = 1i32;
-    // A streaming `hello` (exhaust; chapter 30, "Handshake as a
-    // `mongos`"): the request answered again, with `moreToCome`, and the
-    // last reply's id that the next one answers.
+    // A streaming `hello` (exhaust): the request answered again, with
+    // `moreToCome`, and the last reply's id that the next one answers.
     let mut again: Option<Vec<u8>> = None;
     let mut last_reply: Option<i32> = None;
-    // Reads go through a buffer (perf1, S146): a message's header and body
+    // Reads go through a buffer: a message's header and body
     // then come from one `recv` instead of two or three.
     let mut stream = tokio::io::BufReader::with_capacity(8 * 1024, &mut conn.stream);
     let r: Result<()> = async {
@@ -389,7 +387,7 @@ impl Conn {
             if let Some((_, dc)) = app.rsplit_once('~') {
                 self.dc = Some(dc.to_owned());
             }
-            // Chapter 24: the hint votes in the tenant's traffic, counted
+            // The hint votes in the tenant's traffic, counted
             // like MySQL's `sprig_dc` (an unknown id as none).
             self.client_dc = crate::dc::hint("mongodb", self.dc.as_deref()).known();
             if app.eq_ignore_ascii_case("mongorestore") {
@@ -634,14 +632,13 @@ impl Conn {
             .ok_or_else(|| MongoError::new(code::INTERNAL_ERROR, "no session"))
     }
 
-    /// [`Self::dispatch`] guarded as SQL statements are (decision
-    /// bugfix-1, G40): a request of `gateway.large_statement_bytes` or more
-    /// runs on a blocking thread; one whose polls used 100 ms of a worker
-    /// moves to one for the rest of its way; and a stalled runtime names
-    /// the connection's session and stops its command, which answers 11601
-    /// `Interrupted`. The command's executor session is dropped then (its
-    /// backend connection closes and rolls back); the next command opens
-    /// another.
+    /// [`Self::dispatch`] guarded as SQL statements are: a request of
+    /// `gateway.large_statement_bytes` or more runs on a blocking thread;
+    /// one whose polls used 100 ms of a worker moves to one for the rest of
+    /// its way; and a stalled runtime names the connection's session and
+    /// stops its command, which answers 11601 `Interrupted`. The command's
+    /// executor session is dropped then (its backend connection closes and
+    /// rolls back); the next command opens another.
     pub(crate) async fn guarded_dispatch(&mut self, m: OpMsg, size: usize) -> (String, Document) {
         let (name, r) = self.guarded_reply(m, size).await;
         (name, r.into_document())
@@ -651,9 +648,9 @@ impl Conn {
     /// the replies built that way).
     pub(crate) async fn guarded_reply(&mut self, m: OpMsg, size: usize) -> (String, Reply) {
         use tracing::Instrument as _;
-        // One trace span per command (perf1, S142): the engine's statements
-        // record their SLIs but no root span of their own, and their
-        // backend steps are light children of this one.
+        // One trace span per command: the engine's statements record their
+        // SLIs but no root span of their own, and their backend steps are
+        // light children of this one.
         let span = tracing::info_span!(
             target: sprig_common::telemetry::trace::TARGET,
             "gateway.request",
@@ -773,7 +770,7 @@ impl Conn {
                 ),
             );
         }
-        // Driver test suites' fail point (D18), when the operator allows it.
+        // Driver test suites' fail point, when the operator allows it.
         let tenant = self
             .principal
             .as_ref()
@@ -916,7 +913,7 @@ impl Conn {
             return (name, Reply::Doc(Document::new()));
         }
         command_metrics(&name, r.is_ok(), started.elapsed());
-        // R5 round 8: a reply the handler built as BSON bytes gets the
+        // A reply the handler built as BSON bytes gets the
         // same fields as a document reply (below), appended.
         let wce = injected
             .as_ref()
@@ -952,9 +949,9 @@ impl Conn {
                 if !d.contains_key("ok") {
                     d.insert("ok", 1.0);
                 }
-                // Cluster time (chapter 30, "Cluster time"), unsigned for
-                // now: drivers gossip it and send `afterClusterTime` in
-                // causally consistent sessions; such reads go to writers.
+                // Cluster time, unsigned for now: drivers gossip it and
+                // send `afterClusterTime` in causally consistent sessions;
+                // such reads go to writers.
                 if !matches!(
                     name.as_str(),
                     "hello" | "isMaster" | "ismaster" | "saslStart" | "saslContinue"
@@ -1006,9 +1003,9 @@ struct CommandMetrics {
 const COMMAND_METRICS_MAX: usize = 256;
 
 thread_local! {
-    /// The handles by command name, per runtime thread (R5 round 8:
-    /// registering them with their labels on every command cost about 2%
-    /// of a point read's gateway CPU).
+    /// The handles by command name, per runtime thread (registering them
+    /// with their labels on every command cost about 2% of a point read's
+    /// gateway CPU).
     static COMMAND_METRICS: std::cell::RefCell<std::collections::HashMap<String, CommandMetrics>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
@@ -1041,7 +1038,7 @@ fn command_metrics(name: &str, ok: bool, took: Duration) {
 static CLUSTER_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// This gateway's cluster time: wall-clock seconds and a counter, never
-/// going backwards (the HLC of chapter 30, without gossip between
+/// going backwards (a hybrid logical clock, without gossip between
 /// gateways yet).
 pub(crate) fn cluster_time() -> bson::Timestamp {
     let secs = std::time::SystemTime::now()

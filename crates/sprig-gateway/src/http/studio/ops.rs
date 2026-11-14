@@ -1,12 +1,10 @@
-//! Studio's operator mode (chapter 44 step 17; chapters 23, 25, 47):
-//! platform operators sign in like everyone else, and operator mode opens
-//! when their login holds platform operator rights (decided 7 November
-//! 2026).
+//! Studio's operator mode: platform operators sign in like everyone else,
+//! and operator mode opens when their login holds platform operator
+//! rights.
 //!
-//! **Who is an operator** (decision ST35): logins listed in
-//! `studio.operator_logins` (global scope, so only someone with the Admin
-//! API's token can list one). `WhoAmI` reports them with the platform role
-//! `operator`.
+//! **Who is an operator**: logins listed in `studio.operator_logins`
+//! (global scope, so only someone with the Admin API's token can list one).
+//! `WhoAmI` reports them with the platform role `operator`.
 //!
 //! **What they reach**: `/v1/ops/<path>` is the Admin API's
 //! `/admin/v1/<path>` on the DC leader's controller, sent with the
@@ -25,16 +23,15 @@
 //! 6. no operator_token_file → 503 naming it
 //! ```
 //!
-//! **Named operators** (chapter 14, "Operators"; this is how operator mode
-//! works once the deployment has operators): Studio signs the operator in
-//! with `POST /v1/ops:login` (and `:enrol` for the first second factor),
-//! which the gateway relays to the controller's `operators:login` with no
-//! credential of its own. Studio keeps the operator's session token and
-//! sends it as `x-sprig-operator` on every `/v1/ops/` call; the gateway
-//! forwards it as the bearer token, so the controller checks the
-//! operator's role, DCs and scopes and audits the person. Only checks 1
-//! and 4 above apply; no Studio login list and no operator token file.
-//! `POST /v1/ops:logout` ends the session.
+//! **Named operators** (this is how operator mode works once the deployment
+//! has operators): Studio signs the operator in with `POST /v1/ops:login`
+//! (and `:enrol` for the first second factor), which the gateway relays to
+//! the controller's `operators:login` with no credential of its own. Studio
+//! keeps the operator's session token and sends it as `x-sprig-operator` on
+//! every `/v1/ops/` call; the gateway forwards it as the bearer token, so
+//! the controller checks the operator's role, DCs and scopes and audits the
+//! person. Only checks 1 and 4 above apply; no Studio login list and no
+//! operator token file. `POST /v1/ops:logout` ends the session.
 
 use std::sync::Arc;
 
@@ -167,10 +164,10 @@ pub fn operators_route(path: &str) -> bool {
         || p.starts_with("/admin/v1/operator-tokens/")
 }
 
-/// `studio.operator_mtls = required` on the `Operators` routes the
-/// gateway relays as they are (REST and gRPC, ST47; hardening round 2):
-/// 39927 for such a call on a connection without a verified client
-/// certificate. Other admin routes are unaffected.
+/// `studio.operator_mtls = required` on the `Operators` routes the gateway
+/// relays as they are (REST and gRPC): 39927 for such a call on a
+/// connection without a verified client certificate. Other admin routes are
+/// unaffected.
 ///
 /// # Errors
 /// 39927 as above.

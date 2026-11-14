@@ -1,4 +1,4 @@
-//! The gateway's sessions (chapter 04, "Session"): connection-id
+//! The gateway's sessions: connection-id
 //! allocation, lookup, `SHOW PROCESSLIST`, `KILL`, and the per-generation
 //! counts the listener manager's drain needs.
 
@@ -21,7 +21,7 @@ use crate::frontend::{ClientConn, Protocol, TlsInfo};
 /// Every open session of this gateway.
 pub struct SessionTable {
     clock: Arc<dyn Clock>,
-    /// The registration slot (chapter 04 step 6); 0 until registered.
+    /// The registration slot; 0 until registered.
     slot: AtomicU16,
     /// The last counter handed out.
     counter: Mutex<u32>,
@@ -61,7 +61,7 @@ impl SessionTable {
         self.slot.load(Ordering::SeqCst)
     }
 
-    /// Sets the slot registration claimed (chapter 04 step 6). Sessions
+    /// Sets the slot registration claimed. Sessions
     /// already open keep their ids.
     ///
     /// # Errors
@@ -224,7 +224,7 @@ impl SessionTable {
     }
 
     /// `KILL QUERY id`. `false` if no such session. Privilege checks are
-    /// the caller's (chapter 29).
+    /// the caller's.
     pub fn kill_query(&self, id: ConnId) -> bool {
         self.get(id).map(|h| h.flags().kill_query()).is_some()
     }
@@ -245,8 +245,8 @@ impl SessionTable {
     }
 
     /// Marks `close_at_safe_point` on every session of `listener` accepted
-    /// under a generation older than `generation` (chapter 04, "Live
-    /// listener changes": a stricter listener). Returns how many.
+    /// under a generation older than `generation` (a live listener change,
+    /// such as a stricter listener). Returns how many.
     pub fn close_older_than(&self, listener: &str, generation: u64) -> usize {
         self.mark(CloseReason::ListenerRetired, |h| {
             h.listener == listener && h.listener_gen < generation
@@ -254,8 +254,7 @@ impl SessionTable {
     }
 
     /// Marks `close_at_safe_point` on every session of `user` of `tenant`
-    /// (chapter 14, "Caching and revocation": a dropped or locked account).
-    /// Returns how many.
+    /// (a dropped or locked account). Returns how many.
     pub fn close_user(&self, tenant: TenantId, user: UserId) -> usize {
         self.mark(CloseReason::Revoked, |h| {
             let a = h.activity();
@@ -263,16 +262,16 @@ impl SessionTable {
         })
     }
 
-    /// Marks `close_at_safe_point` on every session of `tenant` (chapter
-    /// 14, "Suspension"). Returns how many.
+    /// Marks `close_at_safe_point` on every session of `tenant` (a suspended
+    /// tenant). Returns how many.
     pub fn close_tenant(&self, tenant: TenantId) -> usize {
         self.mark(CloseReason::Suspended, |h| {
             h.activity().tenant == Some(tenant)
         })
     }
 
-    /// Marks `close_at_safe_point` on every session (chapter 04, "Drain"
-    /// step 3). Returns how many.
+    /// Marks `close_at_safe_point` on every session (the gateway is
+    /// draining). Returns how many.
     pub fn close_all_at_safe_point(&self) -> usize {
         self.mark(CloseReason::Drain, |_| true)
     }

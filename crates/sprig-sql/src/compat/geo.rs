@@ -1,6 +1,5 @@
 //! MySQL's geographic semantics for SRID 4326 on the MySQL persona
-//! (chapter 28, "Geographic SRIDs, axis order"; chapter 36, "MySQL
-//! persona rewrite"; R4).
+//! (SRIDs and axis order).
 //!
 //! MySQL 8.4 reads and writes SRID 4326 coordinates latitude first and
 //! measures on the WGS 84 ellipsoid; MariaDB is planar and longitude
@@ -25,11 +24,10 @@
 //! `ER_SPRIG_GEO_UNSUPPORTED_EXPRESSION` when the SRID is 4326, and the
 //! other functions are left to MariaDB when the SRID isn't known.
 //!
-//! Not covered (listed in `decisions/mysql-persona-gaps.md`): distances
-//! involving lines and polygons (MariaDB's planar answer, in degrees),
-//! geodesic `ST_Contains` and friends, latitude range checks (3617), SRID
-//! enforcement on columns (3643), and `ST_AsGeoJSON`'s `20.0` (MariaDB
-//! prints `20`).
+//! Not covered: distances involving lines and polygons (MariaDB's planar
+//! answer, in degrees), geodesic `ST_Contains` and friends, latitude range
+//! checks (3617), SRID enforcement on columns (3643), and `ST_AsGeoJSON`'s
+//! `20.0` (MariaDB prints `20`).
 
 use super::errmap::WireError;
 use crate::lex::{self, LexOptions, Token, TokenKind};
@@ -434,14 +432,12 @@ impl Cx<'_> {
     }
 }
 
-/// A distance predicate the box pass (chapter 36, step 4 of
-/// `rewrite_geo`, R6 round 3) narrows: `ST_Distance(<column>,
-/// <constant SRID 4326 point>) < r` (or `<=`, the arguments either way
-/// round) gets `MBRIntersects(<column>, <box>) AND` in front, so MariaDB
-/// can read the column's `SPATIAL INDEX` for the candidates; the exact
-/// Andoyer test still decides. The box ([`sprig_geo::mysql::grow`]) holds
-/// every point within `r` metres; a box crossing a pole or ±180° adds
-/// nothing.
+/// A distance predicate the box pass narrows: `ST_Distance(<column>, <constant
+/// SRID 4326 point>) < r` (or `<=`, the arguments either way round) gets
+/// `MBRIntersects(<column>, <box>) AND` in front, so MariaDB can read the
+/// column's `SPATIAL INDEX` for the candidates; the exact Andoyer test still
+/// decides. The box ([`sprig_geo::mysql::grow`]) holds every point within `r`
+/// metres; a box crossing a pole or ±180° adds nothing.
 #[allow(clippy::too_many_lines, clippy::trivially_copy_pass_by_ref)] // one token walk; `LexOptions` as the module passes it
 fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let toks = lex::lex(sql, opts).ok()?;
@@ -605,12 +601,11 @@ fn boxes(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// A nearest-neighbour query on the MySQL persona (chapter 36,
-/// `nearest()`; R6 round 3): `SELECT ... FROM t [alias] [WHERE w] ORDER
-/// BY ST_Distance(<column>, <constant SRID 4326 point>) [ASC] LIMIT k`
-/// on one table. The gateway runs it with a growing radius `r`
-/// ([`Knn::with_radius`] adds `ST_Distance(...) <= r`, which the box pass
-/// turns into an R-tree read), counting matches until `k` are within `r`.
+/// A nearest-neighbour query on the MySQL persona: `SELECT ... FROM t [alias]
+/// [WHERE w] ORDER BY ST_Distance(<column>, <constant SRID 4326 point>) [ASC]
+/// LIMIT k` on one table. The gateway runs it with a growing radius `r`
+/// ([`Knn::with_radius`] adds `ST_Distance(...) <= r`, which the box pass turns
+/// into an R-tree read), counting matches until `k` are within `r`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Knn {
     /// `k`.
@@ -796,7 +791,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Result<Vec<u8>, WireErro
     if !sql.windows(3).any(|w| w.eq_ignore_ascii_case(b"st_")) {
         return None;
     }
-    // Chapter 36 (R6 round 3): candidate boxes for distance predicates.
+    // Candidate boxes for distance predicates.
     let boxed = boxes(sql, opts);
     let original = sql;
     let sql: &[u8] = boxed.as_deref().unwrap_or(sql);
@@ -942,7 +937,7 @@ mod tests {
         let s = rw(
             "SELECT id FROM s WHERE ST_Distance(loc, ST_GeomFromText('POINT(1 1)', 4326)) < 5000",
         );
-        // R6 round 3: a candidate box in front of the exact test.
+        // A candidate box in front of the exact test.
         assert!(
             s.starts_with("SELECT id FROM s WHERE (MBRIntersects(loc, ST_GeomFromText('POLYGON(("),
             "{s}"

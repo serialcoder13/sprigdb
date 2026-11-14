@@ -1,10 +1,9 @@
-//! `__sprig_subtree`: tenant subtrees too large to inline (chapter 29;
-//! RLS round 6, decision RL58).
+//! `__sprig_subtree`: tenant subtrees too large to inline.
 //!
 //! `SPRIG_TENANT_IN_SUBTREE(x)` and `SPRIG_TENANT_MANAGED(x)` become
-//! `x IN (id, ...)` up to `rls.inline_subtree_max` tenants (RL22). Above
-//! it, they read a table on each cluster the tenant uses, beside chapter
-//! 07's names table:
+//! `x IN (id, ...)` up to `rls.inline_subtree_max` tenants. Above
+//! it, they read a table on each cluster the tenant uses, beside the name
+//! layer's names table:
 //!
 //! ```text
 //! __sprig_sys.__sprig_subtree (ancestor, descendant)
@@ -25,7 +24,7 @@
 
 use super::text::quote;
 
-/// The schema (chapter 07's).
+/// The schema (the name layer's).
 pub const SYS_SCHEMA: &str = "__sprig_sys";
 /// The table.
 pub const TABLE: &str = "__sprig_subtree";

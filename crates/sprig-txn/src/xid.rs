@@ -1,6 +1,6 @@
-//! Transaction ids and XA xids (chapter 18, "Transaction id and xid").
+//! Transaction ids and XA xids.
 //!
-//! The **dtid** is chapter 03's [`TxnId`]: the gateway incarnation (a
+//! The **dtid** is a [`TxnId`]: the gateway incarnation (a
 //! random `u64` drawn at start) in the high half and a counter in the low
 //! half, so it needs no coordination. An XA xid has three parts:
 //!
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sprig_common::ids::{ClusterId, DbId, GroupId, ShardId, TenantId, TxnId};
 
-/// A distributed transaction's id (chapter 03's `TxnId`).
+/// A distributed transaction's id (a `TxnId`).
 pub type Dtid = TxnId;
 
 /// The XA formatID of coordinator xids: `SPRG` in ASCII.
@@ -34,8 +34,8 @@ pub struct DtidGen {
 }
 
 impl DtidGen {
-    /// A generator for `incarnation` (chapter 23 stores it in the gateway's
-    /// registration).
+    /// A generator for `incarnation` (the gateway's registration stores
+    /// it).
     #[must_use]
     pub fn new(incarnation: u64) -> Self {
         Self {

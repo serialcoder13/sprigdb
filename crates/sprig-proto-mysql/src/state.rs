@@ -1,11 +1,11 @@
-//! Per-connection protocol state (chapter 05, "Per-connection protocol
-//! state"): what the handshake negotiated and what later commands change.
+//! Per-connection protocol state: what the handshake negotiated and what later
+//! commands change.
 
 use crate::codec::Framing;
 use crate::packets::{Caps, Persona};
 
 /// The TLS parameters of a client connection, as the protocol layer reports
-/// them (chapter 05: "This layer only reports `ProtoState.tls`").
+/// them (this layer only reports `ProtoState.tls`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsInfo {
     /// `1.2` or `1.3`.

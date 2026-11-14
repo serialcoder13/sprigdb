@@ -1,5 +1,5 @@
-//! Registration in the DC tier (chapter 04, "Registration records" and
-//! "Registration, KILL and write holds"; build step 6).
+//! Registration in the DC tier: registration records, slots for `KILL`,
+//! and write holds.
 //!
 //! ```text
 //! register():
@@ -48,7 +48,7 @@ sprig_settings::register!(LEASE_TTL_SECONDS);
 /// `gateway-processes/<token>` in the DC tier: a running gateway
 /// process (its [`process_token`](sprig_catalog::ddl::process_token)),
 /// under the registration lease; the value is the gateway's id. A DDL job
-/// whose owner's key is gone was abandoned (bugfix-38).
+/// whose owner's key is gone was abandoned.
 pub const PROCESS_PREFIX: &str = sprig_catalog::ddl::GATEWAY_PROCESS_PREFIX;
 
 /// How often the load report is rewritten.
@@ -96,20 +96,20 @@ pub struct GatewayRecord {
     pub listeners: BTreeMap<String, u16>,
     /// Its state.
     pub state: GatewayState,
-    /// Catalog formats this build reads (chapter 08's migration gate).
+    /// Catalog formats this build reads (for the catalog's migration gate).
     #[serde(default)]
     pub catalog_formats: Vec<u32>,
     /// Authorization engines this build knows (`auth.authorizer` values,
     /// [`sprig_auth::authz::authorizer::KNOWN`]): a change of
     /// `auth.authorizer` is refused unless every live gateway lists the
-    /// engine (chapter 29, `sprig_auth::authz::engine_guard`).
+    /// engine (`sprig_auth::authz::engine_guard`).
     #[serde(default)]
     pub authorizers: Vec<String>,
     /// Its load.
     #[serde(default)]
     pub load: Load,
     /// The host Kafka clients reach it at (`[gateway]
-    /// kafka_advertise_host`; hardening round 3), given for it in Kafka's
+    /// kafka_advertise_host`), given for it in Kafka's
     /// Metadata. Unset: `addr`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_host: Option<String>,
@@ -349,7 +349,7 @@ impl Registrar {
         let store = session.store();
         let rec = self.record();
         let key = store.tier().key(&format!("gateways/{}", rec.gateway_id))?;
-        // Chapter 20's write sketches, when a minute completed.
+        // The write sketches, when a minute completed.
         let load = crate::write_load::report_op(store.as_ref(), &rec.gateway_id, session.lease())?;
         let id = rec.gateway_id.clone();
         let mut then = vec![Op::Put {
@@ -358,7 +358,7 @@ impl Registrar {
             lease: Some(session.lease()),
         }];
         then.extend(load.as_ref().map(|(op, _)| op.clone()));
-        // bugfix-38: this process's token under the same lease, so another
+        // This process's token under the same lease, so another
         // gateway can tell its DDL jobs were abandoned once it is gone.
         then.push(Op::Put {
             key: store.tier().key(&format!(

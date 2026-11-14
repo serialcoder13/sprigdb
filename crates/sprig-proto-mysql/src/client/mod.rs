@@ -1,4 +1,4 @@
-//! The client side, for backend connections (chapter 05, build step 5):
+//! The client side, for backend connections:
 //! [`MysqlClient`] connects to MariaDB (or MySQL), upgrades to TLS
 //! (rustls, optionally with a client certificate), authenticates with
 //! `caching_sha2_password` (fast path, and the full path over TLS) or
@@ -45,9 +45,8 @@
 //! discarded, as must one that [`is_broken`](MysqlClient::is_broken).
 //!
 //! **No RSA.** Without TLS, the `caching_sha2_password` full path needs the
-//! server's RSA key; this client has no RSA (decision D4), so it fails
-//! with [`ClientError::Auth`] asking for TLS. Backends always use TLS
-//! (chapter 06).
+//! server's RSA key; this client has no RSA, so it fails with
+//! [`ClientError::Auth`] asking for TLS. Backends always use TLS.
 
 pub mod auth;
 mod config;

@@ -12,7 +12,7 @@ publish.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
 metrics.workspace = true
-# TLS to the source (chapter 10): rustls with ring, as the backend client
+# TLS to the source: rustls with ring, as the backend client
 # (sprig-proto-mysql), with Mozilla's roots when no CA is given.
 rustls.workspace = true
 sha1.workspace = true

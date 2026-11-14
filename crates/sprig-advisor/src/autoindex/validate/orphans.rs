@@ -1,5 +1,4 @@
-//! Leftovers of validations that were cut off (bugfix-61; chapter 13,
-//! "Validation harness").
+//! Leftovers of validations that were cut off.
 //!
 //! A replica or Galera RSU validation builds its index (and a field-column
 //! candidate's columns) on one node with the binary log off. If the
@@ -47,7 +46,7 @@ use super::IndexTarget;
 use super::node::{NodeSql, col, drop_index_sql};
 use super::replica::{drop_with_retries, quiet_session};
 
-/// The prefix of key-value field columns (R6 round 6).
+/// The prefix of key-value field columns.
 const FIELD_PREFIX: &str = "_sprig_p_";
 
 type Key = (String, String, String);

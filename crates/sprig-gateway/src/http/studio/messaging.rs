@@ -1,6 +1,6 @@
-//! The stream, queue and sink views' routes (chapter 44 steps 28–31;
-//! chapter 37's `Streams.ListGroups`, the `Mq` topology and the `Sinks`
-//! dead letters, Studio part; decision ST44), for the caller's own tenant.
+//! The stream, queue and sink views' routes (`Streams.ListGroups`, the
+//! `Mq` topology and the `Sinks` dead letters), for the caller's own
+//! tenant.
 //!
 //! | Route | Does |
 //! |---|---|
@@ -8,8 +8,8 @@
 //! | `GET /v1/databases/{db}/mq` | The database's virtual host (`mq_vhosts`, else the database's own name once it has topology), exchanges, queues and bindings, with names (`mq_exchanges`, `mq_queues`, `mq_bindings`) |
 //! | `GET /v1/databases/{db}/sinks/{name}/deadLetters` | The sink's dead letters (`sink_dead_letters`) |
 //! | `POST /v1/databases/{db}/sinks/{name}/deadLetters:replay`, `:discard` | `{ids}` or `{all: true}`: marked `replaying` (the sink's task feeds them back) or `discarded` |
-//! | `POST /v1/databases/{db}/sinks/{name}:test` | `Sinks.Test` (R9, r9last): `{sample}` (10 by default): `TEST SINK db.name WITH SAMPLE n` as the caller; `{columns, rows}` |
-//! | `POST /v1/databases/{db}/connections/{name}:test` | `Connections.Test` (R9, r9last): `{platform, write, to}`: `TEST [PLATFORM] CONNECTION [db.]name [WRITE [TO 'to']]` as the caller; `{columns, rows}` |
+//! | `POST /v1/databases/{db}/sinks/{name}:test` | `Sinks.Test`: `{sample}` (10 by default): `TEST SINK db.name WITH SAMPLE n` as the caller; `{columns, rows}` |
+//! | `POST /v1/databases/{db}/connections/{name}:test` | `Connections.Test`: `{platform, write, to}`: `TEST [PLATFORM] CONNECTION [db.]name [WRITE [TO 'to']]` as the caller; `{columns, rows}` |
 //!
 //! Everything else the views show comes from the statements a SQL client
 //! runs, which the gateway checks as for any client: `SHOW STREAMS FROM`,
@@ -77,7 +77,7 @@ pub fn is_messaging_path(path: &str) -> bool {
             && tail.matches('/').count() == 1)
 }
 
-/// `Sinks.Test` and `Connections.Test`'s statement (R9, r9last): the
+/// `Sinks.Test` and `Connections.Test`'s statement: the
 /// statements Studio would run, names quoted.
 fn test_statement(db: &str, kind: &str, name: &str, body: &Value) -> Result<String, SprigError> {
     let q = |s: &str| format!("{}.{}", ident(db), ident(s));
@@ -480,8 +480,8 @@ async fn topology(
     // A database is its own virtual host (AMQP clients name it in the
     // vhost; `/` maps to `amqp.default_vhost_database`). `mq_vhosts` only
     // holds a row when a vhost got limits or a description, so without one
-    // the database's name is the vhost once it has any topology (Studio
-    // round 6: the queue pages showed "no virtual host yet" otherwise).
+    // the database's name is the vhost once it has any topology (otherwise
+    // the queue pages would show "no virtual host yet").
     let vhost_name = vhost
         .as_ref()
         .map(|v| v.0.clone())
@@ -604,7 +604,7 @@ mod tests {
             "/v1/databases/shop/sinks/out/deadLetters:replay"
         ));
         assert!(!is_messaging_path("/v1/databases/shop/streams/orders"));
-        // R9 (r9last): Sinks.Test and Connections.Test.
+        // Sinks.Test and Connections.Test.
         assert!(is_messaging_path("/v1/databases/shop/sinks/out:test"));
         assert!(is_messaging_path(
             "/v1/databases/shop/connections/hook:test"

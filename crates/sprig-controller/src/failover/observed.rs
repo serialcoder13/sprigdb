@@ -1,4 +1,4 @@
-//! The writer of clusters someone else fails over (r2opfix): Kubernetes
+//! The writer of clusters someone else fails over: Kubernetes
 //! clusters (mariadb-operator, with or without SprigDB choosing the
 //! replica) and external clusters that declare `failover = provider`.
 //!

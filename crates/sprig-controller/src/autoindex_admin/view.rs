@@ -79,7 +79,7 @@ pub struct IndexView {
     /// names (`None` for advice).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl: Option<String>,
-    /// Chapter 13's state.
+    /// The automatic-indexing state.
     pub state: String,
     /// Restored when unpinned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,7 +118,7 @@ pub struct IndexView {
     /// Last state change.
     pub state_changed_at: String,
     /// `user` or `migrated` for an index the user created or migrated whose
-    /// removal automatic indexing manages (decision O1); absent for
+    /// removal automatic indexing manages; absent for
     /// automatic indexes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
@@ -235,8 +235,8 @@ pub struct CandidateView {
     pub created_at: String,
 }
 
-/// One entry of an index's history, from the store's rows (chapter 11's
-/// decision log will carry the full history).
+/// One entry of an index's history, from the store's rows (the decision
+/// log will carry the full history).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventView {
     /// When (RFC 3339, UTC).
@@ -272,8 +272,8 @@ pub struct ListIndexesResponse {
     pub indexes: Vec<IndexView>,
 }
 
-/// One of the cost model's gates for a candidate (chapter 13, "Cost
-/// model"), checked against today's settings.
+/// One of the cost model's gates for a candidate, checked against today's
+/// settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateView {
     /// `min_net`, `benefit_ratio`, `build_time`, `payback`,
@@ -370,7 +370,7 @@ fn time(t: SystemTime) -> String {
 }
 
 /// The columns shown for a definition: a document index's field paths
-/// (`email`, `createdAt desc`, S131) rather than its field columns; each
+/// (`email`, `createdAt desc`) rather than its field columns; each
 /// part otherwise.
 #[must_use]
 pub fn columns_text(d: &sprig_advisor::autoindex::store::Definition) -> Vec<String> {
@@ -504,7 +504,7 @@ pub fn index_view(r: &AutoIndexRow, names: &ObjectNames, cand: Option<&Candidate
     }
 }
 
-/// The view of a user or migrated index's `index_usage` row (decision O1):
+/// The view of a user or migrated index's `index_usage` row:
 /// no id (it is named by `[<db>.][<table>.]<name>`), no estimates.
 #[must_use]
 pub fn user_index_view(r: &UsageRow, names: &ObjectNames) -> IndexView {
@@ -924,7 +924,7 @@ const POLICY_KEYS: &[&str] = &[
     "auto_index.recreate_block_days",
 ];
 
-/// Where a selected candidate goes under `p` (chapter 13's `route`).
+/// Where a selected candidate goes under `p` (its `route`).
 #[must_use]
 pub fn route_text(p: &ObjectPolicy) -> String {
     match p.mode {
@@ -1118,18 +1118,18 @@ pub fn explain(
 /// An operator's action on an automatic index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Roll a recommendation out (chapter 13's `apply`).
+    /// Roll a recommendation out (also called `apply`).
     Approve,
     /// Turn a recommendation down.
     Reject,
     /// Force-drop an index.
     Drop,
-    /// Freeze it in its state (chapter 13's `freeze`).
+    /// Freeze it in its state (also called `freeze`).
     Pin,
     /// Restore the state it was pinned in (`freeze --off`).
     Unpin,
     /// Make a retiring (`IGNORED`) index visible again, or recreate a user
-    /// index dropped for disuse, and pin it (decision O1).
+    /// index dropped for disuse, and pin it.
     Restore,
 }
 
@@ -1180,7 +1180,7 @@ pub enum Plan {
     /// Restore the pinned state.
     Unfreeze,
     /// `retiring → active`, `NOT IGNORED` on every shard, then
-    /// `active → frozen` (decision O1's restore).
+    /// `active → frozen`.
     Restore,
     /// Nothing to do: it already is so.
     Noop(String),
@@ -1188,7 +1188,7 @@ pub enum Plan {
     Refuse(String),
 }
 
-/// What `a` does to `r` (chapter 13's state machine, operator edges).
+/// What `a` does to `r` (the index state machine's operator edges).
 #[must_use]
 pub fn plan_action(r: &AutoIndexRow, a: Action) -> Plan {
     use IndexState as S;

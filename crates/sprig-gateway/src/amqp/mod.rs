@@ -1,15 +1,14 @@
-//! The AMQP listeners on 5672 and 5671 (chapter 50 steps 12, 14 and 23;
-//! chapter 04, "Protocol detection on the AMQP ports"): [`AmqpFrontend`]
+//! The AMQP listeners on 5672 and 5671: [`AmqpFrontend`]
 //! runs `sprig-proto-amqp`'s server on each connection. The protocol
 //! header picks AMQP 0-9-1 or 1.0; TLS on 5671 is finished by the listener
 //! before the header is read.
 //!
-//! - [`identity`]: SASL `PLAIN` and `AMQPLAIN` onto chapter 14's logins,
+//! - [`identity`]: SASL `PLAIN` and `AMQPLAIN` onto the gateway's logins,
 //!   with the tenant from the TLS server name, a `tenant.user` name, or
 //!   `listener.amqp.tenant`.
 //! - [`GatewayQueues`]: the queue engine. With catalog logins it is
 //!   `sprig-queues`' [`QueueEngine`] over [`queues::GatewayMq`] (the tenant
-//!   catalog, the shard schemas, chapter 29's grants) and
+//!   catalog, the shard schemas, the tenant's grants) and
 //!   [`queues::EtcdLeases`]; without them (no tenants) `sprig-proto-amqp`'s
 //!   in-memory engine. Either way a vhost maps to the tenant's logical
 //!   database (`/` to `amqp.default_vhost_database`), and vhosts whose
@@ -73,19 +72,19 @@ key!(
 );
 key!(
     /// `amqp.sasl_mechanisms`: offered SASL mechanisms, in order.
-    SASL_MECHANISMS: Text = "amqp.sasl_mechanisms", Cow::Borrowed("PLAIN,AMQPLAIN,EXTERNAL"), TENANT_GLOBAL,
+    SASL_MECHANISMS: Text = "amqp.sasl_mechanisms", Cow::Borrowed("PLAIN,AMQPLAIN,EXTERNAL"), Scopes::PROCESS,
     HardBounds::NONE, "Offered SASL mechanisms on the AMQP listeners"
 );
 key!(
     /// `amqp.cert_login_field`: what of a client certificate names the
     /// user for `EXTERNAL`.
-    CERT_LOGIN_FIELD: Text = "amqp.cert_login_field", Cow::Borrowed("common_name"), TENANT_GLOBAL,
+    CERT_LOGIN_FIELD: Text = "amqp.cert_login_field", Cow::Borrowed("common_name"), Scopes::PROCESS,
     HardBounds::one_of(&["common_name", "distinguished_name"]),
     "Certificate field that names the user for SASL EXTERNAL"
 );
 key!(
     /// `amqp.heartbeat_seconds`: the heartbeat the server proposes.
-    HEARTBEAT_SECONDS: u64 = "amqp.heartbeat_seconds", 60, TENANT_GLOBAL, HardBounds::range(0, 3600),
+    HEARTBEAT_SECONDS: u64 = "amqp.heartbeat_seconds", 60, Scopes::PROCESS, HardBounds::range(0, 3600),
     "Heartbeat the AMQP server proposes, in seconds"
 );
 key!(
@@ -110,12 +109,12 @@ key!(
 );
 key!(
     /// `amqp10.link_credit`: credit granted to publishing links.
-    LINK_CREDIT: u64 = "amqp10.link_credit", 256, TENANT_GLOBAL, HardBounds::range(1, 65_535),
+    LINK_CREDIT: u64 = "amqp10.link_credit", 256, Scopes::PROCESS, HardBounds::range(1, 65_535),
     "Credit granted to AMQP 1.0 publishing links"
 );
 key!(
     /// `amqp10.legacy_addresses`: accept bare and v1 addresses.
-    LEGACY_ADDRESSES: bool = "amqp10.legacy_addresses", false, Scopes::DATA, HardBounds::NONE,
+    LEGACY_ADDRESSES: bool = "amqp10.legacy_addresses", false, Scopes::PROCESS, HardBounds::NONE,
     "Accept bare queue names and AMQP address v1 forms"
 );
 
@@ -154,7 +153,7 @@ impl GatewayQueues {
             ))
         });
         Self {
-            // Per-object privileges (chapter 50 step 18) come with the
+            // Per-object privileges come with the
             // MariaDB-backed engine; a login that may use the vhost's
             // database may use its queues.
             mem: MemBackend::new(map, Arc::new(|_, _, _| true)),
@@ -165,7 +164,7 @@ impl GatewayQueues {
         }
     }
 
-    /// The `sprig-queues` engine over `tenants` (chapter 50 steps 2–10):
+    /// The `sprig-queues` engine over `tenants`:
     /// owner leases in `dc_store` as gateway `gateway_id`, stopped (and
     /// the leases revoked) at `stop`.
     ///
@@ -221,7 +220,7 @@ impl GatewayQueues {
                 e.shutdown();
             });
         }
-        // Fan-in consumers' ready index (chapter 42, "Fan-in").
+        // Fan-in consumers' ready index.
         engine.set_ready_hook(crate::inherited::fanin_mq::ReadyIndex::start(
             Arc::clone(&tenants),
             stop.clone(),
@@ -259,7 +258,7 @@ impl QueueBackend for GatewayQueues {
         events: EventSender,
     ) -> std::result::Result<Arc<dyn Vhost>, MqError> {
         if let Some(e) = &self.engine {
-            // Chapter 42: a member's inherited exchanges, queues and
+            // A member's inherited exchanges, queues and
             // bindings are made on its first use of the vhost, and
             // publishes into them are stamped (or targeted, from above).
             let db = self.database(vhost);
@@ -387,13 +386,24 @@ impl Frontend for AmqpFrontend {
 
     async fn serve(&self, conn: ClientConn, _ctx: Arc<GatewayContext>) -> Result<()> {
         let tls = conn.stream.tls_info();
+        // A verified client certificate (`listener.amqps.client_cert`):
+        // its names for the login's `REQUIRE SUBJECT` and `ISSUER`, and its
+        // login name for `EXTERNAL`.
+        let dn = tls
+            .as_ref()
+            .filter(|t| t.client_cert)
+            .and_then(|t| t.client_dn.clone());
+        let field = self
+            .live
+            .get(&CERT_LOGIN_FIELD, &SettingCtx::process(&self.dc));
         let info = ConnInfo {
             peer: conn.peer,
             tls: tls.is_some(),
             sni: tls.as_ref().and_then(|t| t.sni.clone()),
-            // Listeners don't ask for client certificates yet, so EXTERNAL
-            // is never offered (chapter 50, "AMQP 0-9-1").
-            cert_login: None,
+            cert_login: dn
+                .as_ref()
+                .and_then(|d| identity::cert_login(&d.subject, &field)),
+            client_dn: dn.map(|d| (d.subject, d.issuer)),
         };
         let cfg = self.config(conn.listener.handshake_timeout);
         let close = conn.close_soon.clone();

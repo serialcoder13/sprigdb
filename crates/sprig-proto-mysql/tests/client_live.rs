@@ -1,4 +1,4 @@
-//! The backend client against real servers (chapter 05 step 5).
+//! The backend client against real servers.
 //!
 //! ```sh
 //! export SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301
@@ -199,7 +199,7 @@ async fn caching_sha2_full_and_fast_paths_and_client_cert() {
     .await
     .unwrap();
 
-    // Empty cache, plaintext: the full path needs TLS (no RSA, D4).
+    // Empty cache, plaintext: the full path needs TLS (the client has no RSA).
     let plain = cfg("app", "app-pw", TlsMode::Disabled, &skip_verify());
     let err = MysqlClient::connect(&addr, &plain).await.unwrap_err();
     assert!(

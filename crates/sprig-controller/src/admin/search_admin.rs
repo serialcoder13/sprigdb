@@ -1,8 +1,8 @@
-//! `sprigctl search list|show` (chapter 39 build step 14; R5 round 6):
+//! `sprigctl search list|show`:
 //! the DC tier's search records, `search/indexes/` and `search/copies/`
 //! (see `sprig_search::placement`; the controller reads them as JSON).
 //!
-//! `sprigctl search rebuild` (R5 round 8) does what `ALTER SEARCH INDEX
+//! `sprigctl search rebuild` does what `ALTER SEARCH INDEX
 //! ... REBUILD` does through a gateway: the index's generation goes up by
 //! one in the tenant catalog (its `search_indexes` row and the definition
 //! in it), and the index's records leave the DC tier, so the copies of

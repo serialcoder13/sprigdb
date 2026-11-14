@@ -1,6 +1,5 @@
-//! Sharding pins and advice in SQL (chapter 16, "Interfaces"; build steps
-//! 7 and 8): parsing `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG SHOW ADVICE` and
-//! `SPRIG SHOW PINS`.
+//! Sharding pins and advice in SQL: parsing `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG
+//! SHOW ADVICE` and `SPRIG SHOW PINS`.
 //!
 //! ```sql
 //! SPRIG PIN orders SHARD KEY (customer_id);
@@ -53,7 +52,7 @@ pub enum PinSpec {
         /// The pinned table's columns holding the key.
         columns: Vec<String>,
     },
-    /// `REFERENCE`: a full copy everywhere (unsharded in R1).
+    /// `REFERENCE`: a full copy everywhere (unsharded).
     Reference,
     /// `UNSHARDED`: stays in its database's default group.
     Unsharded,

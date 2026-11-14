@@ -1,25 +1,25 @@
-//! Statement digests on port 3306 (chapter 28 step 13 with chapter 12's
-//! workload capture; R4 round 5): `events_statements_summary_by_digest`
-//! and the `sys` views over it, `statement_analysis` and
-//! `statements_with_errors_or_warnings` (with their `x$` forms).
+//! Statement digests on port 3306, from the workload capture:
+//! `events_statements_summary_by_digest` and the `sys` views over it,
+//! `statement_analysis` and `statements_with_errors_or_warnings` (with their
+//! `x$` forms).
 //!
-//! The gateway passes the tenant's digests ([`PsDigest`]): chapter 12's
+//! The gateway passes the tenant's digests ([`PsDigest`]): the workload
 //! recorder keeps, beside each fingerprint's hourly statistics, its totals
-//! since this gateway first counted it or since the tenant's last
-//! `TRUNCATE` of the summary, MySQL's lifetime for the table. Each digest
-//! becomes one row with MySQL 8.4's columns:
+//! since this gateway first counted it or since the tenant's last `TRUNCATE` of
+//! the summary, MySQL's lifetime for the table. Each digest becomes one row
+//! with MySQL 8.4's columns:
 //!
 //! - `DIGEST` is the fingerprint's id in 16 hex digits (MySQL's is a
 //!   SHA-256 in 64), `DIGEST_TEXT` its normalized text (literals as `?`,
 //!   `IN` lists folded, names qualified with the database).
 //! - Times are in picoseconds, from the gateway's measured latency (send
 //!   to end of result), so they include the network to MariaDB.
-//! - `SUM_ROWS_EXAMINED` adds up only the executions chapter 12 probed
+//! - `SUM_ROWS_EXAMINED` adds up only the executions the recorder probed
 //!   (watched fingerprints, a sample); `QUANTILE_*` are the upper bounds
 //!   of the recorder's histogram buckets.
 //! - Counters MariaDB can't give per statement (lock time, temporary
 //!   tables, sorts, index use, memory, warnings) are 0;
-//!   `QUERY_SAMPLE_TEXT` is `NULL`: chapter 12 keeps no plain statement
+//!   `QUERY_SAMPLE_TEXT` is `NULL`: the recorder keeps no plain statement
 //!   text (parameter samples are sealed).
 
 use super::{format_pico_time, sql_string};

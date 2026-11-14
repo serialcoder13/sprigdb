@@ -1,4 +1,4 @@
-//! Chapter 25's Admin API calls: manual failover, standbys and failover
+//! The DC failover Admin API calls: manual failover, standbys and failover
 //! records (see [`crate::failover::manual`]).
 //!
 //! ```text
@@ -26,7 +26,7 @@ use crate::failover::record::FailoverRecord;
 use crate::failover::role::FailoverRole;
 
 impl AdminService {
-    /// The same service with chapter 25's calls.
+    /// The same service with the failover calls.
     #[must_use]
     pub fn with_failover(mut self, f: Arc<FailoverRole>) -> Self {
         self.failover = Some(f);
@@ -82,7 +82,7 @@ impl AdminService {
         self.failover()?.errant(name).await
     }
 
-    /// `DataCenters.DrainDc` and `UndrainDc` (chapter 23 step 13).
+    /// `DataCenters.DrainDc` and `UndrainDc`.
     ///
     /// # Errors
     /// 39503 for an unknown DC; a DC in another state; the store's errors.
@@ -95,7 +95,7 @@ impl AdminService {
         crate::latency::set_draining(&*self.stores.global, &dc, drain).await
     }
 
-    /// The measured latency matrix (chapter 23 step 12).
+    /// The measured latency matrix.
     ///
     /// # Errors
     /// The store's errors.

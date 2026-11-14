@@ -1,5 +1,5 @@
 //! Golden captures from MariaDB 11.8, MariaDB 12.3 and MySQL 8.4, replayed
-//! through this crate's decoders and encoders (chapter 05, "Testing").
+//! through this crate's decoders and encoders.
 //!
 //! The fixtures under `tests/golden/<target>/` were recorded by
 //! `tests/golden_capture.rs`. Every server packet is classified by its

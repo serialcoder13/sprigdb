@@ -139,9 +139,6 @@ pub async fn fill_paths_keyed(
         })
         .collect();
     for _ in 0..=(u32::from(h.max_depth) + 1) {
-        if level.is_empty() {
-            break;
-        }
         for chunk in level.chunks(batch.max(1)) {
             let keys: Vec<String> = chunk
                 .iter()
@@ -184,6 +181,9 @@ pub async fn fill_paths_keyed(
                 Some((key, path, num(&next, i, 2)? + 1, val(&next, i, 3)?))
             })
             .collect();
+        if level.is_empty() {
+            break;
+        }
     }
     Ok(out)
 }
@@ -688,7 +688,8 @@ async fn cascade_first(
             continue;
         }
         gone.extend(
-            (0..rows.rows.len()).map(|i| key_literal(&val(&rows, i, 0).unwrap_or_default(), h.key_class, nbe)),
+            (0..rows.rows.len())
+                .map(|i| key_literal(&val(&rows, i, 0).unwrap_or_default(), h.key_class, nbe)),
         );
         r.exec(&format!(
             "DELETE FROM {t} WHERE {cond} ORDER BY {HDEPTH} DESC"

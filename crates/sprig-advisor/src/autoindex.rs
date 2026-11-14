@@ -1,4 +1,4 @@
-//! Automatic indexing (chapter 13): the decision logic that turns the
+//! Automatic indexing: the decision logic that turns the
 //! workload into secondary indexes, run by the controller.
 //!
 //! What exists:
@@ -6,29 +6,24 @@
 //! - [`model`]: definitions, origins, candidates and the canonical form
 //!   that names an index `sprig_auto_<8 hex>`;
 //! - [`store`]: the catalog tables as the `autoindex` migration module,
-//!   typed rows and access, the state machine and the decision hook
-//!   (step 1);
+//!   typed rows and access, the state machine and the decision hook;
 //! - [`settings`]: every `auto_index.*` key in the registry;
 //! - [`stats`]: MariaDB's engine-independent statistics, the `JSON_HB`
-//!   histogram parser, selectivity estimates and the throttled analyze job
-//!   (step 3);
+//!   histogram parser, selectivity estimates and the throttled analyze job;
 //! - [`candidates`]: candidate generation, covering, merging and the
-//!   coverage check against existing indexes with its `EXPLAIN` probe
-//!   (step 4);
+//!   coverage check against existing indexes with its `EXPLAIN` probe;
 //! - [`cost`]: the cost model, the gates, selection under budgets and
-//!   replacement (step 5);
+//!   replacement;
 //! - [`policy`]: per-object setting resolution, budgets at each scope,
-//!   bound tightening and the churn dampers (step 16);
-//! - [`replay`] and [`validate`]: the replay harness and the validators
-//!   (steps 6-9);
+//!   bound tightening and the churn dampers;
+//! - [`replay`] and [`validate`]: the replay harness and the validators;
 //! - [`rollout`]: online builds, windows, slots, lock-safe retries,
 //!   aborts, the Galera method until the mover exists, and the rollout
-//!   state machine (step 10);
+//!   state machine;
 //! - [`observe`]: the watch, usage tracking, retire and drop, and the drift
-//!   reconciler (step 11).
+//!   reconciler.
 //!
-//! - [`qualify`]: trigger evaluation, the fast scan trigger included
-//!   (steps 2 and 22);
+//! - [`qualify`]: trigger evaluation, the fast scan trigger included;
 //! - [`evaluate`]: one evaluation of one tenant, from the workload window
 //!   to candidates routed to validation or recommendations, paced by
 //!   `auto_index.eval_interval_minutes`.

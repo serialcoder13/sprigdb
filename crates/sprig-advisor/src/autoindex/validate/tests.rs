@@ -56,7 +56,7 @@ fn methods_follow_the_profile() {
         Method::GaleraRsu
     );
     assert_eq!(method_for(None, true), Method::EstimateCanary);
-    // Samples off: estimates and a canary only (chapter 13, failures).
+    // Samples off: estimates and a canary only.
     assert_eq!(
         method_for(Some(ValidationMethod::ReplicaBuild), false),
         Method::EstimateCanary

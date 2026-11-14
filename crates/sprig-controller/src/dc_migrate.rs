@@ -1,5 +1,5 @@
-//! Automatic moves between data centers (chapter 24, "The migration
-//! decision" and "Damping DC ping-pong"; build steps 7 and 9, r2last).
+//! Automatic moves between data centers: the migration decision and the
+//! damping that stops a tenant ping-ponging between DCs.
 //!
 //! ```text
 //! dc_migrate loop, on each DC leader, every migration.evaluate_seconds, per
@@ -12,7 +12,7 @@
 //! 3. W < migration.min_signal_requests -> relief only (step 6)
 //! 4. C = active, non-witness DCs T's residency allows that have been stable
 //!    (dc-load's stable_since) for recovery.stability_minutes, and the home;
-//!    L(c) = sum w[d] * rtt(d, c) / W from chapter 23's latency matrix (c
+//!    L(c) = sum w[d] * rtt(d, c) / W from the latency matrix (c
 //!    dropped when a needed pair is unmeasured); best = argmin L, ties to the
 //!    home, then the least busy
 //! 5. qualifies: best != home, gain >= L(home) * min_improvement_pct / 100 and
@@ -25,10 +25,10 @@
 //!    (a different target restarts the clock; not qualifying clears it)
 //! 8. guards: size <= migration.auto_size_limit_gb (else it waits for an
 //!    operator), fewer than migration.max_concurrent_per_dc moves at both
-//!    ends; a job standby of T in the target is dropped first (decision
-//!    RF11: the standby holds the tenant's lock there) and the move starts
+//!    ends; a job standby of T in the target is dropped first (the
+//!    standby holds the tenant's lock there) and the move starts
 //!    on the next pass
-//! 9. auto: the move (chapter 24's one-command move, cause traffic or relief);
+//! 9. auto: the move (the one-command move, cause traffic or relief);
 //!    recommend: only the decision
 //! ```
 //!
@@ -77,7 +77,7 @@ macro_rules! key {
     };
 }
 
-/// `migration.mode`: `auto`, `approve` (held for approval, chapter 52),
+/// `migration.mode`: `auto`, `approve` (held for approval),
 /// `recommend` (the dry run) or `off`.
 pub static MODE: Setting<Cow<'static, str>> = Setting {
     key: "migration.mode",
@@ -377,9 +377,9 @@ impl DecisionState {
 /// The loop (module docs).
 pub struct MigrationDecider {
     moves: Arc<DcMoves>,
-    /// Tenants' sizes (chapter 11's fleet view).
+    /// Tenants' sizes (the balancer's fleet view).
     balancer: Option<Arc<crate::balancer_loop::BalancerLoop>>,
-    /// Chapter 52: `migration.mode = approve` holds moves for approval.
+    /// `migration.mode = approve` holds moves for approval.
     approvals: Option<Arc<crate::approvals::ControllerApprovals>>,
 }
 
@@ -415,7 +415,7 @@ impl MigrationDecider {
         }
     }
 
-    /// Chapter 52: hold moves for approval under `migration.mode = approve`
+    /// Hold moves for approval under `migration.mode = approve`
     /// (and record advice under `recommend`).
     #[must_use]
     pub fn with_approvals(mut self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
@@ -423,7 +423,7 @@ impl MigrationDecider {
         self
     }
 
-    /// Chapter 52's gate for a qualifying move: `None` to go ahead
+    /// The approval gate for a qualifying move: `None` to go ahead
     /// (`auto`, or approved), `Some(why)` to hold.
     async fn approval_gate(
         &self,
@@ -475,8 +475,8 @@ impl MigrationDecider {
                     ev.home, improvement, ev.gain_ms
                 )
             },
-            // Relief moves free a DC running out of room (chapter 52,
-            // "Safety rules").
+            // Relief moves free a DC running out of room, so they count as
+            // emergencies.
             emergency: ev.decision == "relief",
         };
         match a.gate(&p, &policy).await {
@@ -514,7 +514,7 @@ impl MigrationDecider {
     ///
     /// # Errors
     /// The stores' errors.
-    #[allow(clippy::too_many_lines)] // the chapter's nine steps, in order
+    #[allow(clippy::too_many_lines)] // the module docs' nine steps, in order
     pub async fn reconcile_tenant(&self, tenant: TenantId) -> Result<Outcome> {
         let period = self.period();
         let m = &self.moves;
@@ -669,8 +669,8 @@ impl MigrationDecider {
             );
             return Ok(Outcome::RequeueAfter(period));
         }
-        // The tenant's job standby in the target holds its lock there
-        // (RF11): drop it first, and keep the standby loop out of it.
+        // The tenant's job standby in the target holds its lock there:
+        // drop it first, and keep the standby loop out of it.
         lock(&self.state().intents).insert(tenant, (best.clone(), now + 10 * 60 * 1000));
         if crate::standby::job_standbys(&e.raw).contains_key(&best) {
             crate::standby::drop_job_standby(

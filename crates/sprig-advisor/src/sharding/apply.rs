@@ -1,6 +1,5 @@
-//! Applying the first design (chapter 16, "Applying the first design
-//! (R1)"; build step 9). While a group's data is still on one shard the
-//! plan copies nothing:
+//! Applying the first design. While a group's data is still on one shard
+//! the plan copies nothing:
 //!
 //! 1. Write the `table_groups` rows (`preparing`, origin `advisor`, or
 //!    `pinned` when the root is pinned `SHARD KEY`) and members
@@ -17,11 +16,11 @@
 //!    chunks hashed in Rust, parent members by copying the co-located
 //!    parent's hash, parents before children. Members become `ready` when
 //!    no `NULL` is left and sampled rows re-hash correctly.
-//! 4. Mark the groups `active`: chapter 20 may split them.
+//! 4. Mark the groups `active`: from then on they may split.
 //!
 //! Every step checks what is already done, so a new leader resumes a run.
-//! Unique lookup indexes (step 4 of the book) are chapter 19's and not
-//! built here.
+//! Unique lookup indexes belong to the lookup-index code and aren't built
+//! here.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -68,8 +67,9 @@ pub fn rk_of(spec: &KeySpec, vals: &[Value]) -> Result<u64> {
 
 /// Publishes a change the apply made to the tenant's catalog rows
 /// (`table_groups`, `group_members`) as a new catalog version, so
-/// gateways reload their snapshot and route the moved tables (chapter 17's
-/// layout reads them). The controller commits an empty versioned change.
+/// gateways reload their snapshot and route the moved tables (the
+/// router's layout reads them). The controller commits an empty versioned
+/// change.
 #[async_trait::async_trait]
 pub trait Publish: Send + Sync + std::fmt::Debug {
     /// Raises `tenant`'s catalog version.
@@ -227,7 +227,7 @@ async fn create_groups(
             members.push((m.object, l.db, l.name.clone(), m.routing.clone()));
         }
         if first.is_some() {
-            // Chapter 15: a group whose root is pinned SHARD KEY is
+            // A group whose root is pinned SHARD KEY is
             // `pinned`; members placed by a pin have `pinned = 1`.
             let origin = match g.members.first().and_then(|m| input.pin(m.object)) {
                 Some(PinKind::ShardKey { .. }) => "pinned",
@@ -310,7 +310,7 @@ async fn triggers(c: &mut Conn, schema: &str, table: &str) -> Result<Vec<(String
 }
 
 /// Whether `view` is a row-level security policy view of `table`
-/// (chapter 29: `__sprig_rls_<table>`, or `__sprig_rlsh_<table>` with
+/// (`__sprig_rls_<table>`, or `__sprig_rlsh_<table>` with
 /// every column; long names keep a head and `~<object id>`).
 fn policy_view_of(view: &str, table: &str) -> bool {
     [
@@ -331,7 +331,7 @@ fn policy_view_of(view: &str, table: &str) -> bool {
     })
 }
 
-/// The policy views of `schema.table` (chapter 29, decision RL29): (name,
+/// The policy views of `schema.table`: (name,
 /// definer account, `CREATE VIEW` text).
 async fn policy_views(
     c: &mut Conn,
@@ -388,7 +388,7 @@ fn policy_views_are_recognised() {
 }
 
 /// Re-creates moved tables' policy views in their new schemas, with the
-/// context function they read and their definer's right to run it (RL29).
+/// context function they read and their definer's right to run it.
 /// `moves` maps each moved (schema, table) to its new schema: the views'
 /// texts name their table, the function and their policies' subquery
 /// tables qualified. Best effort: a view that can't be made is left to the
@@ -460,7 +460,7 @@ fn grant_name(p: &str) -> Option<String> {
 }
 
 /// Copies `tenant`'s accounts' table and column grants on `from`.`table`
-/// to `to`.`table` (bugfix-25), as `sprig_ctl`. Failures are logged: the
+/// to `to`.`table`, as `sprig_ctl`. Failures are logged: the
 /// gateways' reconcile grants them too, a moment later.
 async fn carry_grants(c: &mut Conn, tenant: TenantId, from: &str, to: &str, table: &str) {
     let like = format!("t{tenant}\\_%");
@@ -571,7 +571,7 @@ async fn regroup(
             c.query_drop(sql)
                 .await
                 .map_err(|e| db_err("create a group schema", &e))?;
-            // Chapter 18: a shard schema anchors transaction decisions;
+            // A shard schema anchors transaction decisions;
             // splits and moves copy the table into every child.
             c.query_drop(sprig_catalog::ddl::dtx_table_sql(&to))
                 .await
@@ -596,7 +596,7 @@ async fn regroup(
         return Ok(0);
     }
     let mut trig: Vec<(String, String, String)> = Vec::new(); // (to schema, name, body)
-    // Chapter 29 (RL29): (from, to, view, definer account, text).
+    // Policy views: (from, to, view, definer account, text).
     let mut pviews: Vec<(String, String, String, String, String)> = Vec::new();
     for (from, to, t) in &moves {
         for (n, body) in triggers(c, from, t).await? {
@@ -655,7 +655,7 @@ async fn regroup(
                 .await
                 .map_err(|e| db_err("re-create a trigger", &e))?;
         }
-        // bugfix-25: MariaDB keeps table and column grants by schema and
+        // MariaDB keeps table and column grants by schema and
         // name, and the rename leaves them behind; the tenant's accounts
         // get theirs on the new schema before writes resume (the gateways'
         // reconcile then drops the old rows).
@@ -833,9 +833,9 @@ async fn backfill(c: &mut Conn, ctx: &ApplyCtx, g: &CreatedGroup, input: &Input)
             let pk = pk_of(*o);
             match routing {
                 Routing::Columns { columns } => {
-                    // Rows a front end already routed (chapter 33's tables
+                    // Rows a front end already routed (key-value tables
                     // fill `_sprig_rk` on every write, whatever their
-                    // primary key) need no back-fill (R6 round 4).
+                    // primary key) need no back-fill.
                     if pk.len() != 1 && unfilled(c, &schema, name).await? == 0 {
                         continue;
                     }
@@ -979,8 +979,8 @@ async fn backfill(c: &mut Conn, ctx: &ApplyCtx, g: &CreatedGroup, input: &Input)
     Ok(total)
 }
 
-/// Applies `design` for advisor run `run` (chapter 16's plan, steps 1 to
-/// 5). `located` says where each table is now; `maps` is the DC tier's
+/// Applies `design` for advisor run `run` (the steps in the module docs).
+/// `located` says where each table is now; `maps` is the DC tier's
 /// tenant maps, `shard_maps` its group maps.
 ///
 /// # Errors
@@ -997,7 +997,7 @@ pub async fn apply_first_design(
     maps: &TenantMaps,
     shard_maps: &ShardMapStore,
 ) -> Result<Applied> {
-    // Decision bugfix-31: stored code created since the run (or since a
+    // Stored code created since the run (or since a
     // stored design was decided) may name tables the design moves. Checked
     // before the run's first group exists; a resumed run goes on.
     let cat = catalog(ctx.tenant);

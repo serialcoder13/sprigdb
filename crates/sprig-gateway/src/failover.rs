@@ -1,4 +1,4 @@
-//! Chapter 25 in the gateway (R2): the DC permit, its watchdog, the write
+//! DC failover in the gateway: the DC permit, its watchdog, the write
 //! gate and admission while the DC returns.
 //!
 //! - **Permit.** A [`PermitKeeper`] renews the gateway's permit every
@@ -17,12 +17,11 @@
 //! - **Watchdog.** A plain OS thread watches a heartbeat the runtime
 //!   raises every 100 ms: a stall of `failover.watchdog_ms` fences the
 //!   gateway directly; at twice that the gateway stops the statements
-//!   holding a worker (`offload::on_stall`), and never aborts (G40,
-//!   decision bugfix-1). A process that was paused as a whole (SIGSTOP, a
+//!   holding a worker (`offload::on_stall`), and never aborts. A process that was paused as a whole (SIGSTOP, a
 //!   frozen VM) only fences on resume.
 //! - **Opting out.** With `failover.self_fence = false` for the DC, the
-//!   gateway never refuses writes for a missing permit (chapter 25: such a
-//!   DC skips self-fencing and never fails over automatically).
+//!   gateway never refuses writes for a missing permit (such a DC skips
+//!   self-fencing and never fails over automatically).
 //! - **Admission.** While the DC returns from an outage, the permit
 //!   carries the step's rate; new MySQL connections beyond it get 39531
 //!   `ER_SPRIG_ADMISSION_BACKOFF` in place of the greeting, with a retry
@@ -50,7 +49,7 @@ use crate::pipeline::{EndOfRows, ResultSink, RowFormat, RowValues, Wire};
 /// The renew period.
 pub const RENEW_PERIOD: Duration = Duration::from_secs(1);
 
-/// The gateway's chapter 25 state (see the module docs).
+/// The gateway's failover state (see the module docs).
 pub struct GatewayFence {
     dc: DcId,
     keeper: Arc<PermitKeeper>,
@@ -80,7 +79,7 @@ pub fn get() -> Option<&'static Arc<GatewayFence>> {
     FENCE.get()
 }
 
-/// `failover.watchdog_ms` (chapter 25's key, declared by the controller).
+/// `failover.watchdog_ms` (declared by the controller).
 fn watchdog_ms(live: &LiveSettings, dc: &DcId) -> Duration {
     let ms = live
         .resolve("failover.watchdog_ms", &SettingCtx::process(dc))
@@ -121,10 +120,10 @@ pub fn start(
             }
         }),
         // Still stuck after twice the stall: the gateway never aborts, which
-        // let one tenant's heavy statement take it down for everyone (G40).
+        // would let one tenant's heavy statement take it down for everyone.
         // It names and stops the statements holding a worker, and logs and
-        // counts the stall (decision bugfix-1); writes stay fenced until the
-        // permit loop ticks again.
+        // counts the stall; writes stay fenced until the permit loop ticks
+        // again.
         Box::new(move || {
             crate::offload::on_stall(stall * 2, stall);
         }),
@@ -151,7 +150,7 @@ pub fn start(
         }
         // Shutting down: the permit loop stops, so its heartbeat does too;
         // the watchdog must not take that for a stuck runtime and abort
-        // the drain (r2next).
+        // the drain.
         let w = f2
             .watchdog
             .lock()
@@ -438,7 +437,7 @@ mod tests {
         let holder = Arc::new(PermitHolder::new("gw", "gateway", Arc::new(SystemClock)));
         let keeper = Arc::new(PermitKeeper::new(Arc::clone(&holder)));
         let f = GatewayFence::for_tests(DcId::new("fra1").unwrap(), Arc::clone(&keeper));
-        assert!(f.check_write().is_ok(), "unarmed: as before R2");
+        assert!(f.check_write().is_ok(), "unarmed: no permit needed");
         keeper.arm();
         assert_eq!(
             f.check_write().unwrap_err().code(),

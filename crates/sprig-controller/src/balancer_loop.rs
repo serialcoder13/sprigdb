@@ -1,12 +1,12 @@
-//! Chapter 11's balancer on the DC leader (build steps 6 and 7): every
+//! The balancer on the DC leader: every
 //! `balancer.interval_seconds` it builds the fleet view, polls moves in
 //! flight, plans, schedules, and keeps the recommendations; it also serves
 //! `sprigctl explain placement` and `sprigctl explain decision`.
 //!
-//! **The fleet view in R0.** A tenant's placement unit is its whole R0
-//! footprint (catalog and every database's shard schema, on the cluster
+//! **The fleet view.** A tenant's placement unit is its whole footprint
+//! (catalog and every database's shard schema, on the cluster
 //! its `shardmaps/<tenant>/0` names), so the view has one unit per tenant,
-//! keyed `t<id>/g0/s0`, as chapter 10's R0 mover moves it. Clusters come
+//! keyed `t<id>/g0/s0`, as the mover moves it. Clusters come
 //! from the registry: `active` and `healthy` are placeable, `degraded`
 //! takes nothing, `draining` sheds its tenants; capacity is the declared
 //! `capacity`; capability flags come from the published profile. Storage,
@@ -14,9 +14,8 @@
 //! `mysql.innodb_table_stats` (`database_name LIKE 't<id>\_%'`, the
 //! table's primary key prefix, never `information_schema`).
 //!
-//! **Gateway load in R0.** Gateways don't send chapter 11's load reports
-//! on port 7400 yet. What they do send is chapter 12's workload
-//! statistics, flushed every `workload.flush_seconds` into each tenant's
+//! **Gateway load.** Gateways don't send load reports on port 7400 yet.
+//! What they do send is the workload statistics, flushed every `workload.flush_seconds` into each tenant's
 //! catalog (`workload_stats`: statements, statement microseconds and rows
 //! affected per fingerprint, bucket and gateway). Each run reads one
 //! aggregate of the tenant's recent buckets from the catalog it already
@@ -28,7 +27,7 @@
 //! an hour back. Connections stay unmeasured. A catalog without the
 //! workload tables reads as no load.
 //!
-//! **Moves.** The controller passes a [`MoveExecutor`] over chapter 10's
+//! **Moves.** The controller passes a [`MoveExecutor`] over the mover's
 //! job records (`sprig_balancer::mover::MoverExecutor` on
 //! `sprig_mover::MetaMover`), so `auto` submits `move_shard` jobs that
 //! workers (`sprigdb worker`) claim and run; `recommend` and `dry_run`
@@ -37,7 +36,7 @@
 //!
 //! **Settings** are resolved at DC scope (and cluster scope for the
 //! per-cluster keys); each tenant's knobs also read its own catalog rows
-//! through [`crate::tenant_scopes`] (RL3, r2harden).
+//! through [`crate::tenant_scopes`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -95,10 +94,10 @@ pub struct BalancerLoop {
     log: Arc<CatalogDecisionLog>,
     recs: RecommendationStore,
     inner: Mutex<Inner>,
-    /// Tenants' own catalog rows (RL3, r2harden): a tenant's
+    /// Tenants' own catalog rows: a tenant's
     /// `balancer.*` knobs win over its DC's.
     scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
-    /// Chapter 52: `balancer.mode = approve` holds a tenant's moves.
+    /// `balancer.mode = approve` holds a tenant's moves.
     pub approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
 
@@ -159,7 +158,7 @@ impl BalancerLoop {
         }
     }
 
-    /// Chapter 52: the tenants under `approve` whose planned move is
+    /// The tenants under `approve` whose planned move is
     /// approved now (their moves run as under `auto` this run).
     async fn approved_moves(
         &self,
@@ -212,7 +211,7 @@ impl BalancerLoop {
         out
     }
 
-    /// The same loop reading tenants' own `balancer.*` rows (RL3).
+    /// The same loop reading tenants' own `balancer.*` rows.
     #[must_use]
     pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
         self.scopes = Some(s);
@@ -302,7 +301,7 @@ impl BalancerLoop {
             opts.after = page.kvs.last().map(|kv| kv.key.clone());
         }
         // A pin names where its tenant is: one an operator's move left
-        // behind follows it (chapter 11, "Manual moves and pins").
+        // behind follows it.
         let placements: BTreeMap<TenantId, ClusterId> = units.iter().cloned().collect();
         if let Err(e) = self.follow_pins(&placements).await {
             tracing::warn!(error = %e, "pins not brought up to date");
@@ -341,7 +340,7 @@ impl BalancerLoop {
                 v.add_shard(ShardView::new(ShardKey::new(t.0, 0, 0), c.clone(), load));
             }
         }
-        // Chapter 26: each tenant's allowed DCs. No view without them (a
+        // Residency: each tenant's allowed DCs. No view without them (a
         // plan that ignored residency could place a copy outside).
         for (t, a) in crate::residency::allowed_map(&**self.dir.store()).await? {
             if let Some(tv) = v.tenants.get_mut(&t) {
@@ -356,8 +355,8 @@ impl BalancerLoop {
                 .list()
                 .await?,
         );
-        // R1: a tenant with table groups doesn't move whole (the mover
-        // refuses it with 39472; chapter 20). Its shards move one by one,
+        // A tenant with table groups doesn't move whole (the mover
+        // refuses it with 39472). Its shards move one by one,
         // so the tenant-level plan leaves it where it is.
         for t in sharded_tenants(&*self.dc_store).await? {
             if let Some(tv) = v.tenants.get_mut(&t) {
@@ -432,7 +431,7 @@ impl BalancerLoop {
             Some(l) => {
                 let snap = l.snapshot();
                 let ctx = SettingCtx::process(&self.dc).for_tenant(t, &[]);
-                // RL3: the tenant's own rows, as cached (read in the
+                // The tenant's own rows, as cached (read in the
                 // background when missing or stale).
                 let rows = self.scopes.as_ref().and_then(|s| s.cached(t));
                 TenantKnobs::resolve_with(&snap, rows.as_deref(), &ctx)
@@ -537,7 +536,7 @@ impl BalancerLoop {
                 .scheduler
                 .schedule(&report, &view, &mode_of, max, exec, &log, now)
                 .await;
-            // Chapter 52: an approved tenant's item is applied once its
+            // An approved tenant's item is applied once its
             // move is submitted; until then the next run re-enters it.
             if let Some(a) = self.approvals.get() {
                 for (t, ticket) in &approved_now {
@@ -577,7 +576,7 @@ impl BalancerLoop {
         Ok(report)
     }
 
-    /// The tenant's storage in the last fleet view (chapter 24's
+    /// The tenant's storage in the last fleet view (for the
     /// `migration.auto_size_limit_gb` guard); `None` before a run or for a
     /// tenant not homed here.
     pub async fn tenant_storage_bytes(&self, t: TenantId) -> Option<f64> {
@@ -593,7 +592,7 @@ impl BalancerLoop {
     }
 
     /// Writes this DC's `dc-load` record from the last fleet view, when
-    /// due (chapter 24, "Least-busy placement").
+    /// due (for least-busy placement).
     async fn publish_dc_load(&self, global: &Arc<dyn sprig_meta::MetaStore>) {
         let view = self.inner.lock().await.last_view.clone();
         let Some(view) = view else {
@@ -680,7 +679,7 @@ impl BalancerLoop {
     }
 
     /// Clusters the last run's load model put above their high watermark
-    /// (`full` above `balancer.high_pct`), for chapter 20's load splits;
+    /// (`full` above `balancer.high_pct`), for load splits;
     /// `None` before the first run.
     pub async fn above_high(&self) -> Option<BTreeSet<ClusterId>> {
         let g = self.inner.lock().await;
@@ -893,11 +892,11 @@ impl Reconciler for Arc<BalancerLoop> {
         if let Err(e) = self.run_once().await {
             tracing::warn!(error = %e, "balancer run failed");
         }
-        // Chapter 24 (r2last): this DC's spare capacity for least-busy
+        // This DC's spare capacity for least-busy
         // placement and relief moves.
         self.publish_dc_load(&cx.global).await;
-        // Draining clusters whose shards have all moved away are drained
-        // (r2opfix; chapter 09's cluster states).
+        // Draining clusters whose shards have all moved away become
+        // `drained`.
         if let Ok(l) = cx.leader() {
             let guard = vec![sprig_meta::Cmp::CreateRev(l.key().clone(), l.token)];
             if let Err(e) =
@@ -942,7 +941,7 @@ async fn sharded_tenants(dc: &dyn sprig_meta::MetaStore) -> Result<BTreeSet<Tena
 #[cfg(test)]
 mod tests;
 
-/// Bootstrap hooks that add chapter 11's `decisions` module to `H`'s, so
+/// Bootstrap hooks that add the `decisions` module to `H`'s, so
 /// every new tenant catalog gets its decision log with its core tables.
 /// (Older catalogs get it on the first decision: see
 /// `CatalogDecisionLog`.)

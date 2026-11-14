@@ -1,6 +1,5 @@
 //! What a stored program's text names: the tables it reads or writes, the
-//! routines it calls and whether it runs dynamic SQL (chapter 16, "Stored
-//! code keeps its tables in place"; decision bugfix-31).
+//! routines it calls and whether it runs dynamic SQL.
 //!
 //! A view, procedure, function, package, trigger or event runs inside
 //! MariaDB in one schema, and its unqualified names resolve there. The

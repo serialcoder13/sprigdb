@@ -1,15 +1,14 @@
-//! `$currentOp` and `$listSessions` (M2, 12 Nov 2026): MongoDB's shapes,
+//! `$currentOp` and `$listSessions`: MongoDB's shapes,
 //! filled from the gateway's session table.
 //!
 //! - `$currentOp` (`aggregate: 1` on `admin`) lists the caller's own
 //!   connections on this gateway, as `SHOW PROCESSLIST` does for a user
-//!   without chapter 29's `PROCESS` privilege. `allUsers: true` lists
-//!   every session of the tenant on this gateway for a user holding
-//!   `PROCESS` on the tenant (MongoDB's `inprog`), and answers 13
-//!   `Unauthorized` otherwise (M5, decision S78). The running command is
-//!   always listed;
-//!   `idleConnections: true` adds idle ones. Fields with no meaning in
-//!   SprigDB (locks, yields, flow control) are zero or empty.
+//!   without the `PROCESS` privilege. `allUsers: true` lists every session
+//!   of the tenant on this gateway for a user holding `PROCESS` on the
+//!   tenant (MongoDB's `inprog`), and answers 13 `Unauthorized` otherwise.
+//!   The running command is always listed; `idleConnections: true` adds
+//!   idle ones. Fields with no meaning in SprigDB (locks, yields, flow
+//!   control) are zero or empty.
 //! - `$listSessions` (on `config.system.sessions`) lists the caller's
 //!   current logical session: SprigDB keeps no cluster-wide session
 //!   collection.
@@ -72,8 +71,8 @@ pub(super) fn first_docs(
 }
 
 /// Whether the caller holds `PROCESS` on the tenant, asked only for
-/// `$currentOp` with `allUsers` (M5, S78). A session that hasn't run a
-/// statement yet has no catalog installed: one `SELECT 1` installs it.
+/// `$currentOp` with `allUsers`. A session that hasn't run a statement yet
+/// has no catalog installed: one `SELECT 1` installs it.
 pub(super) async fn process_privilege(
     sql: &mut super::sql::SqlSession,
     first: Option<&Document>,
@@ -124,7 +123,7 @@ fn current_op(
     }
     let idle = spec.get_bool("idleConnections").unwrap_or(false);
     let who = owner(c);
-    // M5 (S78): every user's sessions need `PROCESS` on the tenant.
+    // Every user's sessions need `PROCESS` on the tenant.
     let all_users = spec.get_bool("allUsers").unwrap_or(false);
     if all_users && process != Some(true) {
         return Err(MongoError::new(
@@ -235,7 +234,7 @@ fn current_op(
         );
         out.push(d);
     }
-    // Idle change-stream cursors with their position (M4, 9.0's
+    // Idle change-stream cursors with their position (9.0's
     // `cursor.changeStreams.optime`).
     if spec.get_bool("idleCursors").unwrap_or(false) {
         out.extend(super::status::change_stream_ops(c));
@@ -243,9 +242,9 @@ fn current_op(
     Ok(out)
 }
 
-/// Records a command on a collection for `$collStats.latencyStats` (M5,
-/// decision S79): reads, writes, other commands, and anything inside a
-/// transaction as a transaction.
+/// Records a command on a collection for `$collStats.latencyStats`: reads,
+/// writes, other commands, and anything inside a transaction as a
+/// transaction.
 pub(super) fn record_latency(
     tenant: u64,
     name: &str,

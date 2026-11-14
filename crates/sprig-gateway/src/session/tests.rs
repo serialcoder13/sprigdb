@@ -48,7 +48,7 @@ async fn client_conn() -> (TcpStream, ClientConn) {
 
 #[test]
 fn conn_ids_pack_slot_and_counter() {
-    // Chapter 03's example id.
+    // Slot 1, counter 131,073.
     let id = ConnId(1_179_649);
     assert_eq!((slot_of(id), counter_of(id)), (1, 131_073));
     assert_eq!(conn_id(1, 131_073), id);

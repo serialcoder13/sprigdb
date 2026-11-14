@@ -1,9 +1,8 @@
-//! What goes with a dropped database besides its schemas (bugfix-34):
-//! its sinks and connections (chapter 51) and its logic modules (chapter
-//! 41), so none stays `running` or `active` in the catalog and no job
-//! keeps running for it; and a member's inherited instances in it
-//! (chapter 42, bugfix-39), created again at their next use. Its streams went first (chapter 45, in
-//! [`super::streams`]).
+//! What goes with a dropped database besides its schemas: its sinks and
+//! connections and its logic modules, so none stays `running` or `active`
+//! in the catalog and no job keeps running for it; and a member's
+//! inherited instances in it, created again at their next use. Its streams
+//! went first (in [`super::streams`]).
 //!
 //! [`DbDrop::before`] notes the database's id and sinks before the
 //! statement runs; [`DbDrop::after`] runs once `DROP DATABASE` has
@@ -67,7 +66,7 @@ impl DbDrop {
             tracing::warn!(tenant = %self.tenant, db = %self.name, error = %e,
                 "DROP DATABASE: the database's logic modules were not all dropped");
         }
-        // bugfix-39: a member's inherited instances in the database.
+        // A member's inherited instances in the database.
         if let Err(e) = Box::pin(crate::inherited::lifecycle::database_dropped(
             svc,
             self.tenant,

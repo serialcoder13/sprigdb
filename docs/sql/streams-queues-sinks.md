@@ -408,13 +408,20 @@ ALTER SINK [db_name.]sink_name SET SCRIPT AS $$ body $$
 
 | Form | Effect |
 |---|---|
-| `PAUSE`, `RESUME` | Stop and restart delivery. A sink also pauses itself after `sink.pause_after_minutes` of destination-wide failure; with `sink.auto_resume` it probes every `sink.probe_interval_seconds` and resumes |
+| `PAUSE`, `RESUME` | Stop and restart delivery. A sink also pauses itself after `sink.pause_after_minutes` of destination-wide failure; with `sink.auto_resume` it probes every `sink.probe_interval_seconds` and resumes. It pauses with 39229 when its owner can no longer read the source, and resumes by itself when the owner can again (see below) |
 | `SET`, `RESET` | Change or remove options |
 | `RESET TO` | Move the read position |
 | `OWNER TO` | Change the account whose rights the sink reads with |
 | `SET SCRIPT` | Replace a script sink's code |
 
 An operation the sink's state doesn't allow fails with 39232 `ER_SPRIG_SINK_STATE`. **Privileges:** `SPRIG_SINK_ADMIN`.
+
+**When the owner loses access.** A sink reads with its owner's rights. If the owner loses `SELECT` on the source (a `REVOKE`, a revoked role), or its account is locked or dropped, the sink pauses: `SHOW SINKS` shows `paused` with a `Reason` that starts with `39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` and names the cause. The gateway checks when an account or grant statement commits, and each task checks before its batches, at most once a second. When the owner can read the source again, the sink resumes by itself from where it stopped; or give it an owner who can, with `OWNER TO`, and `RESUME` it. Fan-in sinks aren't checked this way. See [Sinks](../data-models/sinks.md#retries-dead-letters-and-pausing).
+
+```sql
+REVOKE SELECT ON shop.* FROM etl;   -- etl's sinks on shop pause with 39229
+GRANT SELECT ON shop.* TO etl;      -- and resume
+```
 
 ```sql
 ALTER SINK orders_to_hooks PAUSE;
@@ -602,7 +609,7 @@ SHOW INHERITED DEFINITIONS;
 | 39226 | `ER_SPRIG_SINK_QUOTA` | Over `sink.max_per_tenant` or a throughput quota |
 | 39227 | `ER_SPRIG_SINK_FENCED` | A task's epoch moved on; the old worker stops |
 | 39228 | `ER_SPRIG_SINK_PLATFORM_IDENTITY_DENIED` | The worker's cloud identity isn't allowed (`sink.platform_identity`) |
-| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | The owner can no longer read the source |
+| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | A sink's pause reason: the owner lost `SELECT` on the source, or was locked or dropped; it resumes when access returns |
 | 39230 | `ER_SPRIG_SINK_DISABLED` | `sink.enabled` is off, or the kind isn't in `sink.allowed_kinds` |
 | 39231 | `ER_SPRIG_SINK_FORMAT_UNSUPPORTED` | A format or compression the target can't produce |
 | 39232 | `ER_SPRIG_SINK_STATE` | An operation the sink's state doesn't allow |

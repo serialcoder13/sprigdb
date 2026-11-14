@@ -1,4 +1,4 @@
-//! Cursors (chapter 30, "Cursors"; build step 5).
+//! Cursors.
 //!
 //! Ids are positive `i64`s: bits 47-62 hold 16 bits of a hash of the
 //! gateway id, bits 0-46 are random. A cursor keeps the engine's
@@ -38,9 +38,9 @@ pub struct Cursor {
     pub batch_size: Option<usize>,
     /// `noCursorTimeout`.
     pub no_timeout: bool,
-    /// A change stream's feed (chapter 30 step 9); `plan` is unused.
+    /// A change stream's feed; `plan` is unused.
     pub stream: Option<super::changes::ChangeStream>,
-    /// A tailable `awaitData` cursor (M7): `getMore` waits up to its
+    /// A tailable `awaitData` cursor: `getMore` waits up to its
     /// `maxTimeMS` for new documents.
     pub await_data: bool,
     last_used: Instant,
@@ -143,7 +143,7 @@ impl CursorTable {
             Vec::new(),
         );
         plan.exhausted = false;
-        // M4 (S116): change-stream metrics.
+        // Change-stream metrics.
         let scope = super::status::stream_scope(&ns);
         let id = self.open(plan, ns, owner, lsid, batch_size, false, max_per_tenant)?;
         super::status::stream_opened(id, scope);
@@ -156,7 +156,7 @@ impl CursorTable {
         Ok(id)
     }
 
-    /// Marks cursor `id` as a tailable `awaitData` cursor (M7).
+    /// Marks cursor `id` as a tailable `awaitData` cursor.
     pub fn set_await_data(&self, id: i64) {
         if let Some(c) = self.lock().get(&id).cloned()
             && let Ok(mut g) = c.try_lock()
@@ -249,13 +249,13 @@ impl CursorTable {
         });
     }
 
-    /// The open cursors' ids (M4: change-stream metrics).
+    /// The open cursors' ids (for change-stream metrics).
     #[must_use]
     pub fn ids(&self) -> Vec<i64> {
         self.lock().keys().copied().collect()
     }
 
-    /// The open cursors (M4: `currentOp`'s change streams).
+    /// The open cursors (for `currentOp`'s change streams).
     #[must_use]
     pub fn entries(&self) -> Vec<(i64, Arc<tokio::sync::Mutex<Option<Cursor>>>)> {
         self.lock()

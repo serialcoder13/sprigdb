@@ -1,18 +1,17 @@
-//! bugfix-43 and bugfix-44 (decisions/bugfix-interim.md; Studio's ST63):
-//! a child tenant and the databases its parent shares, through a gateway.
+//! A child tenant and the databases its parent shares, through a gateway.
 //!
-//! 1. bugfix-43: a parent shares a new database; before the child runs
+//! 1. A parent shares a new database; before the child runs
 //!    any statement, a client connects to the child with that database
 //!    as its default (the handshake's database, the same path as
 //!    `COM_INIT_DB`), and another prepares a statement naming it
 //!    (`COM_STMT_PREPARE`). Before, both got 1049 "Unknown database" until
 //!    the child ran a text statement such as `SHOW DATABASES`: only
 //!    `COM_QUERY` brought the child up to its parent.
-//! 2. bugfix-44: the parent ends the share and drops the database. The
-//!    child keeps its database of that name with its own rows (Kiran's
-//!    `inherit.parent_delete = keep`): it reads and writes them, the
+//! 2. The parent ends the share and drops the database. The
+//!    child keeps its database of that name with its own rows
+//!    (`inherit.parent_delete = keep`): it reads and writes them, the
 //!    parent's records are gone from it, and it can drop the database.
-//! 3. bugfix-51 (the lead's choice on bugfix-44): when the parent drops a
+//! 3. When the parent drops a
 //!    share, the child's overrides of the parent's records become the
 //!    child's own rows, visible as written (before, they were hidden), and
 //!    the share view `__sprig_share_<id>` leaves the child's schema at once.
@@ -167,7 +166,7 @@ async fn a_new_share_is_usable_before_the_childs_first_statement() {
     drop(c);
 
     // COM_STMT_PREPARE first: a second new database. A prepared statement
-    // on an inheritable table is refused by chapter 42 (39xxx), but never
+    // on an inheritable table is refused (39xxx), but never
     // with 1049 for a database the child has.
     let db2 = format!("{db}b");
     share(&mut p, &db2).await;
@@ -180,7 +179,7 @@ async fn a_new_share_is_usable_before_the_childs_first_statement() {
         Err(mysql_async::Error::Server(s)) => {
             assert_ne!(s.code, 1049, "{db2}: {}", s.message);
             println!(
-                "prepare on {db2}.t1 refused as chapter 42 says: {} {}",
+                "prepare on {db2}.t1 refused (inheritable table): {} {}",
                 s.code, s.message
             );
         }
@@ -446,7 +445,7 @@ async fn rows_become(c: &mut Conn, db: &str, want: &[(&str, &str)]) -> Vec<(Stri
     last
 }
 
-/// bugfix-55 (bugfix-51's leftovers), on a materialized share: when the
+/// On a materialized share: when the
 /// parent drops the share, the child's hides go with it (a share made
 /// again shows the record the child had hidden under the old one), and
 /// the copy the child read the parent's rows from leaves its schema at

@@ -1,14 +1,13 @@
-//! Backend accounts in output, shown as the session's user (chapter 07
-//! build step 9's output side, interim).
+//! Backend accounts in output, shown as the session's user.
 //!
-//! Until chapter 29's per-user backend accounts (`t<tenant>_u<id>`, which
-//! [`super::names::Accounts`] maps), a tenant's statements run as the one
-//! backend account `[gateway] backends_file` names, and stored programs as
-//! the cluster's provisioning account (see [`super::ddl`]). Neither may
-//! reach a tenant: a `DEFINER` in `SHOW CREATE` output, in
-//! `information_schema` and in dumps, a grantee in `SHOW GRANTS`, a user in
-//! an error message. Each `'account'@'host'` naming one of them, in any of
-//! MariaDB's spellings, becomes the session's user at host `%`:
+//! A tenant's statements run as a backend account (a per-user
+//! `t<tenant>_u<id>`, which [`super::names::Accounts`] maps, or the one
+//! `[gateway] backends_file` names), and stored programs as the cluster's
+//! provisioning account (see [`super::ddl`]). Neither may reach a tenant: a
+//! `DEFINER` in `SHOW CREATE` output, in `information_schema` and in dumps,
+//! a grantee in `SHOW GRANTS`, a user in an error message. Each
+//! `'account'@'host'` naming one of them, in any of MariaDB's spellings,
+//! becomes the session's user at host `%`:
 //!
 //! | Written | Becomes |
 //! |---|---|

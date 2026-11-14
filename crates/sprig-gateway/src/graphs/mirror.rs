@@ -1,5 +1,4 @@
-//! Asynchronous mirrors in the gateway (chapter 43, "Mirrors and
-//! freshness"; R8 round 5, decision G47).
+//! Asynchronous mirrors in the gateway: mirror modes and freshness.
 //!
 //! - **Mode changes.** A grouped graph's `graphs.mirror_mode` follows
 //!   `graph.mirror` (resolved at the graph's database scope), moved by the
@@ -107,7 +106,7 @@ impl CatalogGate {
         // The target: every transaction committed on the shards' clusters
         // before the statement (their binlog positions now), and the
         // session's causal target, so the mirrors never hide a committed
-        // edge (decision G47).
+        // edge.
         let mut targets = self.targets.clone();
         let mut asked: HashSet<&str> = HashSet::new();
         for s in &layout.shards {
@@ -144,7 +143,7 @@ impl CatalogGate {
 }
 
 impl GatewayGraphs {
-    /// Round 5: moves `g`'s mirror mode toward `graph.mirror` (see the
+    /// Moves `g`'s mirror mode toward `graph.mirror` (see the
     /// module docs). `true` when the catalog changed, so the caller
     /// resolves the graph again. Failures are logged, never the
     /// statement's.

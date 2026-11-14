@@ -1,5 +1,4 @@
-//! `LATERAL` derived tables on port 3306 (chapter 28, "`LATERAL`"; build
-//! step 9; R4 round 3).
+//! `LATERAL` derived tables on port 3306.
 //!
 //! MariaDB 11.8 has no `LATERAL` (MDEV-19078): every such statement fails
 //! with 1064. Two shapes, the ones applications write, become plain SQL
@@ -31,10 +30,9 @@
 //! (another correlation, a `GROUP BY`, `DISTINCT`, `HAVING` or `UNION`
 //! inside, `*` or `l.*` outside, an unqualified outer reference to a
 //! lateral column, `ON` conditions other than `TRUE` around aggregates)
-//! is left as it is, and MariaDB's 1064 stands. Chapter 28's gateway
-//! apply (running the derived table per batch of outer rows) isn't built.
-//! The rewrite is plain SQL, so stored bodies could use it too; they don't
-//! yet (chapter 28 step 12).
+//! is left as it is, for the gateway's apply ([`ApplyPlan`]), which runs the
+//! derived table per batch of outer rows. The rewrite is plain SQL, so stored
+//! bodies use it too ([`super::stored`]).
 
 use std::fmt::Write as _;
 
@@ -559,7 +557,7 @@ fn aggregate_rewrite(
             };
             edits.push((tk.start(j), tk.end(j + 2), text));
             // A select item over it (`MAX(l.t)`, `l.t + 1`) keeps its
-            // text as its name, as on MySQL (gaps row 71, R4 round 5).
+            // text as its name, as on MySQL.
             if let Some((a, b)) = select_item(tk, j)
                 && !(a == j && b == j + 2)
                 && !named_items.contains(&a)
@@ -765,21 +763,21 @@ fn rows_rewrite(
 /// What marks the derived table in [`ApplyPlan`]'s final statement.
 const DERIVED_MARK: &str = "\u{0}sprig-lateral\u{0}";
 
-/// Most outer key tuples one statement may apply (chapter 28's
-/// `translator.lateral_max_outer_rows`, a constant until settings carry
+/// Most outer key tuples one statement may apply
+/// (`translator.lateral_max_outer_rows`, a constant until settings carry
 /// it): more fail with 39601.
 pub const MAX_OUTER_ROWS: usize = 10_000;
 
 /// Outer key tuples per round trip (`translator.lateral_batch`).
 pub const BATCH: usize = 500;
 
-/// Chapter 28's gateway apply for a `LATERAL` derived table the rewrite
-/// can't express as SQL (R4 round 4): the gateway reads the distinct
-/// outer values the subquery uses ([`ApplyPlan::keys_sql`]), runs the
-/// subquery for each batch of them with the values written in
-/// ([`ApplyPlan::batch_sql`]), and runs the statement with the rows as a
-/// derived table joined on those values ([`ApplyPlan::final_sql`]), so
-/// MariaDB still computes everything outside the derived table.
+/// The gateway apply for a `LATERAL` derived table the rewrite can't express as
+/// SQL: the gateway reads the distinct outer values the subquery uses
+/// ([`ApplyPlan::keys_sql`]), runs the subquery for each batch of them with the
+/// values written in ([`ApplyPlan::batch_sql`]), and runs the statement with
+/// the rows as a derived table joined on those values
+/// ([`ApplyPlan::final_sql`]), so MariaDB still computes everything outside the
+/// derived table.
 #[derive(Debug, Clone)]
 pub struct ApplyPlan {
     /// `SELECT DISTINCT <outer references> FROM <the outer tables>`.
@@ -1195,8 +1193,8 @@ mod tests {
             ),
             None
         );
-        // Inside an expression or an outer aggregate (gaps row 71): the
-        // item keeps its text as its name, as on MySQL.
+        // Inside an expression or an outer aggregate: the item keeps its text
+        // as its name, as on MySQL.
         assert_eq!(
             rw("SELECT MAX(l.t), COUNT(*), l.t + 1 AS u, MAX(l.t) m FROM c, LATERAL (SELECT SUM(o.amt) AS t FROM o WHERE o.cid = c.id) AS l")
                 .unwrap(),

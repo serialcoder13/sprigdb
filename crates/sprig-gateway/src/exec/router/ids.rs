@@ -1,4 +1,4 @@
-//! Chapter 19's ID blocks in the gateway: per tenant, one
+//! `AUTO_INCREMENT` ID blocks in the gateway: per tenant, one
 //! `sprig_shard::ids::BlockAllocator` over the tenant catalog's
 //! `sequences` rows, shared by the gateway's sessions.
 //!

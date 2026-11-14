@@ -1,5 +1,5 @@
-//! Live: chapter 11's done-when item "the balancer evens out a deliberately
-//! skewed fleet without oscillating" (milestone M0.6).
+//! Live: the balancer evens out a deliberately skewed fleet without
+//! oscillating.
 //!
 //! Needs the test bed of `deploy/compose/balancer/run.sh up`: a deployment
 //! of its own over the three Compose clusters, ten tenants `bl-01` …

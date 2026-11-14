@@ -1,6 +1,6 @@
 //! The `auto_index` loop: bootstrap modules, and one tenant's whole flow on
-//! the Compose single node with hand-made candidates (trigger evaluation,
-//! step 2, isn't built yet): proposed → validated → built under the build
+//! the Compose single node with hand-made candidates (trigger evaluation
+//! isn't built yet): proposed → validated → built under the build
 //! slot → observed → active, then unused → ignored → dropped.
 //!
 //! The live case needs `SPRIG_TEST_MARIADB_SINGLE`
@@ -362,7 +362,7 @@ async fn one_tenant_from_candidate_to_drop() {
             rep.observed
         );
 
-        // 5,000 reads that never use it (decision O1: judged by reads, the
+        // 5,000 reads that never use it (judged by reads, the
         // clock only moves the cadence): ignored, then 5,000 more and dropped.
         let t40 = t0 + Duration::from_secs(40 * 86_400);
         let rep = tenant_pass(&env, &hooks, &slots, TENANT, t40, &mut mem, &cadence)
@@ -409,7 +409,7 @@ async fn one_tenant_from_candidate_to_drop() {
     }
 }
 
-/// The R0 catalog-connection deadlock: an `auto_index` pass held a pooled
+/// The catalog-connection deadlock: an `auto_index` pass held a pooled
 /// catalog connection while its hooks (the catalog snapshot, evaluation,
 /// workload reads) took another from the same pool; with the loop's four
 /// workers on a pool of four, every pass waited for a fifth connection

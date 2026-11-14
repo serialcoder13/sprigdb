@@ -1,4 +1,4 @@
-//! Chapter 20's write sketches in the gateway (build step 1): what the
+//! Write sketches in the gateway: what the
 //! router writes, per shard and minute, for load splits.
 //!
 //! ```text

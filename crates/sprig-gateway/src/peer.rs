@@ -1,21 +1,20 @@
-//! The peer service on 7403 (chapter 04, "Interfaces"; build step 10).
+//! The peer service on 7403.
 //!
 //! Gateways call each other through `sprig.internal.v1.GatewayPeer`:
 //!
 //! - `Kill`: `KILL [QUERY] id` where `id`'s slot belongs to another gateway
-//!   (the owner is found through `gateway-slots/<slot>`, chapter 04
-//!   "Registration, KILL and write holds");
+//!   (the owner is found through `gateway-slots/<slot>`);
 //! - `ListSessions`: the gateway's sessions;
 //! - `Drain`: `sprigctl gateway drain` reaching a gateway through any other;
 //! - `Forward`: a transaction-handle call that landed on the wrong gateway
-//!   (chapter 37, "Transactions").
+//!   (REST and gRPC transaction handles).
 //!
-//! - `QueuePeer` (a second service on the same listener): chapter 50's
+//! - `QueuePeer` (a second service on the same listener): the AMQP
 //!   queue relay, [`crate::amqp::peer`].
-//! - `RedisPeer`: chapter 40's pub/sub hubs, [`crate::redis::hub`].
-//! - `HandoffLogin`: a login of a tenant whose residency (chapter 26)
-//!   doesn't allow the calling gateway's DC, decided here (chapter 14,
-//!   "Credential residency"); [`PeerHandoff`] is the calling side. A
+//! - `RedisPeer`: the Redis pub/sub hubs, [`crate::redis::hub`].
+//! - `HandoffLogin`: a login of a tenant whose residency doesn't allow
+//!   the calling gateway's DC (credential residency), decided here;
+//!   [`PeerHandoff`] is the calling side. A
 //!   gateway of another DC is found in that DC's tier of the one etcd
 //!   (single-etcd mode, like the locator's remote maps).
 //!
@@ -152,22 +151,22 @@ pub trait PeerHost: Send + Sync + 'static {
     fn drain(&self, reason: &str) -> bool;
     /// Runs a forwarded transaction-handle call.
     async fn forwarded(&self, req: ForwardRequest) -> ForwardReply;
-    /// The queue relay's service (chapter 50, `QueuePeer`), when this
+    /// The queue relay's service (`QueuePeer`), when this
     /// gateway runs the queue engine.
     fn queue_peer(&self) -> Option<crate::amqp::peer::QueuePeerService> {
         None
     }
-    /// Workers' runs of triggers on streams and queues (chapter 41,
-    /// `LogicPeer`), when this gateway serves tenant catalogs.
+    /// Workers' runs of triggers on streams and queues (`LogicPeer`),
+    /// when this gateway serves tenant catalogs.
     fn logic_peer(&self) -> Option<crate::triggers::LogicPeerService> {
         None
     }
-    /// Chapter 40's pub/sub hubs (`RedisPeer`), when this gateway runs
+    /// The Redis pub/sub hubs (`RedisPeer`), when this gateway runs
     /// the Redis front end.
     fn redis_peer(&self) -> Option<crate::redis::hub::RedisPeerService> {
         None
     }
-    /// Decides a handed-off login (chapter 14, "Credential residency").
+    /// Decides a handed-off login (credential residency).
     /// Hosts without logins refuse it with 39301.
     async fn handoff(&self, start: HandoffStart, password: Zeroizing<Vec<u8>>) -> HandoffResult {
         let _ = (start, password);
@@ -355,7 +354,7 @@ pub async fn serve(
     if let Some(r) = redis_peer {
         routes = routes.add_service(r.server());
     }
-    // Chapter 39 (R5 round 6): seeds of search copies on workers.
+    // Seeds of search copies on workers.
     routes = routes.add_service(crate::search::seed::SeedService::server());
     let routes = routes.prepare();
     tracing::info!(bind = %local, mtls = acceptor.is_some(), "peer service listening");

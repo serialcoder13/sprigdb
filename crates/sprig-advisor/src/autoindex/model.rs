@@ -1,4 +1,4 @@
-//! The vocabulary of automatic indexing (chapter 13, "Interfaces"): index
+//! The vocabulary of automatic indexing: index
 //! definitions, origins, candidates and their evidence, and the canonical
 //! form that names an index.
 //!
@@ -41,23 +41,23 @@ impl fmt::Display for AutoIndexId {
     }
 }
 
-/// What an index is made of. Only [`IndexKind::BTree`] is generated in R0.
+/// What an index is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexKind {
     /// A MariaDB secondary B-tree index.
     BTree,
-    /// A document side table (R5).
+    /// A document side table.
     SideTable,
-    /// A field column plus its index (R5, R6).
+    /// A field column plus its index.
     FieldColumn,
-    /// A vector (ANN) index (R6).
+    /// A vector (ANN) index.
     Vector,
-    /// A `SPATIAL` index (R6).
+    /// A `SPATIAL` index.
     Spatial,
-    /// An S2 side table (R6).
+    /// An S2 side table.
     S2,
-    /// A global lookup index (R1).
+    /// A global lookup index.
     Lookup,
 }
 
@@ -77,7 +77,7 @@ impl IndexKind {
     }
 }
 
-/// Who made an index (chapter 13, "Index origins"). Only `Auto` indexes are
+/// Who made an index. Only `Auto` indexes are
 /// ever dropped automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,11 +109,11 @@ impl Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Advice {
-    /// A wildcard index (R5).
+    /// A wildcard index.
     Wildcard,
-    /// A search index (R5).
+    /// A search index.
     Search,
-    /// Dropping an unused `migrated` index (R4).
+    /// Dropping an unused `migrated` index.
     DropMigrated,
 }
 
@@ -169,7 +169,7 @@ pub struct IndexOptions(pub BTreeMap<String, String>);
 /// An index definition on one catalog object.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IndexDef {
-    /// The catalog object (chapter 08).
+    /// The catalog object.
     pub object: ObjectId,
     /// What it is made of.
     pub kind: IndexKind,
@@ -263,10 +263,9 @@ impl IndexDef {
         self.parts.iter().map(|p| p.column.as_str())
     }
 
-    /// The index clause after `ADD`, for this kind (chapter 13, "Other
-    /// models"; R6 round 3): `INDEX`, `SPATIAL INDEX` or `VECTOR INDEX`,
-    /// then `IF NOT EXISTS <name> (<columns>)` and, for vectors,
-    /// `M=<m> DISTANCE=<d>`.
+    /// The index clause after `ADD`, for this kind: `INDEX`, `SPATIAL INDEX`
+    /// or `VECTOR INDEX`, then `IF NOT EXISTS <name> (<columns>)` and, for
+    /// vectors, `M=<m> DISTANCE=<d>`.
     #[must_use]
     pub fn add_clause(&self) -> String {
         self.add_clause_named(&self.name())

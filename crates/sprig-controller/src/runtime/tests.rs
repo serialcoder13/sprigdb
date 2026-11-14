@@ -1,6 +1,6 @@
 //! Runtime tests: on `MemStore` with tokio's clock paused, so leases,
-//! backoffs and resyncs are deterministic and instant (chapter 23,
-//! "Testing": deterministic simulation).
+//! backoffs and resyncs are deterministic and instant (deterministic
+//! simulation).
 
 // Test suites: failures are panics with a message.
 #![allow(

@@ -72,7 +72,7 @@ Recorded by every gateway for every protocol that logs in with a password or key
 | `auth.password_changed` | A password was set or changed |
 | `auth.password_rejected` | A new password failed the password policy |
 | `auth.user_created`, `auth.user_dropped` | `CREATE USER`, `DROP USER`, `sprigctl tenant user add` |
-| `auth.account_changed` | Other account changes: expiry, password and lockout clauses |
+| `auth.account_changed` | Other account changes: expiry, password and lockout clauses; `REQUIRE` changes, with `detail` naming the clause (`REQUIRE X509`, `REQUIRE SUBJECT '/O=Acme/CN=billing' AND ISSUER '/O=Acme/CN=Acme client CA'`, `REQUIRE NONE`); and `ATTRIBUTE` and `COMMENT` changes, with `detail` naming only the keys set and removed (`ATTRIBUTE set: region; removed: team`, `COMMENT set: comment`), never their values |
 | `authz.privileges_granted`, `authz.privileges_revoked` | `GRANT` and `REVOKE` of privileges, including `REVOKE ALL PRIVILEGES, GRANT OPTION`; `detail` is the statement as parsed |
 | `authz.role_created`, `authz.role_dropped` | `CREATE ROLE`, `DROP ROLE` |
 | `authz.roles_granted`, `authz.roles_revoked` | `GRANT role TO ...`, `REVOKE role FROM ...` |

@@ -1,9 +1,8 @@
-//! MySQL's key names in 1062 on the MySQL persona (chapter 28, "Error
-//! mapping"; R4).
+//! MySQL's key names in 1062 on the MySQL persona.
 //!
 //! MariaDB names the key alone (`'PRIMARY'`); MySQL 8.4 names it with its
 //! table (`'p.PRIMARY'`). Neither MariaDB's message nor the router's own
-//! 1062 (chapter 19's lookup tables) says the table, so the statement
+//! 1062 (from its lookup tables) says the table, so the statement
 //! does: [`sprig_sql::compat::errmap::dup_key_table`] reads the target of
 //! a single-table `INSERT`, `REPLACE`, `UPDATE` or `LOAD DATA`, and this
 //! sink adds it to any 1062 the statement's response carries. Everything
@@ -93,16 +92,15 @@ impl ResultSink for DupKeySink<'_> {
     }
 }
 
-/// Resultsets as MySQL 8.4 sends them on the MySQL persona (chapter 28,
-/// "Output on port 3306"):
+/// Resultsets as MySQL 8.4 sends them on the MySQL persona:
 ///
 /// - computed integers are `LONGLONG` and `YEAR(..)` is `YEAR`, where
-///   MariaDB sends `LONG` (gaps row 34, [`sprig_sql::compat::intmeta`]):
+///   MariaDB sends `LONG` ([`sprig_sql::compat::intmeta`]):
 ///   the statement is parsed only when a resultset has an expression
 ///   column of a small integer type, and binary rows are re-encoded for
 ///   the changed columns;
-/// - JSON values (type 245) are printed MySQL's way (gaps row 36,
-///   [`sprig_sql::compat::jsontext`]), in text and binary rows.
+/// - JSON values (type 245) are printed MySQL's way
+///   ([`sprig_sql::compat::jsontext`]), in text and binary rows.
 ///
 /// A cursor's columns are left as MariaDB's, since its rows come with
 /// later fetches.
@@ -132,32 +130,31 @@ struct Rows {
     /// JSON columns.
     json: Vec<usize>,
     /// Functional key parts' expressions of `SHOW INDEX` and
-    /// `STATISTICS.EXPRESSION` (R4 round 5, gaps row 64): printed MySQL's
-    /// way.
+    /// `STATISTICS.EXPRESSION`: printed MySQL's way.
     exprs: Vec<usize>,
-    /// Stored programs' text as written (R4 round 5, gaps row 69): every
+    /// Stored programs' text as written: every
     /// value with a marked segment (`sprig_sql::compat::stored::
     /// restore_original`), for statements that can read stored code.
     originals: bool,
-    /// Columns of `exprs` holding a check's clause (R4 round 6).
+    /// Columns of `exprs` holding a check's clause.
     checks: Vec<usize>,
     /// `SHOW` columns holding collation names (`Collation`,
     /// `collation_connection`, `Database Collation`, `SHOW CHARACTER
     /// SET`'s `Default collation`) and `SHOW CREATE
-    /// DATABASE`'s text (R4 round 6, gaps rows 67 and 78): MySQL's names.
+    /// DATABASE`'s text: MySQL's names.
     colls: Vec<usize>,
-    /// `SHOW CREATE TRIGGER`'s statement (R4, decision X36): the head as
+    /// `SHOW CREATE TRIGGER`'s statement: the head as
     /// MySQL rebuilds it ([`sprig_sql::compat::trigger`]).
     trigs: Vec<usize>,
-    /// `SHOW PROCEDURE STATUS` and `SHOW FUNCTION STATUS` (R4, decision
-    /// X36): MySQL's `Language` column (always `SQL`) goes in at this
+    /// `SHOW PROCEDURE STATUS` and `SHOW FUNCTION STATUS`: MySQL's
+    /// `Language` column (always `SQL`) goes in at this
     /// position of the client's columns (text rows; `after` stays the
     /// backend's shape).
     language: Option<usize>,
-    /// A traditional `EXPLAIN` (R4 round 3): `partitions` goes in at
+    /// A traditional `EXPLAIN`: `partitions` goes in at
     /// [`sprig_sql::compat::explain::PARTITIONS_AT`] (text rows).
     explain: bool,
-    /// `EXPLAIN FORMAT=TREE` or `EXPLAIN ANALYZE` (R4 round 4): MariaDB's
+    /// `EXPLAIN FORMAT=TREE` or `EXPLAIN ANALYZE`: MariaDB's
     /// JSON plan rendered as MySQL's tree; `(analyze, outer LIMIT)`.
     tree: Option<(bool, Option<u64>)>,
 }
@@ -220,8 +217,8 @@ impl<'a> IntMetaSink<'a> {
     #[allow(clippy::too_many_lines)] // one branch per kind of rewrite
     fn start(&mut self, columns: &[ColumnDef], format: RowFormat) -> Option<Vec<ColumnDef>> {
         self.cur = None;
-        // MySQL's twelve EXPLAIN columns (chapter 28, R4 round 3).
-        // Binary rows too (a prepared EXPLAIN, R4 round 4).
+        // MySQL's twelve EXPLAIN columns.
+        // Binary rows too (a prepared EXPLAIN).
         if sprig_sql::compat::explain::is_explain_extended(columns.iter().map(|c| &c.name[..])) {
             let after = explain_columns(columns);
             self.cur = Some(Rows {
@@ -241,7 +238,7 @@ impl<'a> IntMetaSink<'a> {
             });
             return Some(after);
         }
-        // MySQL's tree formats from MariaDB's JSON (R4 round 4).
+        // MySQL's tree formats from MariaDB's JSON.
         if format == RowFormat::Text
             && columns.len() == 1
             && (&columns[0].name[..] == b"EXPLAIN" || &columns[0].name[..] == b"ANALYZE")
@@ -281,7 +278,7 @@ impl<'a> IntMetaSink<'a> {
             .get(..4)
             .is_some_and(|w| w.eq_ignore_ascii_case(b"SHOW"));
         let has = |w: &[u8]| self.sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
-        // R4 round 6: a check's clause, as MySQL prints it. Clients alias
+        // A check's clause, as MySQL prints it. Clients alias
         // it (Rails: `cc.check_clause AS expression`, whose metadata names
         // no table), so in a statement over `CHECK_CONSTRAINTS` its one
         // long text column is taken for the clause.
@@ -432,7 +429,7 @@ fn explain_columns(columns: &[ColumnDef]) -> Vec<ColumnDef> {
 
 /// A prepared EXPLAIN's binary row as MySQL 8.4 sends it: `partitions`
 /// (`NULL`) after `table`, and `rows` an integer (MariaDB sends it as
-/// text). R4 round 4.
+/// text).
 fn explain_binary(mut vals: Vec<sprig_proto_mysql::Value>) -> Vec<sprig_proto_mysql::Value> {
     use sprig_proto_mysql::Value;
     if let Some(v) = vals.get_mut(8)
@@ -469,8 +466,8 @@ fn expr_value(v: &[u8]) -> Option<Vec<u8>> {
 
 /// A check's clause (`CHECK_CONSTRAINTS.CHECK_CLAUSE`; 3306's view puts it
 /// in parentheses) as MySQL 8.4 prints it, if that changes it: the
-/// expression printed MySQL's way, each `'` written `\'` (R4 round 6;
-/// Rails compares it, `_utf8mb4'x'` included). MariaDB's text when the
+/// expression printed MySQL's way, each `'` written `\'` (Rails
+/// compares it, `_utf8mb4'x'` included). MariaDB's text when the
 /// printer doesn't know a construct.
 fn check_value(v: &[u8]) -> Option<Vec<u8>> {
     let t = std::str::from_utf8(v).ok()?;
@@ -659,7 +656,7 @@ impl ResultSink for IntMetaSink<'_> {
             out.insert(sprig_sql::compat::explain::PARTITIONS_AT, None);
             return self.inner.row(RowValues::Text(&out)).await;
         }
-        // A prepared EXPLAIN's decoded binary rows (R4 round 4).
+        // A prepared EXPLAIN's decoded binary rows.
         if let (Some(cur), RowValues::Binary(vals)) = (&self.cur, &values)
             && cur.explain
         {
@@ -752,8 +749,8 @@ pub(super) fn prepared_columns(
     cols: &mut Vec<ColumnDef>,
 ) {
     use sprig_sql::compat::intmeta;
-    // A prepared EXPLAIN gets MySQL's twelve columns too (R4 round 4: PDO
-    // compares it with the emulated one).
+    // A prepared EXPLAIN gets MySQL's twelve columns too (PDO compares it
+    // with the emulated one).
     if sprig_sql::compat::explain::is_explain_extended(cols.iter().map(|c| &c.name[..])) {
         *cols = explain_columns(cols);
         return;
@@ -772,7 +769,7 @@ mod tests {
 
     #[test]
     fn functional_part_expressions_as_mysql_prints_them() {
-        // R4 round 5 (gaps row 64): MySQL 8.4.11's `STATISTICS.EXPRESSION`
+        // MySQL 8.4.11's `STATISTICS.EXPRESSION`
         // and `SHOW INDEX` text for the same parts.
         let p = |v: &str| expr_value(v.as_bytes()).map(|b| String::from_utf8(b).unwrap());
         assert_eq!(p("`a` * 2 + 1").as_deref(), Some("((`a` * 2) + 1)"));
@@ -789,7 +786,7 @@ mod tests {
 
     #[test]
     fn checks_and_collations_as_mysql_prints_them() {
-        // R4 round 6: MySQL 8.4.11's `CHECK_CONSTRAINTS.CHECK_CLAUSE` for
+        // MySQL 8.4.11's `CHECK_CONSTRAINTS.CHECK_CLAUSE` for
         // the gateway's (MariaDB 11.8.9's) text.
         let c = |v: &str| check_value(v.as_bytes()).map(|b| String::from_utf8(b).unwrap());
         assert_eq!(
@@ -801,7 +798,7 @@ mod tests {
             Some("(((`a` * 2) + 1) > 0)")
         );
         assert_eq!(c("(((`a` * 2) + 1) > 0)"), None);
-        // `SHOW` values (gaps rows 67 and 78).
+        // `SHOW` values.
         let v = |col: &str, v: &str| {
             coll_value(col.as_bytes(), v.as_bytes()).map(|b| String::from_utf8(b).unwrap())
         };

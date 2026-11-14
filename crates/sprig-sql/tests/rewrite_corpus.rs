@@ -1,7 +1,6 @@
-//! Table-driven rewrite tests per statement kind and persona (chapter 07
-//! build steps 2 and 3). Each case runs through both engines, which must
-//! agree. `{B}` and `{C}` stand for the physical schemas of `billing` and
-//! `crm`; `=` means "unchanged".
+//! Table-driven rewrite tests per statement kind and persona. Each case runs
+//! through both engines, which must agree. `{B}` and `{C}` stand for the
+//! physical schemas of `billing` and `crm`; `=` means "unchanged".
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 

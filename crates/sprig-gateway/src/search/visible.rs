@@ -1,7 +1,6 @@
-//! Counts and facets over the rows a caller may see (decision S24; chapter
-//! 29 step 29's search half; RL17's open remark).
+//! Counts and facets over the rows a caller may see.
 //!
-//! A copy is filled without row-level security (RL17), so its counts and
+//! A copy is filled without row-level security, so its counts and
 //! facet buckets include rows a policy hides from the caller. Hits are
 //! already re-read through the caller's session; counts and facets are
 //! not, so for a caller that a policy on the indexed object binds:

@@ -1,10 +1,9 @@
-//! Dispatch into the layers (chapter 04, "Dispatch into the layers"; build
-//! step 9): the [`Request`] a front end produces, the [`Executor`] that runs
-//! it, and the [`ResultSink`] results stream into.
+//! Dispatch into the layers: the [`Request`] a front end produces, the
+//! [`Executor`] that runs it, and the [`ResultSink`] results stream into.
 //!
 //! ```text
-//! front end (sprig-gateway::mysql)            executor (pass-through in M0.2,
-//!   COM_* ──► Request ──► SessionExec::execute     router in R1, chapter 17)
+//! front end (sprig-gateway::mysql)            executor (pass-through, with
+//!   COM_* ──► Request ──► SessionExec::execute     the router for shards)
 //!                              │
 //!            ResultSink ◄──────┘  begin_rows / raw_row / end_rows / ok / error
 //!   (encodes for the client's capabilities, streams with backpressure)
@@ -12,10 +11,9 @@
 //!
 //! **One executor per session.** [`Executor::open`] runs once a login
 //! succeeds and returns the session's [`SessionExec`], which holds whatever
-//! the executor keeps per session: in M0.2's pass-through (decision D3) the
-//! leased backend connection and the backend statement ids; in R1 the
-//! router's transaction state. Chapter 04 places the lease on `Session`;
-//! until chapter 06's `BackendLease` lands there, it lives here, and is
+//! the executor keeps per session: in the pass-through executor the leased
+//! backend connection, the backend statement ids and the router's
+//! transaction state. The lease lives here, not on `Session`, and is
 //! dropped with the connection.
 //!
 //! **Streaming.** Results never collect in memory: an executor calls the
@@ -28,15 +26,15 @@
 //! payload through unchanged (zero copy). Column definitions, OK, ERR and
 //! terminators go through the typed calls, so the sink re-encodes them for
 //! the client's capabilities (`DEPRECATE_EOF`, `SESSION_TRACK`, MariaDB
-//! extended metadata) after the executor has rewritten names (chapter 05,
-//! "Resultsets: relay and rewrite"). Rewrite and synthesized results use
+//! extended metadata) after the executor has rewritten names. Rewrite and
+//! synthesized results use
 //! [`ResultSink::row`].
 //!
 //! **Cancellation.** `KILL QUERY`, `KILL CONNECTION` and a client hang-up
 //! drop the `execute` future at its next await. The front end then calls
 //! [`SessionExec::abandoned`] (except after `KILL CONNECTION`, which drops
 //! the whole session), where a pass-through executor sends `KILL QUERY` for
-//! its backend connection and discards that connection (chapter 04).
+//! its backend connection and discards that connection.
 //!
 //! **Errors.** An executor returns `Err` for a failure it hasn't reported;
 //! the front end sends it as an ERR packet (ending an open resultset). A
@@ -44,10 +42,10 @@
 //!
 //! **Workload hook.** [`with_workload`] puts a [`WorkloadHook`] between the
 //! front end and the executor, so every request is seen before and after
-//! it runs (chapter 04 build step 9; chapter 12 fills it in M0.4).
+//! it runs ([`crate::workload`] fills it).
 //!
-//! The gateway runs the pass-through executor ([`crate::exec`], decision
-//! D3). [`NullExecutor`] refuses every statement; [`canned::CannedExecutor`]
+//! The gateway runs the pass-through executor ([`crate::exec`]).
+//! [`NullExecutor`] refuses every statement; [`canned::CannedExecutor`]
 //! answers a few statements in-process, for tests without a backend.
 
 use std::fmt;
@@ -68,7 +66,7 @@ pub mod canned;
 
 /// A prepared statement as the executor knows it: an id the executor
 /// assigned in its [`PreparedMeta`]. The front end maps the client's
-/// statement ids to these (chapter 05, "Prepared statements").
+/// statement ids to these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct StmtRef(pub u64);
 
@@ -77,9 +75,9 @@ pub struct StmtRef(pub u64);
 /// (ping, statistics, `KILL`, `SHOW PROCESSLIST`, the persona's version
 /// variables) never become a request.
 ///
-/// Chapter 04's protocol-neutral form (`Sql(BoundStatement)`,
-/// `Plan(LogicalPlan)`, `Call(FunctionCall)`) arrives with the parser and
-/// router (chapters 07 and 17); M0.2's pass-through executor sends text.
+/// There is no protocol-neutral form (`Sql(BoundStatement)`,
+/// `Plan(LogicalPlan)`, `Call(FunctionCall)`) yet: the pass-through
+/// executor takes text.
 #[derive(Debug, Clone)]
 pub enum Request {
     /// `COM_QUERY`: the SQL text, query attributes stripped (3306). With
@@ -240,10 +238,9 @@ pub struct ExecSummary {
 /// Who logged in, as [`Executor::open`] needs it.
 #[derive(Debug, Clone)]
 pub struct LoginInfo {
-    /// The session's principal (interim, decision D1).
+    /// The session's principal.
     pub principal: Principal,
-    /// The backend account and cluster the login's statements use
-    /// (decision D3).
+    /// The backend account and cluster the login's statements use.
     pub backend: BackendTarget,
     /// The listener's persona.
     pub persona: Persona,
@@ -279,7 +276,7 @@ pub enum Abandon {
     ClientGone,
 }
 
-/// Runs requests (chapter 04's `Executor`). Shared by every session.
+/// Runs requests. Shared by every session.
 pub trait Executor: Send + Sync + 'static {
     /// The executor's side of a session that just logged in.
     fn open(&self, login: &LoginInfo) -> Box<dyn SessionExec>;
@@ -305,7 +302,7 @@ pub trait SessionExec: Send {
     /// `COM_RESET_CONNECTION` and `COM_CHANGE_USER`: roll back, drop
     /// session variables, temporary tables, locks and prepared statements;
     /// a pass-through executor resets and releases its backend connection
-    /// (chapter 05, "Command table").
+    /// as well.
     async fn reset(&mut self, cx: &mut ExecCtx<'_>) -> Result<()>;
 
     /// The current request's future was dropped (see [`Abandon`]): stop
@@ -317,11 +314,11 @@ pub trait SessionExec: Send {
 
     /// Statement capture for this session ([`WorkloadHook::capture`]): an
     /// executor that sees statements fingerprints and records them through
-    /// it (chapter 12). Executors that don't ignore it.
+    /// it. Executors that don't ignore it.
     fn attach_capture(&mut self, _capture: crate::workload::SessionCapture) {}
 
     /// The gateway's workload capture attached to this session, if any
-    /// (chapter 12: front ends that fingerprint their own requests, such
+    /// (front ends that fingerprint their own requests, such
     /// as MongoDB's `Fingerprinter::mongo`, record through it), and whether
     /// the tenant captures parameter samples (`workload.capture_samples`).
     fn workload(&self, _db: &str, _table: &str) -> Option<crate::workload::FrontCapture> {
@@ -336,16 +333,16 @@ pub trait SessionExec: Send {
     }
 
     /// Internal mode for the statements of a gateway layer that names its
-    /// own reserved objects: chapter 31's document engine runs its SQL
-    /// (`_sprig_p_` field columns, `__sprig_doc_meta`) through the user's
-    /// session this way, as chapter 32's type layer does. Privileges still
-    /// apply; only chapter 07's reserved-name check is lifted. Executors
+    /// own reserved objects: the document engine runs its SQL (`_sprig_p_`
+    /// field columns, `__sprig_doc_meta`) through the user's session this
+    /// way, as the typed-table layer does. Privileges still apply; only the
+    /// name layer's reserved-name check is lifted. Executors
     /// without tenant sessions ignore it.
     fn set_internal(&mut self, _on: bool) {}
 
     /// Whether row-level security policies on table `object` bind this
-    /// session now (chapter 29): search counts and facets are then taken
-    /// over the rows it may see only (decision S24). `None` when the
+    /// session now: search counts and facets are then taken over the rows
+    /// it may see only. `None` when the
     /// executor can't tell (no tenant session, no catalog yet): callers
     /// treat that as bound.
     fn row_policy_binds(&self, _object: u64) -> Option<bool> {
@@ -353,15 +350,15 @@ pub trait SessionExec: Send {
     }
 
     /// The tables whose policies bind this session, with those policies as
-    /// MongoDB filters with its values bound (chapter 29, decision RL34):
+    /// MongoDB filters with its values bound:
     /// what a change stream shows. `None` when the executor can't tell:
     /// callers show nothing then.
     fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
         None
     }
 
-    /// Whether the session holds `action` on the whole tenant (chapter
-    /// 29), as `$currentOp` with `allUsers` asks for `PROCESS` (M5).
+    /// Whether the session holds `action` on the whole tenant, as
+    /// `$currentOp` with `allUsers` asks for `PROCESS`.
     /// `None` when the executor can't tell: callers refuse then.
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
         let _ = action;
@@ -369,7 +366,7 @@ pub trait SessionExec: Send {
     }
 
     /// The verified claims of the token the session's caller presented,
-    /// for `SPRIG_CLAIM()` (chapter 29); executors without row-level
+    /// for `SPRIG_CLAIM()`; executors without row-level
     /// security ignore them.
     fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
         let _ = claims;
@@ -415,7 +412,7 @@ pub struct EndOfRows {
     pub warnings: u16,
 }
 
-/// Where a response goes (chapter 04's `ResultSink`). Calls follow the
+/// Where a response goes. Calls follow the
 /// response grammar:
 ///
 /// ```text
@@ -496,12 +493,11 @@ pub trait ResultSink: Send {
     fn finished(&self) -> bool;
 }
 
-/// Statement capture's view of one request (chapter 04, "Dispatch into
-/// the layers"; chapter 12). The front end's request passes through
+/// Statement capture's view of one request. The front end's request passes through
 /// [`WorkloadHook::begin`] before the executor runs it and
 /// [`WorkloadHook::end`] after; [`with_workload`] puts a hook in front of
 /// any executor. [`NoWorkload`] records nothing;
-/// [`crate::workload::GatewayWorkload`] (M0.4) hands each session a
+/// [`crate::workload::GatewayWorkload`] hands each session a
 /// [`crate::workload::SessionCapture`] ([`WorkloadHook::capture`]), which
 /// the executor calls per statement, where it knows the statement's
 /// logical text, its backend connection and its rows.
@@ -539,7 +535,7 @@ pub struct WorkloadOutcome<'a> {
     pub error: Option<&'a SprigError>,
 }
 
-/// The workload hook that records nothing (until chapter 12, M0.4).
+/// The workload hook that records nothing.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoWorkload;
 
@@ -555,7 +551,7 @@ impl WorkloadHook for NoWorkload {
 }
 
 /// `exec` with `hook` in front: front end → `Request` → workload hook →
-/// executor (chapter 04 build step 9).
+/// executor.
 #[must_use]
 pub fn with_workload(exec: SharedExecutor, hook: Arc<dyn WorkloadHook>) -> SharedExecutor {
     Arc::new(Hooked { exec, hook })

@@ -1,15 +1,13 @@
-//! The sweep for orphaned member sinks (chapter 51, "Inherited sinks and
-//! connections"; bugfix-47, r9-streams-queues item 111's "instead").
+//! The sweep for orphaned member sinks.
 //!
 //! A member's instance of a `FOR EACH TENANT` sink is an ordinary sink of
 //! the member, owned by its `sprig_inherited` account. `DROP SINK` on the
 //! definition drops each member's instance, but an instance it misses
-//! stays running for ever: before r9last's fix, every member of a
-//! queue-sourced definition was missed; a member whose drop failed (it is
-//! logged and the definition still goes), and a member whose source
-//! instance had no index entry any more, still are. Such a sink reads
-//! nothing it should, holds leases and, over a queue made again under the
-//! same name, takes its messages (item 111).
+//! stays running for ever: a member whose drop failed (it is logged and
+//! the definition still goes), and a member whose source instance had no
+//! index entry any more, are missed. Such a sink reads nothing it should,
+//! holds leases and, over a queue made again under the same name, takes
+//! its messages.
 //!
 //! ```text
 //! every inherit.orphan_sink_sweep_seconds (600; 0: off), on each gateway:
@@ -25,9 +23,9 @@
 //! doesn't show yet. Every gateway sweeps; a drop another gateway made
 //! first is a no-op (`DROP SINK IF EXISTS`).
 //!
-//! **Instance rows** (bugfix-56). Dropping an orphan also deletes its
+//! **Instance rows.** Dropping an orphan also deletes its
 //! `inherited_instances` row. Rows whose definition is gone but whose
-//! sink went earlier (dropped by this sweep before bugfix-56, or by a
+//! sink went earlier (dropped by an older version of this sweep, or by a
 //! member's own `DROP SINK`) are found the same way, seen twice and
 //! deleted: in the tenants of the sink index on every pass, and in every
 //! child tenant of the directory on a gateway's first two passes (the rows

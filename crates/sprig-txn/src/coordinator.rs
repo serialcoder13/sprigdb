@@ -1,4 +1,4 @@
-//! The transaction coordinator (chapter 18, "Algorithms"): one per
+//! The transaction coordinator: one per
 //! session, in the gateway.
 //!
 //! A transaction keeps one branch per cluster. The first branch is the
@@ -35,7 +35,7 @@ pub enum BranchKind {
     Local,
     /// `XA START`: can prepare.
     Xa,
-    /// R3, Sprig 2PC: a `START TRANSACTION` on a cluster without XA whose
+    /// Sprig 2PC: a `START TRANSACTION` on a cluster without XA whose
     /// writes are recorded; it prepares by writing them as redo rows
     /// ([`crate::redo`]) and stays open with its locks.
     Held,
@@ -50,7 +50,7 @@ pub enum TxnMode {
     SingleWriter,
     /// XA two-phase commit with a last resource.
     Xa2pc,
-    /// R3.
+    /// Sprig 2PC: held branches prepared as redo rows.
     Sprig2pc,
     /// Two or more writers without XA under `best_effort`.
     BestEffort,
@@ -223,8 +223,7 @@ pub struct CommitOutcome {
     pub stragglers: usize,
 }
 
-/// A statement savepoint (chapter 18, "Savepoints and statement
-/// atomicity").
+/// A statement savepoint, which keeps each statement atomic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StmtMark {
     branches: usize,
@@ -262,7 +261,7 @@ pub struct TxnCoordinator<B: TxnBackend> {
     best_effort: bool,
     savepoints: Vec<SpMark>,
     /// Branches of earlier commits whose phase 2 outran
-    /// `txn.phase2_wait_ms` (decision Q37): settled before the session
+    /// `txn.phase2_wait_ms`: settled before the session
     /// next uses their cluster.
     stragglers: Vec<Straggler<B::Conn>>,
 }
@@ -442,9 +441,8 @@ impl<B: TxnBackend> TxnCoordinator<B> {
     }
 
     /// Checks the write rule for a set of clusters before anything runs
-    /// (multi-shard autocommit statements; chapter 18, "Best effort and
-    /// autocommit statements"): under `reject` a set with two clusters
-    /// without XA fails with 39440 before any shard executes.
+    /// (multi-shard autocommit statements): under `reject` a set with two
+    /// clusters without XA fails with 39440 before any shard executes.
     ///
     /// # Errors
     /// 39440, or 39444 when there are more clusters than
@@ -498,14 +496,14 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         )
     }
 
-    /// The branch on `cluster`, opened on first use (chapter 18, "Opening
-    /// a branch"). With [`Intent::Write`] the write rule runs first, so a
-    /// rejected write opens nothing and runs nothing.
+    /// The branch on `cluster`, opened on first use. With [`Intent::Write`]
+    /// the write rule runs first, so a rejected write opens nothing and
+    /// runs nothing.
     ///
     /// # Errors
     /// 39440 (write rule), 39444 (`txn.max_branches`), or the backend's
     /// error when the branch can't be opened.
-    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)] // the book's steps, in order
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)] // the opening steps, in order
     pub async fn branch(
         &mut self,
         cluster: &ClusterId,
@@ -529,8 +527,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             return Ok(&mut self.branches[i]);
         }
         // A branch of an earlier commit on this cluster may still be in
-        // phase 2: finish it first, so this transaction sees its rows
-        // (decision Q37).
+        // phase 2: finish it first, so this transaction sees its rows.
         // Boxed: settling is rare, and keeps `branch`'s future small.
         if self.has_straggler(cluster) {
             Box::pin(self.settle(cluster)).await?;
@@ -557,7 +554,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         } else {
             BranchKind::Local
         };
-        // Sprig 2PC (R3): a branch on a cluster without XA records its
+        // Sprig 2PC: a branch on a cluster without XA records its
         // writes, so it can prepare as a held branch if it isn't the last
         // resource. Its clock is fixed, so NOW() replays the same.
         let mut held_ts = None;
@@ -651,7 +648,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         Ok(&mut self.branches[i])
     }
 
-    /// The write rule for an open branch (chapter 18, "The write rule").
+    /// The write rule for an open branch.
     ///
     /// # Errors
     /// 39440 under `reject` when a second cluster without XA would write.
@@ -735,7 +732,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         };
         self.abort_all(reason).await;
         if single && err.is_lost() {
-            // One branch: the backend's error, as in R0.
+            // One branch: the backend's error, unchanged.
             return backend_error(err);
         }
         rollback_error(err)
@@ -1008,7 +1005,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
     // ------------------------------------------------------------------
     // Commit.
 
-    /// `COMMIT` (chapter 18, "Commit").
+    /// `COMMIT`.
     ///
     /// # Errors
     /// 39443 (rolled back), 1213 or 1205 (the cause of a rollback), 39441
@@ -1028,7 +1025,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         r
     }
 
-    #[allow(clippy::too_many_lines)] // the book's commit, step by step
+    #[allow(clippy::too_many_lines)] // the commit, step by step
     async fn commit_inner(&mut self) -> Result<CommitOutcome> {
         #[allow(clippy::cast_precision_loss)]
         metrics::histogram!("sprig_txn_branch_count").record(self.branches.len() as f64);
@@ -1394,10 +1391,9 @@ impl<B: TxnBackend> TxnCoordinator<B> {
     /// Phase 2: `XA COMMIT` every prepared branch (a held branch: its
     /// marker and `COMMIT`), waiting at most `txn.phase2_wait_ms`. The
     /// branches leave the transaction (commit resets it next). A branch
-    /// not finished by then stays with the session as a straggler
-    /// (decision Q37): its phase 2 goes on, and the session settles it
-    /// before it next uses that cluster ([`Self::settle`]). Returns how
-    /// many are left.
+    /// not finished by then stays with the session as a straggler: its
+    /// phase 2 goes on, and the session settles it before it next uses
+    /// that cluster ([`Self::settle`]). Returns how many are left.
     async fn phase2(&mut self, prepared: &[usize]) -> usize {
         let admin = self.admin.clone();
         let hooks = self.hooks.clone();
@@ -1459,8 +1455,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         if left > 0 {
             // The client gets OK before these branches commit; the session
             // settles them before it reads their clusters again. Other
-            // sessions may not see their rows until then (chapter 18,
-            // "Isolation and anomalies").
+            // sessions may not see their rows until then.
             metrics::counter!("sprig_txn_phase2_stragglers_total").increment(left as u64);
             tracing::warn!(
                 stragglers = left,
@@ -1484,12 +1479,12 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         self.stragglers.iter().any(|s| &s.cluster == cluster)
     }
 
-    /// Finishes this session's phase-2 stragglers on `cluster` (decision
-    /// Q37), so what the session runs there next sees their rows: a
-    /// running phase 2 is awaited; a failed one is finished through the
-    /// admin (`XA COMMIT` after killing the old thread; a held branch is
-    /// replayed, or, on a relay-fenced cluster, recovered by the agent).
-    /// Waits at most `txn.commit_resolve_timeout_ms`.
+    /// Finishes this session's phase-2 stragglers on `cluster`, so what the
+    /// session runs there next sees their rows: a running phase 2 is awaited;
+    /// a failed one is finished through the admin (`XA COMMIT` after killing
+    /// the old thread; a held branch is replayed, or, on a relay-fenced
+    /// cluster, recovered by the agent). Waits at most
+    /// `txn.commit_resolve_timeout_ms`.
     ///
     /// # Errors
     /// 39449 when a straggler is still unfinished then; the statement
@@ -1623,8 +1618,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         }
     }
 
-    /// Best effort with no XA writer (chapter 18, "Best effort and
-    /// autocommit statements"): commit the writers one at a time in open
+    /// Best effort with no XA writer: commit the writers one at a time in open
     /// order. With XA writers, `commit_inner` makes the first writer
     /// without XA the last resource, so the prepared branches have a
     /// recorded decision.

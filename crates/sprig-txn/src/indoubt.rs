@@ -1,5 +1,5 @@
-//! In-doubt transactions for operators (chapter 18, "Observability":
-//! `sprigctl txn list`, `show` and `resolve`).
+//! In-doubt transactions for operators (`sprigctl txn
+//! list`, `show` and `resolve`).
 //!
 //! A transaction is in doubt while any of its XA branches is prepared on
 //! a cluster: `XA RECOVER` lists it there. [`list`] gathers the prepared

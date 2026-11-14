@@ -1,30 +1,30 @@
 //! `sprig-gateway`: the gateway role, listeners, sessions, front-end glue, backend pools and read routing.
 //!
-//! Layer 3 (roles). Design: [chapter 04](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/04-gateway.md) (Gateway) and [chapter 06](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/06-backend.md) (Backend) of the SprigDB low-level design.
+//! Layer 3 (roles).
 //!
 //! What exists:
-//! - [`listener`]: the listener manager (build step 2): specs from
+//! - [`listener`]: the listener manager: specs from
 //!   `listener.<name>.*`, accept loops, PROXY v1/v2, TLS modes with
 //!   first-byte detection, live re-binding with generations and draining;
-//! - [`tls`]: certificate bundles (build step 3): polled PEM files, validation,
+//! - [`tls`]: certificate bundles: polled PEM files, validation,
 //!   atomic resolver swap, `sprig_gateway_cert_expiry_seconds`;
 //! - [`frontend`]: the [`Frontend`](frontend::Frontend) trait the protocol
 //!   front ends plug into, and the [`ClientConn`](frontend::ClientConn)
 //!   they receive;
-//! - [`session`]: sessions (build step 5): `Session`, the `SessionTable`
+//! - [`session`]: sessions: `Session`, the `SessionTable`
 //!   with connection ids, `SHOW PROCESSLIST` and `KILL`, the connection
 //!   task wrapper with panic isolation, and disconnect detection;
-//! - [`mysql`]: the MySQL 8.4 and MariaDB front ends (chapter 05 steps 3,
-//!   4, 6, 10 and 12): handshake and TLS upgrade, the auth plugins over
-//!   chapter 14's `LoginService` (tenant catalogs, or the interim accounts
-//!   file with `[gateway] login_mode = "accounts_file"`), command dispatch,
+//! - [`mysql`]: the MySQL 8.4 and MariaDB front ends: handshake and TLS
+//!   upgrade, the auth plugins over the `LoginService` (tenant catalogs, or
+//!   the accounts file with `[gateway] login_mode = "accounts_file"`),
+//!   command dispatch,
 //!   compression and live listener hooks;
-//! - [`tenant`]: tenants (M0.3): the catalog cache with the auth module,
-//!   name virtualization (chapter 07) per statement, DDL through the
-//!   catalog (chapter 08 step 10), settings in SQL (step 8) and
-//!   `information_schema.SPRIG_SETTINGS`, the interim backend accounts;
+//! - [`tenant`]: tenants: the catalog cache with the auth module, name
+//!   virtualization per statement, DDL through the catalog, settings in SQL
+//!   and `information_schema.SPRIG_SETTINGS`, the per-tenant backend
+//!   accounts of `[gateway] backends_file`;
 //! - [`pipeline`]: the `Request`, `Executor` and `ResultSink` boundary
-//!   between front ends and the execution layer (step 9's interfaces), a
+//!   between front ends and the execution layer, a
 //!   `NullExecutor` and a canned executor for tests.
 //!
 //! Listener settings come from the control plane: [`run`] mirrors the
@@ -35,44 +35,43 @@
 //! Listeners without a front end in this build (HTTP, MongoDB, Redis, ...)
 //! are reported as not applied.
 //!
-//! - [`exec`]: the pass-through executor (decision D3) and the relay
-//!   engine (chapter 05 steps 7-9): statements to the login's cluster,
+//! - [`exec`]: the pass-through executor and the relay engine: statements
+//!   to the login's cluster,
 //!   prepared statements across pooled connections, multi-statements,
 //!   `LOCAL INFILE`; requests reach it through the workload hook. For a
-//!   catalog login it plans every statement with chapter 07's rewrite and
+//!   catalog login it plans every statement with the name rewrite and
 //!   maps results, errors and session tracking back to logical names.
 //!
-//! - [`amqp`]: the AMQP listeners on 5672 and 5671 (chapter 50 steps 12,
-//!   14 and 23): `sprig-proto-amqp`'s server, both AMQP versions told apart
-//!   by the protocol header, over chapter 14's logins and, until
+//! - [`amqp`]: the AMQP listeners on 5672 and 5671: `sprig-proto-amqp`'s
+//!   server, both AMQP versions told apart by the protocol header, over the
+//!   gateway's logins and, until
 //!   `sprig-queues` exists, the in-memory queue engine.
 //!
-//! - [`kafka`]: the Kafka listener on 9092 (chapter 45 steps 9, 12, 13):
-//!   `sprig-proto-kafka`'s broker over chapter 14's logins, the DC's
+//! - [`kafka`]: the Kafka listener on 9092: `sprig-proto-kafka`'s broker
+//!   over the gateway's logins, the DC's
 //!   gateway records, etcd coordinator leases and the tenant's streams.
 //!
-//! - [`mongo`]: the MongoDB listener (chapter 30, R5): `OP_MSG` and
-//!   SCRAM-SHA-256 over chapter 14's logins, commands run by `sprig-doc`'s
+//! - [`mongo`]: the MongoDB listener: `OP_MSG` and SCRAM-SHA-256 over the
+//!   gateway's logins, commands run by `sprig-doc`'s
 //!   document engine through the user's executor session.
 //!
-//! Not yet: the other front ends (chapters 37, 40), limits,
-//! registration and the other `MetaStore` caches (steps 4-10).
+//! Not yet: the other front ends, limits, registration and the other
+//! `MetaStore` caches.
 
 // The compiler's `Send` check of a session's future walks the inherited-sink
 // deploy path down into sqlparser's AST (`TEST SINK`); since 12 Nov the chain
-// is deeper than the default limit of 128 (E0275; bugfix-37 saw it close,
-// bugfix-49 added this when a build needed it).
+// is deeper than the default limit of 128 (E0275).
 #![recursion_limit = "256"]
 
 pub mod amqp;
 pub mod backend;
-// Chapter 43 (R8): the Bolt listener on 7687.
+// The Bolt listener on 7687.
 pub mod bolt;
 pub mod dc;
 pub mod exec;
 pub mod failover;
 pub mod frontend;
-// Chapter 43 (R8): native graphs in the tenant catalog.
+// Native graphs in the tenant catalog.
 pub mod graphs;
 pub mod http;
 pub mod inherited;
@@ -84,20 +83,20 @@ pub mod mongo;
 pub mod mysql;
 pub mod observe;
 pub mod offload;
-// R9 (r9fwd): the feed-driven outbox forwarder's gateway side.
+// The feed-driven outbox forwarder's gateway side.
 pub mod outbox_feed;
 pub mod peer;
 pub mod pipeline;
 pub mod reads;
 pub mod redis;
 pub mod registry;
-// Chapter 39 (R5 round 5): full-text search.
+// Full-text search.
 pub mod search;
 pub mod session;
 pub mod sink_peer;
 pub mod tenant;
 pub mod tls;
-// Chapter 41 (R9): workers' runs of triggers on streams and queues.
+// Workers' runs of triggers on streams and queues.
 pub mod triggers;
 pub mod workload;
 pub mod write_load;
@@ -121,15 +120,15 @@ use crate::tls::CertStore;
 ///
 /// The `sprigdb` binary has already bound the telemetry port, so
 /// `/healthz` answers and `/readyz` reports `starting` until this marks the
-/// process ready. Startup follows chapter 04: load the settings mirrors,
+/// process ready. Startup: load the settings mirrors,
 /// register (lease, slot, record in state `starting`), apply the listeners,
-/// then report ready; listener settings then apply live. Drain follows
-/// chapter 04's five steps ([`lifecycle`]).
+/// then report ready; listener settings then apply live. Drain takes five
+/// steps ([`lifecycle`]).
 ///
 /// # Errors
 /// `Internal` if the setting registry is invalid (a bug); 39998 for
 /// unreadable `[tls]` files; 39500 if no etcd seed answers at start-up
-/// (chapter 23: refuse to start).
+/// (the gateway refuses to start without the control plane).
 #[allow(clippy::too_many_lines)] // start-up and drain, step by step
 pub async fn run(ctx: RoleContext) -> Result<()> {
     let role = Role::Gateway;
@@ -141,9 +140,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     // SIGTERM or the Admin API started it. It is not a child of
     // `ctx.shutdown`: on SIGTERM the permit loop, the backends and the
     // registration must keep running while the gateway drains, or writes
-    // that still arrive during the drain get 39501 (hardening round 2: a
-    // stopping gateway refused writes for 5-6 s before it closed its
-    // listeners).
+    // that still arrive during the drain get 39501 (a stopping gateway
+    // would refuse writes for 5-6 s before it closed its listeners).
     let stop = sprig_common::CancellationToken::new();
     let rctx = RoleContext {
         config: ctx.config.clone(),
@@ -157,22 +155,22 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         () = ctx.shutdown.cancelled() => return Ok(()),
         () = live.ready() => {}
     }
-    // bugfix-62 (Q39): no start with a commit-resolve window the resolver
+    // No start with a commit-resolve window the resolver
     // could sweep under.
     sprig_txn::settings::check_live(&live, &dc)?;
-    // Chapter 47: trace sampling, the OTLP endpoint and the audit spool
+    // Trace sampling, the OTLP endpoint and the audit spool
     // limit follow their settings.
     let _telemetry_settings = sprig_settings::ops::apply_live(&live, &dc);
 
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let certs = Arc::new(CertStore::new(clock.clone()));
     let watcher = certs.spawn_watcher(tls::POLL_INTERVAL, stop.clone());
-    // Backend pools and read routing (chapter 06): clusters from the DC
+    // Backend pools and read routing: clusters from the DC
     // tier's registry, settings from the live mirror.
     let stores = live.stores();
     let backends = backend::Backends::new(
         dc.clone(),
-        // The DC tier also holds each cluster's writer lease (chapter 25).
+        // The DC tier also holds each cluster's writer lease.
         backend::RegistryClusters::with_leases(
             sprig_cluster::registry::ClusterRegistry::new(
                 Arc::clone(&stores.global),
@@ -186,7 +184,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let _reaper = backends.start();
     let sessions = Arc::new(SessionTable::new(clock.clone()));
 
-    // Registration (chapter 04 step 6): the slot first, so connection ids
+    // Registration: the slot first, so connection ids
     // carry it from the first session on.
     let registrar = registry::Registrar::new(registry::GatewayRecord {
         gateway_id: gateway_id.clone(),
@@ -225,7 +223,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         )
         .await;
 
-    // Chapter 25 (R2): the DC permit, its watchdog and admission while the
+    // The DC permit, its watchdog and admission while the
     // DC returns from an outage.
     let _fence = failover::start(
         Arc::clone(&stores.dc),
@@ -235,7 +233,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         stop.clone(),
     );
 
-    // The peer service (chapter 04 step 10).
+    // The peer service.
     let peer_tls = ctx
         .config
         .tls
@@ -243,7 +241,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .map(peer::PeerTls::from_config)
         .transpose()?;
     let peers = Arc::new(peer::Peers::new(Arc::clone(&stores.dc), peer_tls.clone()));
-    // Chapter 37, "Admin API over TLS": how this gateway checks a
+    // Admin API over TLS: how this gateway checks a
     // controller whose Admin API serves HTTPS.
     http::admin::set_controller_tls(
         ctx.config
@@ -257,9 +255,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .map(|t| (t.cert.as_path(), t.key.as_path())),
     )?;
 
-    // Logins (chapter 14) and, for catalog logins, the tenant services
-    // (chapters 07 and 08).
-    // Chapter 26: logins of tenants pinned elsewhere go to a gateway of an
+    // Logins and, for catalog logins, the tenant services.
+    // Logins of tenants pinned elsewhere go to a gateway of an
     // allowed DC over the peer service.
     let handoff = Arc::new(sprig_auth::handoff::HandoffConfig {
         here: dc.clone(),
@@ -283,10 +280,10 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     if let Some(t) = &tenants {
         executor = executor.with_tenants(Arc::clone(t));
     }
-    // Chapter 51: sink credentials are sealed with the master key file's
+    // Sink credentials are sealed with the master key file's
     // `sink` keys.
     exec::sinks::install_keyring(rctx.config.gateway.workload_key_file.as_deref());
-    // Workload capture (chapter 12, M0.4): the hook and its flusher.
+    // Workload capture: the hook and its flusher.
     let (workload, flusher) = workload::start(
         &rctx.config,
         &live,
@@ -294,11 +291,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         clock.clone(),
         stop.clone(),
     )?;
-    // Every front end's requests pass the workload hook (chapter 12) into
-    // the one executor.
-    // Admission (chapter 04 step 7) in front of everything, so a statement
-    // waiting for a slot holds no backend connection.
-    // Chapter 04: the `limits.*` keys per tenant, from its cached catalog.
+    // Every front end's requests pass the workload hook into the one
+    // executor.
+    // Admission in front of everything, so a statement waiting for a slot
+    // holds no backend connection.
+    // The `limits.*` keys per tenant, from its cached catalog.
     let limiter = limits::Limiter::new(limits::LimitSource::Live {
         live: live.clone(),
         dc: dc.clone(),
@@ -309,13 +306,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             lookup
         }),
     });
-    // Chapter 47's SLIs and root trace span outermost, so admission waits
+    // The SLIs and root trace span outermost, so admission waits
     // count in statement latency.
     let shared_exec = observe::observed(limits::limited(
         pipeline::with_workload(Arc::new(executor), workload),
         Arc::clone(&limiter),
     ));
-    // The MySQL and MariaDB front ends (chapter 05).
+    // The MySQL and MariaDB front ends.
     let mysql = mysql::MySqlStack::start(
         mysql::StackConfig {
             login: Arc::clone(&login),
@@ -327,7 +324,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         },
         stop.clone(),
     )?;
-    // HTTP on 8080 and 8443 (chapter 04 step 4, chapter 37).
+    // HTTP on 8080 and 8443.
     let engine = Arc::new(http::sql::SqlEngine {
         executor: Arc::clone(&shared_exec),
         sessions: Arc::clone(&sessions),
@@ -363,7 +360,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             )
             .with_internal_token_file(ctx.config.gateway.controller_token_file.as_deref())?,
         ),
-        // Studio (chapter 44): files, browser sessions, API additions.
+        // Studio: files, browser sessions, API additions.
         studio: Arc::new(
             http::studio::StudioState::new(
                 http::studio::StudioSource::Live {
@@ -379,10 +376,10 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .with_gateway(&gateway_id),
         ),
     });
-    // Chapter 52: SQL's SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION.
+    // SQL's SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION.
     tenant::rec_sql::install(Arc::clone(&core.admin));
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
-    // Kafka on 9092 (chapter 45, R9): catalog logins only, since topics are
+    // Kafka on 9092: catalog logins only, since topics are
     // a tenant's streams.
     let kafka_fe = tenants.as_ref().map(|t| {
         let cluster = Arc::new(kafka::cluster::GatewayCluster::new(
@@ -392,7 +389,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc.clone(),
         ));
         let data = Arc::new(kafka::data::GatewayData::start(Arc::clone(t), stop.clone()));
-        // Chapter 29 (RL44): filtered change-topic reads run as the reader.
+        // Filtered change-topic reads run as the reader.
         data.set_engine(Arc::clone(&engine));
         Arc::new(kafka::KafkaFrontend::start(
             kafka::KafkaDeps {
@@ -411,7 +408,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             stop.clone(),
         ))
     });
-    // AMQP on 5672 and 5671 (chapter 50, R9). The queue relay to other
+    // AMQP on 5672 and 5671. The queue relay to other
     // gateways' owners and the direct reply-to key the DC's gateways share
     // go over the peer service.
     let queue_relay = amqp::peer::GatewayRelay::new(Arc::clone(&stores.dc), peer_tls.clone());
@@ -423,7 +420,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     };
     replies.set_relay(Arc::new(queue_relay.clone()));
     let amqp_queues = Arc::new(match &tenants {
-        // Chapter 50 steps 2-10: the queue engine over the catalog.
+        // The queue engine over the catalog.
         Some(t) => amqp::GatewayQueues::with_engine(
             Arc::clone(t),
             live.clone(),
@@ -443,7 +440,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             u32::from(sessions.slot()),
         )
     });
-    // Full-text search (chapter 39, R5 round 5): index copies in this
+    // Full-text search: index copies in this
     // gateway, fed by the change feed; SQL and MongoDB use it.
     if let Some(t) = &tenants
         && let Err(e) = search::SearchService::start(
@@ -463,7 +460,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     {
         tracing::warn!(error = %e, "full-text search unavailable");
     }
-    // MongoDB (chapter 30, R5): catalog logins through SCRAM; the
+    // MongoDB: catalog logins through SCRAM; the
     // document engine runs in the user's executor session.
     let mongo_fe = Arc::new(mongo::MongoFrontend::start(
         mongo::MongoDeps {
@@ -478,7 +475,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         },
         stop.clone(),
     ));
-    // Redis (chapter 40, R6): catalog logins through AUTH; commands run as
+    // Redis: catalog logins through AUTH; commands run as
     // SQL in the user's executor session.
     let redis_fe = redis::RedisFrontend::new(redis::RedisDeps {
         login: Arc::clone(&login),
@@ -488,7 +485,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         dc: dc.clone(),
         gateway_id: gateway_id.clone(),
     });
-    // RL51: keyspace notifications from the change feed.
+    // Keyspace notifications from the change feed.
     let redis_fe = Arc::new(match &tenants {
         Some(t) => redis_fe.with_feed(Arc::clone(t)),
         None => redis_fe,
@@ -505,7 +502,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         gateway_id.clone(),
         replies,
     ));
-    // Bolt on 7687 (chapter 43, R8): catalog logins only, since graphs
+    // Bolt on 7687: catalog logins only, since graphs
     // are a tenant's objects.
     let bolt_svc = Arc::new(bolt::BoltGraphService::new(
         Arc::clone(&login),
@@ -513,12 +510,12 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         live.clone(),
         dc.clone(),
     ));
-    // Sql.Query's `language` (tui T2): Cypher and GQL through the graph
+    // Sql.Query's `language`: Cypher and GQL through the graph
     // service, MongoDB commands through the document engine's front end.
     engine.languages.set_graphs(Arc::clone(&bolt_svc));
     engine.languages.set_mongo(Arc::clone(mongo_fe.shared()));
     let bolt_fe = Arc::new(bolt::BoltFrontend::new(bolt_svc));
-    // Chapter 40's pub/sub hubs between gateways, on the peer service.
+    // Redis pub/sub hubs between gateways, on the peer service.
     let redis_peer = redis::hub::RedisPeerService::new(
         gateway_id.clone(),
         Arc::clone(&stores.dc),
@@ -608,7 +605,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         () = lifecycle.requested() => {}
     }
 
-    // Drain (chapter 04, "Drain").
+    // Drain.
     // 1. Draining: readiness off, the record says so; give load balancers
     //    time to notice.
     lifecycle.mark_draining();
@@ -706,9 +703,9 @@ struct PeerHost {
     sessions: Arc<SessionTable>,
     gateway_id: String,
     lifecycle: lifecycle::Lifecycle,
-    /// Chapter 50's queue relay, when the queue engine runs here.
+    /// The queue relay, when the queue engine runs here.
     queue_peer: Option<amqp::peer::QueuePeerService>,
-    /// Chapter 40's pub/sub hubs.
+    /// The Redis pub/sub hubs.
     redis_peer: Option<redis::hub::RedisPeerService>,
 }
 
@@ -776,8 +773,8 @@ fn bind_overrides(
 }
 
 /// The process's logins by `[gateway] login_mode`: tenant catalogs (the
-/// default, chapter 14) with the tenant services, or the interim accounts
-/// file (decision D1) with its watcher.
+/// default) with the tenant services, or the accounts file with its
+/// watcher.
 type Logins = (
     Arc<mysql::login::LoginService>,
     Option<Arc<tenant::TenantServices>>,
@@ -833,7 +830,7 @@ fn logins(
                 );
                 tenant::backends::TenantBackends::none(Arc::clone(&tenants.locator))
             };
-            // Chapter 29: per-user backend accounts, when configured.
+            // Per-user backend accounts, when configured.
             tenants.authz.configure(resolver.per_user());
             let catalogs = Arc::new(CatalogLogins::new(
                 Arc::new(MetaTenants::new(
@@ -847,7 +844,7 @@ fn logins(
                     tenants.dc.clone(),
                 )),
             ));
-            // Chapter 14: tenant endpoints by TLS SNI, live.
+            // Tenant endpoints by TLS SNI, live.
             let sni = follow_sni_suffixes(
                 Arc::clone(&catalogs),
                 live.clone(),
@@ -855,9 +852,8 @@ fn logins(
                 ctx.shutdown.clone(),
             );
             tracing::info!("logins from tenant catalogs (login_mode = catalog)");
-            // Chapter 14: failure counters and temporary locks in the
-            // tenants' catalogs, audit events in the log (target
-            // sprig_audit) until chapter 47's pipeline.
+            // Failure counters and temporary locks in the tenants'
+            // catalogs, audit events in the log (target sprig_audit).
             let state = sprig_auth::policy::CatalogLoginState::new(tenants.catalog.clone());
             let svc = LoginService::new(LoginSource::Catalog(catalogs), fast_cache)
                 .with_clock(clock)
@@ -870,7 +866,7 @@ fn logins(
 }
 
 /// Applies `listener.tenant_sni_suffixes` to `logins` now and after every
-/// change (chapter 14, "Finding the tenant"), until `shutdown`. A value
+/// change, until `shutdown`. A value
 /// that isn't a list of DNS suffixes (only possible when it was written
 /// around the controller's check) keeps the old list and raises
 /// `SettingNotApplied`.
@@ -934,12 +930,11 @@ async fn settings_stores(ctx: &RoleContext) -> Result<SettingsStores> {
         .as_ref()
         .map(EtcdTls::from_files)
         .transpose()?;
-    // Until the relay (chapter 23 step 11), the gateway reads the global
-    // settings straight from the global tier.
+    // The gateway reads the global settings straight from the global tier,
+    // not through the controllers' relay.
     let tiers = connect_tiers(dc, meta, tls, DEFAULT_REQUEST_TIMEOUT, true).await?;
-    // Endpoint discovery (chapter 23 step 9), every 60 s
-    // (control.etcd_member_refresh_seconds' default; the key is the
-    // controller's).
+    // Endpoint discovery, every 60 s (control.etcd_member_refresh_seconds'
+    // default; the key is the controller's).
     let discovery = Arc::new(sprig_meta::discovery::Discovery::new(&tiers.dc));
     drop(discovery.spawn(|| DISCOVERY_PERIOD, ctx.shutdown.clone()));
     let global = tiers
@@ -947,9 +942,8 @@ async fn settings_stores(ctx: &RoleContext) -> Result<SettingsStores> {
         .ok_or_else(|| SprigError::internal("connect_tiers returned no global store"))?;
     let global: Arc<dyn MetaStore> = Arc::new(global);
     let dc: Arc<dyn MetaStore> = Arc::new(tiers.dc);
-    // Two tiers (r2next): other DCs' shard maps and cluster records come
-    // through their controllers' relay (chapter 23 step 11); one etcd
-    // serves them directly.
+    // Two tiers: other DCs' shard maps and cluster records come through
+    // their controllers' relay; one etcd serves them directly.
     let dc: Arc<dyn MetaStore> = if two_tier(meta) {
         Arc::new(sprig_meta::relay::RoutedStore::new(dc, Arc::clone(&global)))
     } else {

@@ -1,5 +1,4 @@
-//! The publication wait of chapter 31's `check_flags` (build step 5;
-//! `decisions/r5-interim.md` D13): a write holding a new array path
+//! The publication wait of `check_flags`: a write holding a new array path
 //! commits only after every gateway of the DC has loaded the catalog
 //! version that registers the path, so no gateway plans a query on that
 //! path as scalar-safe while the write is visible.

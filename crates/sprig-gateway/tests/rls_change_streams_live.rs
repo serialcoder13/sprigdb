@@ -1,5 +1,5 @@
 //! Change streams filtered per event for users a table's row-level
-//! security binds (chapter 29; RLS round 5, decisions RL44 to RL46):
+//! security binds:
 //! `Changes.Watch` over gRPC, Server-Sent Events and WebSocket, and Redis
 //! keyspace notifications. Each stream is opened as a bound user (alice)
 //! while another user's rows (bob's) change: alice gets her own changes, a
@@ -8,7 +8,7 @@
 //! batch; a resumed stream starts after its token; a user without SELECT
 //! is refused. Keyspace notifications also come from the change feed for
 //! writes that aren't the gateway's own Redis commands: scripts, SQL and
-//! expiries (RL51).
+//! expiries.
 //!
 //! ```sh
 //! export SPRIG_TEST_RLS_SQL=127.0.0.1:39306
@@ -455,7 +455,7 @@ async fn change_streams_filtered_per_event() {
         }
         let t = String::from_utf8_lossy(&b).into_owned();
         ck.ok("redis setup", !t.contains("-ERR"), || t.clone());
-        // RL51: writes that aren't Redis commands this gateway knows notify
+        // Writes that aren't Redis commands this gateway knows notify
         // from the change feed: a script's, SQL's, and a key's expiry.
         let mut b = Vec::new();
         for c in [
@@ -642,7 +642,7 @@ async fn change_streams_filtered_per_event() {
         !rt.contains("rlsc_bob"),
         || rt.clone(),
     );
-    // RL51.
+    // Notifications from the feed.
     ck.ok(
         "Redis: a script's write notifies (from the feed)",
         rt.contains("__keyspace@0__:rlsc_alice:lua"),
@@ -744,7 +744,7 @@ async fn open_limits(addr: &str, query: &str) -> tokio::net::TcpStream {
     s
 }
 
-/// Chapter 37's limits on `Changes.Watch` (RLS round 5, RL53): the open
+/// The limits on `Changes.Watch`: the open
 /// streams per tenant on a gateway (39780), the slow-consumer end (39790);
 /// `start_at_hlc` stays refused (39802).
 #[allow(clippy::many_single_char_names)] // streams a to d, h

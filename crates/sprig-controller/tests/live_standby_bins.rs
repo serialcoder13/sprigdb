@@ -1,5 +1,4 @@
-//! Job standbys and live settings with the real binaries (chapter 25,
-//! "Standbys"; chapter 08, "Live application"; r2final).
+//! Job standbys and live settings with the real binaries.
 //!
 //! ```sh
 //! cargo build -p sprigdb -p sprigctl
@@ -10,8 +9,8 @@
 //! `ams1` each run `sprigdb controller`, `gateway`, `worker` and one
 //! `agent`; `wit1` is a witness controller. `fra1-db` is a primary with a
 //! semi-sync replica (`AFTER_SYNC`, its acknowledgements only); `ams1-db`
-//! is a separate primary. Tenant ids start at 26,730,600,000 (rules 8b
-//! and 8f).
+//! is a separate primary. Tenant ids start at 26,730,600,000, above every
+//! tenant id on the dev clusters.
 //!
 //! 1. **Settings reach running workers.** `r2final-mv` moves to `ams1`
 //!    after `mover.source_retain_hours = 0` is set at `ams1`'s dc scope:
@@ -56,7 +55,7 @@ const ROOT_PW: &str = "sprig-r2final-root";
 const REPL_PW: &str = "sprig-r2final-repl";
 const APP_PW: &str = "sprig-r2final-app";
 const DEPLOYMENT: &str = "sprigdb-r2final";
-/// Rules 8b and 8f: port 37306 x 100,000, plus 23 x 10^9 to stay above
+/// The MySQL port 37306 x 100,000, plus 23 x 10^9 to stay above
 /// every id on the dev clusters (25,530,600,001 on 10 Nov). Only this
 /// test's own containers hold these schemas.
 const TENANT_BASE: u64 = 26_730_600_000;
@@ -988,7 +987,7 @@ async fn bins_job_standby_settings_and_promotion() {
         let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
         assert!(
             (TENANT_BASE..TENANT_BASE + 100_000).contains(&id),
-            "rule 8f: {id} outside this deployment's range"
+            "tenant id range: {id} outside this deployment's range"
         );
         ids.insert(t, id);
         ctl_retry(
@@ -1123,7 +1122,7 @@ async fn bins_job_standby_settings_and_promotion() {
             );
             assert!(
                 d < Duration::from_secs(10),
-                "chapter 10: live, within seconds"
+                "source_retain_hours applies live, within seconds"
             );
             break;
         }

@@ -1,7 +1,5 @@
-//! The Admin API's automatic-indexing calls (chapter 13, "`recommend`
-//! mode" and the interfaces for people; chapter 37's `Indexes` and
-//! `Explain` services; build step 13), behind `sprigctl index` and
-//! `sprigctl explain query`.
+//! The Admin API's automatic-indexing calls (the `Indexes` and `Explain`
+//! services), behind `sprigctl index` and `sprigctl explain query`.
 //!
 //! | Call | Route |
 //! |---|---|
@@ -19,22 +17,22 @@
 //! `<table>.<name>` or `<db>.<table>.<name>` (case-insensitive), which
 //! must name one row.
 //!
-//! **Actions** move rows along chapter 13's state machine with a
+//! **Actions** move rows along the index state machine with a
 //! conditional update (`set_state`), so a concurrent change by the
 //! evaluation, rollout or observer loops makes the call fail with 39202
 //! instead of overwriting it:
 //!
 //! - **approve**: `recommended` → `rolling_out`. Rollout picks up rows in
 //!   `rolling_out` (its queue in the store) and builds them shard by
-//!   shard. Advice (`advice_*`) can't be approved in R0.
+//!   shard. Advice (`advice_*`) can't be approved.
 //! - **reject**: `recommended` → `dropped` with reason `dismissed`, which
 //!   blocks the same definition for `auto_index.recreate_block_days`.
 //! - **drop**: `rolling_out`, `observing`, `active`, `retiring` or
 //!   `failed` → `dropping` with reason `operator`; the observer's drop
 //!   step removes it from every shard (also blocked from re-creation).
-//! - **pin** / **unpin**: chapter 13's `freeze` and `freeze --off`: any
+//! - **pin** / **unpin**: also called `freeze` and `freeze --off`: any
 //!   live state → `frozen` (the prior state kept) and back.
-//! - **restore** (decision O1): a `retiring` index is made visible again
+//! - **restore**: a `retiring` index is made visible again
 //!   (`NOT IGNORED` on every shard) and pinned; a serving one is pinned. For
 //!   a user or migrated index (an `index_usage` row, named by
 //!   `[<db>.][<table>.]<name>`) a dropped one is recreated from its saved
@@ -45,8 +43,8 @@
 //! `list` also shows user and migrated indexes whose removal is under way
 //! or recommended, or that were removed or pinned (with `origin`).
 //!
-//! Every action is logged as a `decision` event (chapter 11's `decisions`
-//! table doesn't exist yet), with the actor (`op:<actor>`) and reason.
+//! Every action is logged as a `decision` event (the `decisions` table
+//! doesn't exist yet), with the actor (`op:<actor>`) and reason.
 //! Calls are catalog work, answered by any controller, like catalog-scope
 //! settings. The `autoindex` module is migrated on first use
 //! (idempotent), as the user calls migrate `auth`.
@@ -57,10 +55,10 @@
 //! one's cost gates checked against today's settings, its validations
 //! and the index it became, and each object's resolved policy and route.
 //! What the store doesn't hold yet: why a fingerprint didn't qualify
-//! (trigger evaluation, step 2, records only fingerprints that did).
+//! (trigger evaluation records only fingerprints that did).
 
 pub mod view;
-// Chapter 52: recommended rows for the approvals gate.
+// Recommended rows for the approvals gate.
 pub mod held;
 
 use std::collections::BTreeMap;
@@ -416,7 +414,7 @@ impl AutoIndexService {
         Ok(())
     }
 
-    /// `act` on a user or migrated index (decision O1).
+    /// `act` on a user or migrated index.
     #[allow(clippy::too_many_lines)] // plan, shard statement, state, decision
     async fn act_user(
         &self,
@@ -685,7 +683,7 @@ impl AutoIndexAdmin for AutoIndexService {
             .into_iter()
             .map(|r| view::index_view(r, &t.names, None))
             .collect();
-        // User and migrated indexes under decision O1: those whose removal
+        // User and migrated indexes judged by usage: those whose removal
         // is under way, recommended, done (with `all`) or pinned.
         let all = q.all.unwrap_or(false);
         for r in t.store.usage_rows(&mut t.conn, None).await? {

@@ -1,18 +1,17 @@
-//! Tenant users through the Admin API, interim (M0.3): `POST
-//! /admin/v1/tenants/{name}/users` creates a user with a password in the
-//! tenant's catalog (chapter 14, "Setting a password"), so a development
-//! or test deployment can log in to a tenant before chapter 29's `CREATE
-//! USER` exists. `sprigctl tenant user add <tenant> <user> --password ...`
+//! Tenant users through the Admin API: `POST /admin/v1/tenants/{name}/users`
+//! creates a user with a password in the tenant's catalog, so a
+//! development or test deployment can log in to a tenant without SQL's
+//! `CREATE USER`. `sprigctl tenant user add <tenant> <user> --password ...`
 //! calls it.
 //!
 //! The call migrates the catalog's `auth` module first (idempotent), so
 //! tenants bootstrapped before [`AuthHooks`] registered the module get its
 //! tables too. Bootstrap migrates it with the core module from now on.
 //!
-//! Where this differs from the book: chapter 14 creates users with SQL
-//! (`CREATE USER`, chapter 29) and the Admin API's `Users` service with an
-//! authenticated operator; this endpoint trusts the Admin API token, like
-//! every R0 Admin API call (decision N5).
+//! Users are otherwise created with SQL (`CREATE USER`) or by an
+//! authenticated operator through the Admin API's `Users` service; this
+//! endpoint trusts the Admin API token, like every other Admin API call
+//! here.
 
 mod suspend;
 
@@ -32,8 +31,8 @@ pub use suspend::{MAX_REASON, SuspendTenantRequest, SuspendTenantResponse};
 use crate::tenants::BootstrapHooks;
 use crate::tree::{Directory, TenantState};
 
-/// Bootstrap hooks that migrate chapter 14's `auth` module (and chapter
-/// 12's `workload` module) with the core catalog, so a new tenant's
+/// Bootstrap hooks that migrate the `auth` module (and the `workload`
+/// module) with the core catalog, so a new tenant's
 /// catalog has its `users` and `verifiers` tables (gateways load them into
 /// every snapshot) and its workload tables.
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,7 +41,7 @@ pub struct AuthHooks;
 #[async_trait::async_trait]
 impl BootstrapHooks for AuthHooks {
     fn modules(&self) -> Vec<Module> {
-        // Chapter 12's workload tables too: gateways write them from a
+        // The workload tables too: gateways write them from a
         // tenant's first statement.
         vec![
             AUTH_MODULE,
@@ -89,8 +88,7 @@ pub struct CreateUserResponse {
     pub user: String,
     /// The host pattern.
     pub host: String,
-    /// The new user's id (its backend account is `t<tenant>_u<id>` from
-    /// chapter 29).
+    /// The new user's id (its backend account is `t<tenant>_u<id>`).
     pub user_id: UserId,
     /// The auth version the user committed at.
     pub auth_version: u64,
@@ -107,7 +105,7 @@ pub trait UserAdmin: Send + Sync {
     /// As [`TenantUsers::create`].
     async fn create(&self, tenant: &str, req: CreateUserRequest) -> Result<CreateUserResponse>;
 
-    /// A tenant's accounts for an export (chapter 47): live users with
+    /// A tenant's accounts for an export: live users with
     /// their verifier strings, and its SQL roles.
     ///
     /// # Errors
@@ -118,7 +116,7 @@ pub trait UserAdmin: Send + Sync {
         ))
     }
 
-    /// Creates exported accounts in a tenant (chapter 47).
+    /// Creates exported accounts in a tenant.
     ///
     /// # Errors
     /// As [`TenantUsers::import_accounts`].
@@ -132,7 +130,7 @@ pub trait UserAdmin: Send + Sync {
         ))
     }
 
-    /// Suspends a tenant and its subtree (chapter 14, "Suspension").
+    /// Suspends a tenant and its subtree.
     ///
     /// # Errors
     /// As [`TenantUsers::suspend`].
@@ -239,7 +237,7 @@ impl TenantUsers {
         new.source = sprig_auth::store::UserSource::Api;
         new.hashing.native = req.native;
         let mut changed = admin::create_user(&self.catalog, id, &new, &*self.clock).await?;
-        // Chapter 29: an operator-made user administers its tenant, as the
+        // An operator-made user administers its tenant, as the
         // bootstrap admin does (ALL and SPRIG_TENANT_ADMIN on *.*).
         changed.auth_version =
             sprig_auth::authz::account_sql::grant_tenant_admin(&self.catalog, id, changed.user_id)
@@ -269,7 +267,7 @@ impl TenantUsers {
     }
 
     /// The live users (with verifier strings) and SQL roles of the tenant
-    /// named `tenant`, for `sprigctl tenant export` (chapter 47).
+    /// named `tenant`, for `sprigctl tenant export`.
     ///
     /// # Errors
     /// 39072 for an unknown or inactive tenant; the catalog's errors.

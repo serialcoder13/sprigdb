@@ -1,4 +1,4 @@
-//! The `Recommendations` service's REST routes (chapter 52, "Admin API"),
+//! The `Recommendations` service's REST routes,
 //! merged into the controller's Admin API router.
 //!
 //! Credentials: the admin token is a platform operator; `[controller]
@@ -70,7 +70,7 @@ impl RecApp {
     }
 
     fn who(&self, headers: &HeaderMap) -> Result<Who> {
-        // Behind the operators' guard (chapter 14, "Operators"): the
+        // Behind the operators' guard: the
         // caller it established, by role.
         if headers.contains_key(crate::operators::guard::AUTHN_HEADER) {
             let p = crate::operators::http::principal(headers)?;
@@ -285,8 +285,8 @@ fn without_caller(uri: &Uri) -> Result<Uri> {
 
 async fn policy(State(app): State<Arc<RecApp>>, headers: HeaderMap, uri: Uri) -> Response {
     let r = async {
-        // A gateway sends its Studio user as a claim (round 7: the
-        // policy page refused the gateway credential without one).
+        // A gateway sends its Studio user as a claim (the policy page
+        // once refused the gateway credential without one).
         let cq: CallerQ = query(&uri)?;
         let c = app.caller(&headers, claim(cq.caller.as_ref())?, None)?;
         let q: SettingContextQuery = query(&without_caller(&uri)?)?;

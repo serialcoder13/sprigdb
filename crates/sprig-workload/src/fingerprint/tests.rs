@@ -91,3 +91,68 @@ fn credentials_and_passwords_are_sensitive() {
         }
     }
 }
+
+/// A resolver that knows databases `shop` (1) and `retail` (2), any table.
+struct Dbs;
+
+impl crate::shape::TableResolver for Dbs {
+    fn resolve(&self, db: Option<&str>, _table: &str) -> Option<crate::shape::ResolvedTable> {
+        let db_id = match db? {
+            "shop" => DbId(1),
+            "retail" => DbId(2),
+            _ => return None,
+        };
+        Some(crate::shape::ResolvedTable {
+            object_id: sprig_common::ids::ObjectId(u64::from(db_id.0) * 100),
+            db_id,
+            physical: None,
+        })
+    }
+}
+
+/// Studio showed `SELECT ... FROM retail.orders WHERE customer_id = ?`
+/// twice, once with database "—" and once with `retail`: the id took the
+/// session's default database. Now a statement that names its tables is
+/// keyed on the first table's database, whatever the session's is.
+#[test]
+fn a_qualified_statement_is_one_fingerprint_whatever_the_default_database() {
+    use sprig_common::ids::TenantId;
+    let f = SqlFingerprinter::new(1024);
+    let t = TenantId(7);
+    let base = SqlCtx::new(Persona::MySql84);
+    let none = base;
+    let retail = base.current_db("retail", DbId(2));
+    let shop = base.current_db("shop", DbId(1));
+    let q = b"SELECT id FROM retail.orders WHERE customer_id = 42";
+    let a = f.sql(t, q, &none, &Dbs);
+    let b = f.sql(t, q, &retail, &Dbs);
+    let c = f.sql(t, q, &shop, &Dbs);
+    // The unqualified form in a `retail` session is the same statement.
+    let d = f.sql(t, b"SELECT id FROM orders WHERE customer_id = 7", &retail, &Dbs);
+    assert_eq!(a.id, b.id);
+    assert_eq!(a.id, c.id);
+    assert_eq!(a.id, d.id);
+    assert_eq!((a.db_id, c.db_id, d.db_id), (DbId(2), DbId(2), DbId(2)));
+    // Unchanged for the common case: the id a `retail` session had before.
+    assert_eq!(b.id, digest(FpKind::Sql, DbId(2), None, &b.text));
+    // CTE names aside: the first base table decides.
+    let w = b"WITH x AS (SELECT id FROM retail.orders) SELECT * FROM x";
+    assert_eq!(f.sql(t, w, &shop, &Dbs).db_id, DbId(2));
+    // A database the resolver doesn't know keys on 0, from any session.
+    let u = b"SELECT 1 FROM elsewhere.t";
+    assert_eq!(f.sql(t, u, &shop, &Dbs).id, f.sql(t, u, &none, &Dbs).id);
+    assert_eq!(f.sql(t, u, &shop, &Dbs).db_id, DbId(0));
+    // A statement that names no table keeps the session's database: its
+    // meaning can depend on it (`SELECT f()` calls the session's `f`).
+    let s = b"SELECT f(1)";
+    let (s1, s2) = (f.sql(t, s, &shop, &Dbs), f.sql(t, s, &retail, &Dbs));
+    assert_ne!(s1.id, s2.id);
+    assert_eq!((s1.db_id, s2.db_id), (DbId(1), DbId(2)));
+    // lower_case_table_names: `RETAIL.orders` in a `retail` session.
+    let lc = SqlCtx {
+        lower_case_table_names: true,
+        ..retail
+    };
+    let e = f.sql(t, b"SELECT id FROM RETAIL.orders WHERE customer_id = 1", &lc, &Dbs);
+    assert_eq!(e.db_id, DbId(2));
+}

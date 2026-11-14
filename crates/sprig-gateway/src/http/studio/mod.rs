@@ -1,5 +1,4 @@
-//! Studio on the HTTP listeners (chapter 44) and the API additions it
-//! needs (chapter 37, "APIs for Studio", R0 part).
+//! Studio on the HTTP listeners and the API additions it needs.
 //!
 //! The HTTP front end hands every non-gRPC request to [`handle`] first; it
 //! answers:
@@ -27,12 +26,10 @@
 //! indexing routes are limited to the caller's own tenant and, for
 //! actions, to users who could create an index there.
 //!
-//! **Where the book differs.** These routes are REST only, dispatched
-//! ahead of the proto route table and described in a hand-written
-//! `OpenAPI` fragment ([`sprig_studio::api`]); their gRPC forms come with
-//! chapter 14's `Auth` service and the protos of chapter 37 step 15. Token
-//! sessions are chapter 14's signed tokens ([`session`]): any gateway
-//! accepts them.
+//! **REST only.** These routes are dispatched ahead of the proto route
+//! table and described in a hand-written `OpenAPI` fragment
+//! ([`sprig_studio::api`]); they have no gRPC forms yet. Token sessions
+//! are signed tokens ([`session`]): any gateway accepts them.
 
 pub mod accounts;
 pub mod catalog;
@@ -40,15 +37,15 @@ pub mod cursors;
 pub mod exports;
 pub mod grants;
 pub mod library;
-// Round 4: the logic editors (chapter 44 step 26).
+// The logic editors.
 pub mod logic;
-// Round 4: the stream, queue and sink views (chapter 44 steps 28–31).
+// The stream, queue and sink views.
 pub mod messaging;
 pub mod mfa;
 pub mod ops;
-// Round 4: the row-level security tester (chapter 44 step 18).
+// The row-level security tester.
 pub mod policies;
-// Chapter 52: the approvals inbox.
+// The approvals inbox.
 pub mod recommendations;
 pub mod session;
 pub mod shards;
@@ -80,7 +77,7 @@ use super::rest::error_response;
 use super::sql::{CHANNEL_DEPTH, Caller, Caps, SqlCall, collect};
 use super::{ConnInfo, Core};
 
-/// `auth.token_ttl_seconds` (chapter 14): access-token lifetime.
+/// `auth.token_ttl_seconds`: access-token lifetime.
 pub static TOKEN_TTL_SECONDS: Setting<u64> = Setting {
     key: "auth.token_ttl_seconds",
     default: 900,
@@ -93,7 +90,7 @@ pub static TOKEN_TTL_SECONDS: Setting<u64> = Setting {
 };
 sprig_settings::register!(TOKEN_TTL_SECONDS);
 
-/// `auth.refresh_ttl_hours` (chapter 14): token-session lifetime.
+/// `auth.refresh_ttl_hours`: token-session lifetime.
 pub static REFRESH_TTL_HOURS: Setting<u64> = Setting {
     key: "auth.refresh_ttl_hours",
     default: 168,
@@ -106,8 +103,8 @@ pub static REFRESH_TTL_HOURS: Setting<u64> = Setting {
 };
 sprig_settings::register!(REFRESH_TTL_HOURS);
 
-/// `auth.token_key_rotation_days` (chapter 14): token signing-key
-/// rotation. Each gateway rotates its own key (decision ST18).
+/// `auth.token_key_rotation_days`: token signing-key rotation. Each
+/// gateway rotates its own key.
 pub static TOKEN_KEY_ROTATION_DAYS: Setting<u64> = Setting {
     key: "auth.token_key_rotation_days",
     default: 30,
@@ -147,7 +144,7 @@ pub enum StudioSource {
 
 /// What Studio's routes share.
 pub struct StudioState {
-    /// Token sessions: signing, verifying, refreshing (chapter 14).
+    /// Token sessions: signing, verifying, refreshing.
     pub tokens: Arc<Tokens>,
     source: StudioSource,
     store: &'static AssetStore,
@@ -157,13 +154,13 @@ pub struct StudioState {
     global: Option<Arc<dyn MetaStore>>,
     /// Tenant services: the catalog writer for API keys.
     tenants: Option<Arc<crate::tenant::TenantServices>>,
-    /// Open cursors (decision ST30).
+    /// Open cursors.
     pub cursors: Arc<cursors::CursorRegistry>,
-    /// Second factors in the tenant catalogs (chapter 14 step 13).
+    /// Second factors in the tenant catalogs.
     factors: Option<sprig_auth::mfa::FactorStore>,
     /// The keys sealing TOTP seeds.
     factor_keys: Option<Arc<dyn sprig_auth::mfa::FactorKeys>>,
-    /// The Admin API token operator mode forwards with (decision ST35).
+    /// The Admin API token operator mode forwards with.
     operator_token: Option<String>,
 }
 
@@ -246,7 +243,7 @@ impl StudioState {
                 .and_then(|()| std::fs::read_to_string(p))
             {
                 Ok(t) if !t.trim().is_empty() => {
-                    // Decision ST73: the older operator mode is deprecated.
+                    // The older operator mode is deprecated.
                     tracing::warn!(
                         path = %p.display(),
                         "Studio's older operator mode ([gateway] operator_token_file with \
@@ -385,7 +382,7 @@ impl StudioState {
 
     /// The `studio.*` values for the browser (`WhoAmI`'s `studio`): this
     /// gateway's for the process keys, `tenant`'s for the keys that accept
-    /// tenant scope (decision ST9's alternative).
+    /// tenant scope.
     #[must_use]
     pub fn client_for(
         &self,
@@ -411,9 +408,8 @@ impl StudioState {
     }
 
     /// A `studio.*` value for `tenant` (and its database `db`), from the
-    /// tenant's catalog settings and its ancestors', then dc and global
-    /// (chapter 44, "Configuration"; decision ST9's alternative). Falls back
-    /// to this gateway's scopes when the tenant isn't in this gateway's
+    /// tenant's catalog settings and its ancestors', then dc and global. Falls
+    /// back to this gateway's scopes when the tenant isn't in this gateway's
     /// cache.
     pub fn tenant_get<T: sprig_settings::SettingValue>(
         &self,
@@ -441,11 +437,10 @@ impl StudioState {
         }
     }
 
-    /// The caps a call gets (decision ST8's alternative): what it asked
-    /// for, and for a Studio session no more than `studio.max_result_rows`,
-    /// `studio.max_result_mb` and `studio.statement_timeout_ms` at the
-    /// tenant's and database's scopes, so a modified browser gains
-    /// nothing.
+    /// The caps a call gets: what it asked for, and for a Studio session no
+    /// more than `studio.max_result_rows`, `studio.max_result_mb` and
+    /// `studio.statement_timeout_ms` at the tenant's and database's scopes,
+    /// so a modified browser gains nothing.
     #[must_use]
     pub fn caps_for(&self, caller: &Caller, database: &str, asked: Caps) -> Caps {
         if session_client(caller.authorization.as_deref()).as_deref() != Some("studio") {
@@ -618,8 +613,7 @@ pub fn session_client(authorization: Option<&str>) -> Option<String> {
 
 /// Every claim of the session token in `authorization`, read without
 /// checking the signature: only for a caller already verified. What
-/// `SPRIG_CLAIM('k')` reads in that caller's statements (chapter 29;
-/// decision bugfix-interim).
+/// `SPRIG_CLAIM('k')` reads in that caller's statements.
 #[must_use]
 pub fn session_claims(authorization: Option<&str>) -> Option<Value> {
     let t = bearer(authorization)?.strip_prefix(ACCESS_PREFIX)?;
@@ -669,13 +663,12 @@ fn cookie(req: &Request<Incoming>, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_owned())
 }
 
-/// Whether the refresh cookie gets `Secure`: over TLS, and on loopback
-/// unless the page itself is plain `http://` (Studio round 6). Safari's
-/// engine drops a `Secure` cookie set for an `http://127.0.0.1` page
-/// (Chrome and Firefox keep it), which signed Studio out on every reload
-/// (chapter 44's open question 6); a loopback connection never leaves the
-/// machine, so the flag adds nothing there. A TLS proxy on the same host
-/// (an `https://` origin) still gets `Secure`.
+/// Whether the refresh cookie gets `Secure`: over TLS, and on loopback unless
+/// the page itself is plain `http://`. Safari's engine drops a `Secure` cookie
+/// set for an `http://127.0.0.1` page (Chrome and Firefox keep it), which
+/// signed Studio out on every reload; a loopback connection never leaves the
+/// machine, so the flag adds nothing there. A TLS proxy on the same host (an
+/// `https://` origin) still gets `Secure`.
 fn cookie_secure(info: &ConnInfo, req: &Request<Incoming>) -> bool {
     cookie_secure_for(info, hdr(req, "origin").as_deref())
 }
@@ -1079,8 +1072,8 @@ async fn login(
     Ok(r)
 }
 
-/// The refresh cookie, the one this transport sets first: a browser that
-/// kept a `Secure` cookie from before round 6 on an `http://` loopback page
+/// The refresh cookie, the one this transport sets first: a browser that kept
+/// a `Secure` cookie set by an older gateway on an `http://` loopback page
 /// then sends both, and the older one must not count as a reused token.
 fn refresh_cookie(req: &Request<Incoming>, secure: bool) -> Option<String> {
     let (a, b) = if secure {
@@ -1276,7 +1269,7 @@ impl Versioned for DirEntry {
 }
 
 /// The home tenant, and the descendants an administrator manages
-/// (chapter 29: `SPRIG_TENANT_ADMIN` flows down the tree).
+/// (`SPRIG_TENANT_ADMIN` flows down the tree).
 async fn tenant_tree(core: &Arc<Core>, p: &sprig_auth::Principal, admin: bool) -> Value {
     let home = json!({
         "name": p.tenant_name,
@@ -1366,7 +1359,7 @@ pub fn quote_literal(s: &str) -> String {
 /// `Users.SetPassword`: `ALTER USER 'u'@'h' IDENTIFIED BY '...'` built
 /// here and run as the caller, so the browser never puts a password in
 /// statement text, history or drafts; workload capture redacts it as it
-/// does for any client (chapter 12).
+/// does for any client.
 async fn set_password(
     core: &Arc<Core>,
     info: &ConnInfo,

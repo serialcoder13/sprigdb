@@ -263,7 +263,8 @@ async fn off_listener_offers_no_tls_and_needs_tls_for_a_full_login() {
     // A client that requires TLS fails on its side.
     let e = connect(opts(gw.mysql, "app", PW, true)).await.unwrap_err();
     assert_eq!(server_code(&e), None, "{e}");
-    // A cold caching_sha2 login over plaintext needs the RSA path (D4).
+    // A cold caching_sha2 login over plaintext would need the RSA key
+    // exchange, which the gateway doesn't offer: refused.
     let e = connect(opts(gw.mysql, "app", PW, false)).await.unwrap_err();
     assert_eq!(server_code(&e), Some(1045), "{e}");
     assert!(e.to_string().contains("connect with TLS"), "{e}");
@@ -437,7 +438,7 @@ async fn kill_query_and_connection() {
     let one: Option<i64> = a.query_first("SELECT 1").await.unwrap();
     assert_eq!(one, Some(1));
 
-    // The session's own statement (R4 round 6): the KILL itself is
+    // The session's own statement: the KILL itself is
     // interrupted, 1317, and the session stays.
     let e = a
         .query_drop(format!("KILL QUERY {a_id}"))
@@ -795,7 +796,7 @@ async fn raw_empty_password_is_one_nul() {
     gw.stop().await;
 }
 
-/// A failure delay (chapter 14) that runs past `gateway.handshake_timeout_ms`
+/// A failure delay that runs past `gateway.handshake_timeout_ms`
 /// still ends with the ERR packet: the deadline moves back by the delay.
 /// Before, the gateway dropped the connection and clients reported "2013
 /// Lost connection" once a name's delays grew past the timeout.
@@ -902,7 +903,7 @@ async fn live_failed_login_matrix() {
         let addr: SocketAddr = addr.parse().unwrap();
         for tls in [true, false] {
             for (user, pw, want) in &cases {
-                // Failure delays (chapter 14) grow to 10 s per name.
+                // Failure delays grow to 10 s per name.
                 let r = tokio::time::timeout(
                     Duration::from_secs(60),
                     Conn::new(opts(addr, user, pw, tls)),

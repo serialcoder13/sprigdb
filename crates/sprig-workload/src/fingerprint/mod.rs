@@ -24,6 +24,9 @@
 //!
 //! [`digest`] is `xxh3_64(kind byte ‖ db_id as u32 LE ‖ caller_fn_id as
 //! u64 LE ‖ text)` over the whole normalized text (before truncation).
+//! For SQL, `db_id` is the database of the first table the statement
+//! names, else the session's: the same statement from sessions with
+//! different default databases is one fingerprint.
 //!
 //! Each `?` and each collapsed `(...)` of the text is a **slot**; the
 //! statement's literals are listed with their slot ([`Literal::slot`]),
@@ -269,7 +272,8 @@ pub struct SqlCtx<'a> {
     /// unqualified table references.
     pub current_db: Option<&'a str>,
     /// The current database's id, `DbId(0)` when there is none. Part of the
-    /// id.
+    /// id of a statement that names no table; otherwise the first table's
+    /// database is.
     pub db_id: DbId,
     /// Where the statement came from.
     pub front_end: FrontEnd,
@@ -331,7 +335,9 @@ pub struct Fingerprint {
     pub front_end: FrontEnd,
     /// The logic function, for its `db.*` calls.
     pub caller: Option<Caller>,
-    /// The logical database part of the id.
+    /// The logical database part of the id: the database of the first
+    /// table the statement names, else the session's (`DbId(0)` for none
+    /// or an unknown one).
     pub db_id: DbId,
     /// Flags for `workload_fingerprints.flags`.
     pub flags: FpFlags,

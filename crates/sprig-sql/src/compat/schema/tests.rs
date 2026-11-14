@@ -372,7 +372,7 @@ fn show_collation_reads_mysqls_collations() {
 fn generated_not_null_shows_as_mysql_writes_it() {
     // MariaDB 11.8.9's text for a table created through 3306 from
     // `CREATE TABLE g (a INT, b INT AS (a+1) NOT NULL, c INT GENERATED
-    // ALWAYS AS (a*2) STORED NOT NULL)` (R4 round 3).
+    // ALWAYS AS (a*2) STORED NOT NULL)`.
     let maria = "CREATE TABLE `g` (\n  `a` int(11) DEFAULT NULL,\n  `b` int(11) GENERATED ALWAYS AS (`a` + 1) VIRTUAL,\n  `c` int(11) GENERATED ALWAYS AS (`a` * 2) STORED,\n  CONSTRAINT `_sprignn_b` CHECK (`b` is not null),\n  CONSTRAINT `_sprignn_c` CHECK (`c` is not null)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
     assert_eq!(
         mysql_create_table(maria),
@@ -396,9 +396,8 @@ fn functional_parts_show_as_mysql_writes_them() {
 
 #[test]
 fn expression_defaults_print_in_parentheses() {
-    // R4 round 6 (gaps row 78): MariaDB 11.8.9's text of
-    // `DEFAULT (now())` (stored as `localtimestamp()` on 3306),
-    // `DEFAULT (now(6))`, `DEFAULT (curdate())` and the special
+    // MariaDB 11.8.9's text of `DEFAULT (now())` (stored as `localtimestamp()`
+    // on 3306), `DEFAULT (now(6))`, `DEFAULT (curdate())` and the special
     // `CURRENT_TIMESTAMP` default; MySQL 8.4.11 prints the first three in
     // parentheses with `now`.
     let maria = "CREATE TABLE `dn` (
@@ -422,9 +421,8 @@ fn expression_defaults_print_in_parentheses() {
 
 #[test]
 fn column_defaults_are_unescaped_and_read_now() {
-    // R4 round 6 (gaps row 78): MariaDB writes a newline in a literal
-    // default as `\n`; MySQL shows the character. `localtimestamp()`
-    // reads `now()`.
+    // MariaDB writes a newline in a literal default as `\n`; MySQL shows the
+    // character. `localtimestamp()` reads `now()`.
     let cols = mysql_view("COLUMNS", &lit).unwrap();
     let Some((_, Src::Sql(d))) = cols.iter().find(|(n, _)| *n == "COLUMN_DEFAULT") else {
         panic!("no COLUMN_DEFAULT");
@@ -439,7 +437,7 @@ fn column_defaults_are_unescaped_and_read_now() {
 
 #[test]
 fn create_database_in_mysqls_spelling() {
-    // R4 round 6: MariaDB 11.8.9's and MySQL 8.4.11's text.
+    // MariaDB 11.8.9's and MySQL 8.4.11's text.
     assert_eq!(
         mysql_create_database(
             "CREATE DATABASE `r4six_x` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_uca1400_ai_ci */"

@@ -728,7 +728,9 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
                      DELETED (k, ...)";
         let w = next + 3;
         let keys = |open: usize| -> Result<Vec<String>, SprigError> {
-            let close = t.close_of(open).filter(|c| *c + 1 == t.len() && t.punct(open, b'('));
+            let close = t
+                .close_of(open)
+                .filter(|c| *c + 1 == t.len() && t.punct(open, b'('));
             let close = close.ok_or_else(|| syntax(usage))?;
             let mut out = Vec::new();
             let mut a = open + 1;

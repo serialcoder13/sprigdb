@@ -1,5 +1,4 @@
-//! Workload capture end to end through the dev gateway (chapter 12,
-//! milestone M0.4): a slow statement run 200 times as `acme.app` reaches
+//! Workload capture end to end through the dev gateway: a slow statement run 200 times as `acme.app` reaches
 //! acme's catalog with its runs, latency, probed rows examined and sealed
 //! parameter samples, read back through the workload store's reader API;
 //! `globex` sees none of it.

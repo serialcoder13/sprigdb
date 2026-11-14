@@ -1,17 +1,16 @@
-//! The verdict of a replay (chapter 13, "Replay and acceptance"): noise
+//! The verdict of a replay: noise
 //! handling, per-statement medians, per-fingerprint p95s, and accept or
 //! reject against the thresholds. Pure functions, so every rule has a
 //! table-driven test.
 //!
-//! The rules, with the choices this module makes where the chapter is
-//! silent marked *(choice)*:
+//! The rules, with this module's own choices marked *(choice)*:
 //!
 //! - **A statement's time** is the median of its runs, A (before, with
 //!   `IGNORE INDEX`) and B (after) separately.
 //! - **Noise.** A statement whose A runs spread by more than
 //!   [`Thresholds::noise_ratio`] (1.5 times) gets two more rounds. *(choice)*
 //!   A spread also has to exceed [`Thresholds::noise_floor_ms`] (1 ms), the
-//!   chapter's regression noise floor, or sub-millisecond statements would
+//!   regression noise floor, or sub-millisecond statements would
 //!   always look noisy. After the extra rounds the slowest A run is dropped
 //!   as an outlier *(choice)* and the spread is checked again; a statement
 //!   still noisy is left out of the regression check but counted. A
@@ -29,7 +28,7 @@
 //!   gate already demands a broad gain)*.
 //! - **Covering hint.** A rejection by a statement whose B plan reads the
 //!   index with many primary-key lookups names that statement, so the
-//!   validator can retry with a covering index (worked example 3).
+//!   validator can retry with a covering index.
 
 use serde::{Deserialize, Serialize};
 use sprig_common::ids::Fingerprint;

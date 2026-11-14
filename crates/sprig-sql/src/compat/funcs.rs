@@ -1,5 +1,4 @@
-//! MySQL 8.4 functions MariaDB 11.8 doesn't have, rewritten on port 3306
-//! (chapter 28's rule catalogue, build step 7):
+//! MySQL 8.4 functions MariaDB 11.8 doesn't have, rewritten on port 3306:
 //!
 //! - `ANY_VALUE(x)` becomes `(x)`: the backend runs without
 //!   `ONLY_FULL_GROUP_BY` (the gateway checks it, [`super::groupby`]), so

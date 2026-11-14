@@ -1,7 +1,7 @@
 //! A controller's registration, `/sprig/dc/<dc>/controllers/<node>`
-//! (chapter 23, "DC tier"): where its Admin API listens, bound to a lease
+//! in the DC tier: where its Admin API listens, bound to a lease
 //! so it disappears with the process. Gateways forward the Admin API to
-//! the DC leader's address (chapter 37 step 4).
+//! the DC leader's address.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,17 +24,16 @@ pub struct ControllerRecord {
     /// The build.
     #[serde(default)]
     pub version: String,
-    /// `host:port` of the internal services (chapter 25's permits, peer
-    /// pings and observations; chapter 23's relay): where gateways and
+    /// `host:port` of the internal services (failover permits, peer pings
+    /// and observations; the relay): where gateways and
     /// agents renew their permits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_addr: Option<String>,
-    /// The Admin API serves HTTPS (`[controller] admin_tls_cert`; chapter
-    /// 37, "Admin API over TLS"): gateways relay to it with `https://`.
+    /// The Admin API serves HTTPS (`[controller] admin_tls_cert`): gateways relay to it with `https://`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admin_tls: bool,
     /// The internal services serve mutual TLS (`[controller]
-    /// internal_tls`; hardening round 3): callers use `https://` and
+    /// internal_tls`): callers use `https://` and
     /// present their `[tls]` certificate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub internal_tls: bool,

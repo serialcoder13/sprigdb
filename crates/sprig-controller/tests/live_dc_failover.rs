@@ -1,5 +1,5 @@
 //! DC failover with real processes, a real etcd and real MariaDB,
-//! Jepsen-style (chapter 25, "Testing"; R2's done-when). Set
+//! Jepsen-style. Set
 //! `SPRIG_TEST_DOCKER=1` (and `SPRIG_TEST_TOXIPROXY`, the dev toxiproxy
 //! API) to run; `SPRIG_TEST_ELLE=1` adds elle-cli's check of the merged
 //! history.
@@ -88,11 +88,11 @@ use sprig_testkit::skip;
 const ROOT_PW: &str = "sprig-sim-root";
 const REPL_PW: &str = "sprig-sim-repl";
 const APP_PW: &str = "sprig-sim-app";
-/// Rule 8b: this agent's tenant ids start at 2,830,600,000.
+/// This test's tenant ids start at 2,830,600,000.
 const T_MOVES: u64 = 2_830_600_001;
 const T_PINNED: u64 = 2_830_600_002;
 const KEYS: u64 = 6;
-/// Controllers' internal ports (this agent's 28316-28337 range).
+/// Controllers' internal ports (this test's 28316-28337 range).
 const PORTS: [(&str, u16); 3] = [("fra1", 28316), ("ams1", 28317), ("wit1", 28318)];
 
 fn schema(t: u64) -> &'static str {

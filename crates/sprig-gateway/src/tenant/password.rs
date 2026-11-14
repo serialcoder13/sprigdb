@@ -1,9 +1,7 @@
-//! A user changing its own password (chapter 14, "MySQL logins": sandbox
-//! mode lets only `ALTER USER ... IDENTIFIED BY`, `SET PASSWORD` and `SET`
-//! run). Until chapter 29's account statements (M0.5) this is the only
-//! account statement a tenant session runs; the rest fail with 1227. They
-//! must never reach MariaDB, whose accounts are SprigDB's backend
-//! accounts, shared by the tenant's users in R0.
+//! A user changing its own password, which sandbox mode allows (it lets
+//! only `ALTER USER ... IDENTIFIED BY`, `SET PASSWORD` and `SET` run). The
+//! change must never reach MariaDB as written: MariaDB's accounts are
+//! SprigDB's backend accounts, not the tenant's users.
 //!
 //! Recognized forms, for the session's own account only:
 //!
@@ -25,7 +23,7 @@ pub struct PasswordChange {
     /// `RETAIN CURRENT PASSWORD`.
     pub retain_current: bool,
     /// `REPLACE 'current'`: the current password, for `PASSWORD REQUIRE
-    /// CURRENT` (chapter 14).
+    /// CURRENT`.
     pub current: Option<Zeroizing<Vec<u8>>>,
     /// The statement names another account (refused with 1227).
     pub other_account: bool,

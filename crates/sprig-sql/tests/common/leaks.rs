@@ -1,6 +1,5 @@
-//! The leak suite's helpers (chapter 07, "Testing" and build step 10): no
-//! physical name (`t<digits>_...`) may reach a client in any byte it
-//! sees: column definitions, values, messages.
+//! The leak suite's helpers: no physical name (`t<digits>_...`) may reach a
+//! client in any byte it sees: column definitions, values, messages.
 
 use sprig_proto_mysql::ColumnDef;
 use sprig_sql::names::{OutputCtx, TextRow, map_message, physical_name_leaks};

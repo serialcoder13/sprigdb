@@ -1,6 +1,5 @@
 //! Row images checked against a session's privileges and row-level
-//! security (chapter 29, "Change feed consumers"; RLS round 5, decisions
-//! RL44 to RL46): what a change stream over gRPC, SSE or WebSocket, or a
+//! security: what a change stream over gRPC, SSE or WebSocket, or a
 //! Redis keyspace notification, may show its subscriber.
 //!
 //! A caller in this process (the API's `Changes.Watch`, the Redis front
@@ -68,7 +67,7 @@ pub(crate) struct ImagesRequest {
     /// key-value key), not base64 as change records do.
     #[serde(default)]
     pub plain_binary: bool,
-    /// Also `WATCH` on each table (chapters 29 and 38: an application
+    /// Also `WATCH` on each table (an application
     /// change stream needs it); `Changes.Watch` sets it, keyspace
     /// notifications don't.
     #[serde(default)]

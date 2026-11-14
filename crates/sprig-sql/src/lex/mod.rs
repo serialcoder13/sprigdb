@@ -1,5 +1,4 @@
-//! The persona-aware SQL lexer (chapter 07, "Lexing per persona"; chapter
-//! 28, build step 1).
+//! The persona-aware SQL lexer.
 //!
 //! [`lex`] splits statement text into [`Token`]s that cover every byte of
 //! the input, in order, with no gaps: whitespace and comments are tokens

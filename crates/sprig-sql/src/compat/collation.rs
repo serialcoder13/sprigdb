@@ -1,4 +1,4 @@
-//! The collation map (chapter 28, "Collation map"; build step 3).
+//! The collation map.
 //!
 //! MySQL 8.4's `utf8mb4_*_0900_*` collations and MariaDB's UCA 14.0
 //! collations, both ways, with MySQL's metadata ids. MariaDB 11.4.5 and
@@ -13,16 +13,14 @@
 //!   collation, read as the MySQL 0900 collation with the same tailoring
 //!   and strength. MariaDB's PAD SPACE variants (`utf8mb4_uca1400_ai_ci`)
 //!   read as the NO PAD MySQL name too: MySQL has no PAD SPACE UCA 9.0.0
-//!   collation, and the only difference is trailing spaces in comparisons
-//!   (decision in chapter 28).
+//!   collation, and the only difference is trailing spaces in comparisons.
 //! - **Input** ([`mariadb_name`]): the MariaDB collation a MySQL name
 //!   stands for, and `None` for the MySQL tailorings MariaDB lacks
 //!   (`ja`, `zh`, `ru`, `nb`, `nn`, `sr_latn`, `bs`, `bg`, `gl`, `mn_cyrl`),
 //!   which fail with 1273 as on a server without them.
 //! - **Ids** ([`mysql_id`]): MySQL's id for each 0900 name, for metadata.
 //!
-//! Shard hashing ([chapter 15]) uses the same map, so a column's mapping
-//! never changes.
+//! Shard hashing uses the same map, so a column's mapping never changes.
 //!
 //! The table was captured on 8 November 2026 from MySQL 8.4.11
 //! (`information_schema.COLLATIONS`) and MariaDB 11.8.9 (the aliases'
@@ -293,7 +291,7 @@ pub const MYSQL_DEFAULT: &str = "utf8mb4_0900_ai_ci";
 /// `COLLATION_CHARACTER_SET_APPLICABILITY` list only these: MySQL
 /// Connector/J's `detectCustomCollations` fails to connect on a collation
 /// name it doesn't know whose id is below 2048, and MariaDB has 17 such
-/// (`utf8mb4_myanmar_ci`, `*_croatian_mysql561_ci`, ...; gaps row 54).
+/// (`utf8mb4_myanmar_ci`, `*_croatian_mysql561_ci`, ...).
 pub const MYSQL84_NAMES: &[&str] = &[
     "armscii8_bin",
     "armscii8_general_ci",
@@ -648,7 +646,7 @@ pub fn output_pairs() -> Vec<(String, &'static str)> {
             v.push((m.to_owned(), c.mysql));
             // The PAD SPACE twin of a UCA 14.0 collation only: the twin of
             // `utf8mb4_nopad_bin` is `utf8mb4_bin`, which MySQL has too
-            // (R4 round 6, gaps row 78: it read as `utf8mb4_0900_bin`).
+            // (it used to read as `utf8mb4_0900_bin`).
             let pad = without_nopad(m);
             if pad != m && m.starts_with("utf8mb4_uca1400_") {
                 v.push((pad.into_owned(), c.mysql));
@@ -735,7 +733,7 @@ mod tests {
         assert!(s.starts_with("CASE `COLLATION_NAME` WHEN"));
         assert!(s.contains("WHEN 'utf8mb4_uca1400_ai_ci' THEN 'utf8mb4_0900_ai_ci'"));
         assert!(s.contains("WHEN 'utf8mb4_nopad_bin' THEN 'utf8mb4_0900_bin'"));
-        // R4 round 6 (gaps row 78): MySQL has `utf8mb4_bin` too.
+        // MySQL has `utf8mb4_bin` too.
         assert!(!s.contains("WHEN 'utf8mb4_bin'"), "{s}");
         assert!(
             !output_pairs()

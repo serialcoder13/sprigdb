@@ -90,6 +90,9 @@ struct ScriptFeed {
     txns: Arc<Vec<Vec<ChangeEvent>>>,
     next: usize,
     out: std::collections::VecDeque<FeedItem>,
+    /// A wait after taking a transaction and before emitting it, as the
+    /// tail's catalog lookups: `next` isn't cancel-safe then.
+    lookup: Option<Duration>,
 }
 
 #[async_trait::async_trait]
@@ -102,6 +105,9 @@ impl FeedSource for ScriptFeed {
             if let Some(t) = self.txns.get(self.next) {
                 self.next += 1;
                 let seq = self.next as u64;
+                if let Some(d) = self.lookup {
+                    tokio::time::sleep(d).await;
+                }
                 for e in t {
                     self.out.push_back(FeedItem::Event(Box::new(e.clone())));
                 }
@@ -127,8 +133,47 @@ impl FeedOpener for Script {
             txns: Arc::clone(&self.0),
             next,
             out: std::collections::VecDeque::new(),
+            lookup: None,
         }))
     }
+}
+
+/// [`Script`] whose feed waits 20 ms between taking a transaction and
+/// emitting it.
+#[derive(Clone)]
+struct SlowScript(Script);
+
+#[async_trait::async_trait]
+impl FeedOpener for SlowScript {
+    async fn open(&self, start: &Start) -> Result<Box<dyn FeedSource>> {
+        let next = match start {
+            Start::After(t) => t.pos.get(1).map_or(0, |g| g.seq as usize),
+            Start::At { .. } => 0,
+        };
+        Ok(Box::new(ScriptFeed {
+            txns: Arc::clone(&self.0.0),
+            next,
+            out: std::collections::VecDeque::new(),
+            lookup: Some(Duration::from_millis(20)),
+        }))
+    }
+}
+
+/// Regression (r9feed's live runs): the run loop's deadlines must not drop
+/// a feed read half-way. A tail takes a group from its source and then
+/// awaits catalog lookups; a batch or idle-checkpoint deadline that
+/// cancelled that read lost the group (6 new instances lost their first
+/// record).
+#[tokio::test(start_paused = true)]
+async fn deadlines_never_drop_a_half_read_feed_item() {
+    let feed = script(40);
+    let log = MemLog::new(&start());
+    let mut s = sequencer(&log, &feed);
+    s.feed = Arc::new(SlowScript(feed.clone()));
+    s.opts.batch_window = Duration::from_millis(1);
+    s.opts.idle_checkpoint = Duration::from_millis(5);
+    assert_eq!(run_for(&s, Duration::from_secs(10)).await, RunEnd::Stopped);
+    check(&log, &feed);
 }
 
 fn script(n: u64) -> Script {

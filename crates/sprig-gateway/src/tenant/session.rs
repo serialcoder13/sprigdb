@@ -1,9 +1,8 @@
-//! One tenant session's catalog state (chapter 08, "Gateway contract";
-//! chapter 07): the pinned tenant, the snapshot statements read, the
-//! [`NameMap`](sprig_sql::names::NameMap) built from it, the session's
-//! last own catalog change (read your own DDL), its temporary tables, the
-//! warnings the gateway raised for its last statement, and the live
-//! settings it follows.
+//! One tenant session's catalog state: the pinned tenant, the snapshot
+//! statements read, the [`NameMap`](sprig_sql::names::NameMap) built from
+//! it, the session's last own catalog change (read your own DDL), its
+//! temporary tables, the warnings the gateway raised for its last
+//! statement, and the live settings it follows.
 //!
 //! **Freshness.** The first statement (or `USE` at login) asks the cache
 //! for [`Freshness::Latest`]; every later one for `Cached { min_version:
@@ -66,17 +65,19 @@ pub struct TenantSession {
     pub warnings: Option<Vec<LocalWarning>>,
     /// The current logical database before the backend session exists.
     pub current: Option<String>,
-    /// `SET @sprig_show_auto_indexes = 1` (chapter 13): automatic indexes
-    /// shown in `SHOW INDEX`, `SHOW CREATE TABLE` and `STATISTICS`, and
-    /// droppable. Kept by the gateway, never sent to MariaDB.
+    /// `SET @sprig_show_auto_indexes = 1`: automatic indexes shown in
+    /// `SHOW INDEX`, `SHOW CREATE TABLE` and `STATISTICS`, and droppable.
+    /// Kept by the gateway, never sent to MariaDB.
     pub show_auto_indexes: bool,
-    /// Chapter 29: active roles and the compiled privileges.
+    /// Active roles and the compiled privileges.
     pub authz: super::authz::SessionAuthz,
-    /// Chapter 32: the type layer's session state.
+    /// The type layer's session state.
     pub types: crate::exec::types::TypesSession,
-    /// Chapter 42: the session's space.
+    /// The session's space.
     pub inherit: crate::exec::inherit::InheritSession,
-    /// Chapter 29: row-level security (claims, the covered tables).
+    /// The record-hierarchy locks its transaction holds.
+    pub hier_locks: crate::exec::inherit::HierLocks,
+    /// Row-level security (claims, the covered tables).
     pub rls: super::rls::RlsSession,
     long_data_max: Arc<AtomicU64>,
     watch: Option<JoinHandle<()>>,
@@ -126,6 +127,7 @@ impl TenantSession {
             authz: super::authz::SessionAuthz::default(),
             types: crate::exec::types::TypesSession::default(),
             inherit: crate::exec::inherit::InheritSession::default(),
+            hier_locks: crate::exec::inherit::HierLocks::default(),
             rls: super::rls::RlsSession::default(),
             long_data_max: Arc::new(AtomicU64::new(LONG_DATA_MAX_BYTES.default)),
             watch: None,
@@ -160,7 +162,7 @@ impl TenantSession {
         }
         let cat = self.svc.cache.get(self.tenant, fresh).await?;
         self.install(&cat);
-        // Chapter 29: the tenant's per-user backend accounts follow the
+        // The tenant's per-user backend accounts follow the
         // snapshot before this session uses them.
         if let Err(e) = self
             .svc
@@ -168,7 +170,7 @@ impl TenantSession {
             .ensure(&self.svc, &cat, &self.principal.backend.cluster)
             .await
         {
-            // A tenant being deleted (bugfix-32): every statement says so.
+            // A tenant being deleted: every statement says so.
             if e.code() == Some(sprig_common::SprigCode::TenantNotReady) {
                 tracing::debug!(tenant = %self.tenant, error = %e, "backend grants not reconciled");
             } else {
@@ -200,7 +202,7 @@ impl TenantSession {
         if !same {
             self.map = Arc::new(name_map(cat));
         }
-        // An auth change (chapter 29) moves only the auth version.
+        // An auth change moves only the auth version.
         if !same
             || self
                 .cat
@@ -337,6 +339,8 @@ impl TenantSession {
         self.warnings = None;
         self.show_auto_indexes = false;
         self.inherit = crate::exec::inherit::InheritSession::default();
+        // The backend's transaction ended with the reset.
+        self.hier_locks = crate::exec::inherit::HierLocks::default();
     }
 
     /// What the session may see of internal objects: the persona's

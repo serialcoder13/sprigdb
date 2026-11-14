@@ -77,8 +77,11 @@ struct Slow {
 impl FeedSource for Slow {
     async fn next(&mut self) -> Result<sprig_feed::FeedItem> {
         if self.rng.chance(0.03) {
-            tokio::time::sleep(self.rng.duration(Duration::from_millis(100), Duration::from_secs(2)))
-                .await;
+            tokio::time::sleep(
+                self.rng
+                    .duration(Duration::from_millis(100), Duration::from_secs(2)),
+            )
+            .await;
         }
         self.tail.next().await
     }

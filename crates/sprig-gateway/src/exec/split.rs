@@ -1,8 +1,7 @@
-//! Splitting a `COM_QUERY` text into statements (chapter 05,
-//! "Multi-statements and multiple results"), and the file name of a
-//! `LOAD DATA LOCAL INFILE` (chapter 05, "LOAD DATA LOCAL INFILE").
+//! Splitting a `COM_QUERY` text into statements, and the file name of a
+//! `LOAD DATA LOCAL INFILE`.
 //!
-//! Until the parser (chapter 17) the split is lexical: semicolons outside
+//! The split is lexical: semicolons outside
 //! quotes, back quotes and comments end a statement. A compound statement
 //! (`CREATE PROCEDURE`, `FUNCTION`, `TRIGGER`, `EVENT`, `PACKAGE`, or
 //! `BEGIN NOT ATOMIC`) has semicolons inside its body that a lexer can't
@@ -47,7 +46,7 @@ pub fn split(sql: &Bytes) -> Vec<Bytes> {
             b'-' if is_dash_comment(b, i) => i = skip_line(b, i),
             b'/' if b.get(i + 1) == Some(&b'*') => i = skip_block(b, i),
             // A `$$ ... $$` body (logic functions and triggers, sink
-            // scripts, R9 r9queue): its semicolons don't end the statement.
+            // scripts): its semicolons don't end the statement.
             b'$' if b.get(i + 1) == Some(&b'$') && dollar_starts(b, i) => i = skip_dollar(b, i),
             b';' => {
                 push_piece(&mut out, sql, start, i);
@@ -277,7 +276,7 @@ pub fn rewrite_connection_id(sql: &[u8], id: u32) -> Option<(Bytes, Vec<Renamed>
 /// Replaces reads of gateway-owned variables the client set itself
 /// (`@@wait_timeout`, `@@session.net_read_timeout`, `@@session_track_*`,
 /// ...) in a `SELECT` with the client's values from `vars`: backend
-/// connections keep the gateway's own values of these (chapter 06), so the
+/// connections keep the gateway's own values of these, so the
 /// backend would answer with the gateway's. The relay renames each column
 /// back to the text the client wrote. `None` when nothing changes. Global
 /// reads (`@@global.x`) are the server's and stay.
@@ -399,7 +398,7 @@ pub fn is_session_status(stmt: &[u8]) -> bool {
 }
 
 /// Whether `stmt` is `SHOW [GLOBAL | SESSION | LOCAL] VARIABLES ...`, whose
-/// version rows the relay rewrites with the persona's (chapter 28).
+/// version rows the relay rewrites with the persona's.
 #[must_use]
 pub fn is_show_variables(stmt: &[u8]) -> bool {
     let Some(start) = first_word_at(stmt, 0) else {

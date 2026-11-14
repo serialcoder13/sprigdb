@@ -1,6 +1,5 @@
 //! The login collation and the character-set statements through the
-//! gateway match MariaDB's own behaviour (chapter 06, "New connections",
-//! "Login collation"): a client that sends `utf8mb4_general_ci` (45) at
+//! gateway match MariaDB's own behaviour: a client that sends `utf8mb4_general_ci` (45) at
 //! login gets what MariaDB 11.8 gives it directly, `character_set_collations`
 //! mapping included, so `SELECT 'a' = ?` works and `'ß' = 'ss'` compares
 //! the same way. Each case also runs again after the session's backend
@@ -214,7 +213,7 @@ async fn probe(c: &mut MysqlClient) -> Vec<String> {
     out
 }
 
-/// The 3306 persona may report MySQL collation names (chapter 28):
+/// The 3306 persona may report MySQL collation names:
 /// compare both sides in those terms there. The `'a ' = 'a'` probes still
 /// tell PAD SPACE from NO PAD.
 fn as_seen(persona: Persona, v: Vec<String>) -> Vec<String> {
@@ -285,8 +284,7 @@ async fn login_collation_and_set_names_match_mariadb() {
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(100)).await;
             // The gateway never hands out the killed connection: the probe
-            // runs on another one (chapter 06, "When a lost connection is
-            // retried").
+            // runs on another one.
             let again = as_seen(*persona, probe(&mut c).await);
             assert_ne!(backend_thread(&mut c).await, id, "{ctx}: same connection");
             if again != want_seen {

@@ -1,16 +1,16 @@
-//! The Kafka data plane over `sprig-streams` (chapter 45 build steps 10 and
-//! 11): [`GatewayData`] implements `sprig-proto-kafka`'s
-//! [`StreamData`] for Produce, Fetch, ListOffsets and OffsetForLeaderEpoch.
+//! The Kafka data plane over `sprig-streams`: [`GatewayData`] implements
+//! `sprig-proto-kafka`'s [`StreamData`] for Produce, Fetch, ListOffsets and
+//! OffsetForLeaderEpoch.
 //!
 //! - **Topics** come from the tenant's catalog snapshot. Producing needs
 //!   `INSERT` on the stream (by name, or on its database), reading
 //!   `SELECT`; a change topic is read with `SELECT` on its table. When the
 //!   table's row-level security policies bind the reader, each fetched
 //!   batch is filtered through the topic's SQL read in a session of the
-//!   reader (chapter 29, RL44): hidden records are left out of the batches
+//!   reader: hidden records are left out of the batches
 //!   (their offsets are gaps the batches span), and an update whose row
 //!   became visible or hidden arrives as an insert or a delete. Privileges
-//!   are chapter 29's, compiled for the user with the roles active at
+//!   are the SQL ones, compiled for the user with the roles active at
 //!   login, and cached per catalog and auth version.
 //! - **Produce** writes the outbox directly on the stream's shard, as
 //!   `sprig_ctl`, through `sprig-streams`' [`publish::append`]: one
@@ -60,7 +60,7 @@ use uuid::Uuid;
 
 use crate::tenant::TenantServices;
 
-// Chapter 42 (R9): inherited streams over Kafka.
+// Inherited streams over Kafka.
 mod inherit;
 
 pub(crate) use inherit::{FANIN_PREFIX, fanin_cached, fanin_id, fanin_parts, is_fanin};
@@ -187,7 +187,7 @@ pub struct GatewayData {
     grants: Mutex<GrantCache>,
     epochs: Mutex<EpochCache>,
     expired: Mutex<HashMap<(u64, u64), Instant>>,
-    /// Chapter 29 (RL44): change-topic reads by users a table's policies
+    /// Change-topic reads by users a table's policies
     /// bind go through a session of the user (the SQL read's filter).
     engine: std::sync::OnceLock<Arc<crate::http::sql::SqlEngine>>,
 }
@@ -244,12 +244,12 @@ impl GatewayData {
         }
     }
 
-    /// The SQL engine filtered change-topic reads run through (RL44).
+    /// The SQL engine filtered change-topic reads run through.
     pub fn set_engine(&self, engine: Arc<crate::http::sql::SqlEngine>) {
         let _ = self.engine.set(engine);
     }
 
-    /// Chapter 29 (RL44): `records` (of change topic `r`, partition
+    /// `records` (of change topic `r`, partition
     /// `partition`) as user `p`, whom the table's policies bind, may see
     /// them: the change topic's SQL read over the same offsets, in a
     /// session of `p` (its policies, session values and grants); records it
@@ -503,7 +503,7 @@ impl GatewayData {
                 ),
             )),
             // A change topic whose table's policies bind the reader is read
-            // record by record through its filter (RL44, `read`).
+            // record by record through its filter (`read`).
             _ => Ok(()),
         }
     }
@@ -533,7 +533,7 @@ impl GatewayData {
     }
 
     async fn resolve_t(&self, p: &Principal, t: &DataTopic) -> Result<Resolved, TopicError> {
-        // Chapter 42 (R9): a fan-in topic reads its member's instance.
+        // A fan-in topic reads its member's instance.
         if is_fanin(t.stream_id) {
             return self.resolve_fanin(p, t).await;
         }
@@ -657,7 +657,7 @@ impl StreamData for GatewayData {
             return self.fanin_topic(p, name, access == Access::Write).await;
         }
         match self.resolve(p, name, access).await {
-            // Chapter 42 (R9): an inherited stream's topic.
+            // An inherited stream's topic.
             Err(e) if e.code == err::UNKNOWN_TOPIC_OR_PARTITION => {
                 match Box::pin(self.inherited_topic(p, name, access == Access::Write)).await? {
                     inherit::Inh::Retry => self.resolve(p, name, access).await.map(|r| r.topic),
@@ -717,7 +717,7 @@ impl StreamData for GatewayData {
         records: Vec<ProduceRecord>,
         producer: Option<ProducerBatch>,
     ) -> Result<AppendTicket, TopicError> {
-        // Chapter 42 (R9): a definition's topic, by `x-sprig-tenant`.
+        // A definition's topic, by `x-sprig-tenant`.
         if t.stream_id & inherit::DEF_FLAG != 0 {
             return Box::pin(self.append_by_tenant(p, t, partition, records)).await;
         }
@@ -911,7 +911,7 @@ impl StreamData for GatewayData {
                 filtered: false,
             })
             .collect();
-        // Chapter 29 (RL44): checked at every fetch, so a policy, role or
+        // Checked at every fetch, so a policy, role or
         // grant change applies from the next one.
         if r.def.kind == StreamKind::Changes
             && !records.is_empty()

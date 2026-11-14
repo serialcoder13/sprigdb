@@ -1,6 +1,6 @@
-//! The `cluster_failover` loop (chapter 25, "Primary + replicas, driven by
-//! SprigDB", "Galera: writer nodes and lost quorum", "Damping failover
-//! flapping"): the DC leader replaces a lost writer inside one cluster,
+//! The `cluster_failover` loop (primary + replicas driven by SprigDB,
+//! Galera writer nodes and lost quorum, and damping failover flapping):
+//! the DC leader replaces a lost writer inside one cluster,
 //! with `sprig_cluster::failover`'s steps.
 //!
 //! ```text
@@ -26,7 +26,7 @@
 //! returning former writer (after 9, once it answers):
 //!    nothing diverged -> rejoin as a replica (read_only stays on);
 //!    diverged -> report into the record, keep it out, alert; then
-//!    (failover.mode auto, r2close) an errant_extract job, and once its
+//!    (failover.mode auto) an errant_extract job, and once its
 //!    extract is verified a node_rebuild job; `rebuilt` when it succeeds
 //! galera
 //! 1. probe every node; GaleraQuorum::observe; writers are re-picked by the
@@ -42,11 +42,10 @@
 //! (the damper's interval), an open promotion, and the last 10 failovers
 //! with their RTO, loss estimate and the former writer's fate.
 //!
-//! **Where it differs from the book.** The writer lease is created by the
-//! controller for the chosen node and taken over by that node's agent (the
-//! book binds it to the agent's session directly, which another process
-//! can't do). Gateways don't report connect failures yet, so the sources
-//! are the probes and the agent. The RPO is the cluster's
+//! **The writer lease** is created by the controller for the chosen node
+//! and taken over by that node's agent (another process can't create a
+//! lease bound to the agent's own session). Gateways don't report connect
+//! failures yet, so the sources are the probes and the agent. The RPO is the cluster's
 //! `failover.rpo_seconds` (dc and global scopes); tenant-scoped RPOs live
 //! in catalogs and aren't read here yet. A failed extract or rebuild isn't
 //! retried on its own: its reason goes into the record, and an operator
@@ -134,7 +133,7 @@ pub enum FormerWriter {
     Diverged,
     /// A `node_rebuild` job is replacing its data from a replica.
     Rebuilding,
-    /// Rebuilt from a replica and replicating from the writer (r2close).
+    /// Rebuilt from a replica and replicating from the writer.
     Rebuilt,
 }
 
@@ -176,7 +175,7 @@ pub struct FailoverEvent {
     /// Its diverged transactions, when it had any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errant: Option<ErrantReport>,
-    /// The `errant_extract` job of a diverged former writer (r2close).
+    /// The `errant_extract` job of a diverged former writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extract_job: Option<String>,
     /// Its `node_rebuild` job.
@@ -244,7 +243,7 @@ pub struct ClusterFailoverRecord {
     #[serde(default)]
     pub history: Vec<FailoverEvent>,
     /// Who decided the writer: `sprig failover`, `observed:
-    /// mariadb-operator` or `observed: provider` (r2opfix).
+    /// mariadb-operator` or `observed: provider`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
@@ -335,7 +334,7 @@ impl ClusterSettings {
         }
     }
 
-    /// The book's defaults.
+    /// The defaults.
     #[must_use]
     pub fn defaults() -> Self {
         Self {
@@ -466,9 +465,9 @@ struct Watch {
     claim: Option<Session>,
     claimed_at: Option<Instant>,
     last_reason: Option<String>,
-    /// An observed writer change and since when (r2opfix).
+    /// An observed writer change and since when.
     observed: Option<(String, Instant)>,
-    /// The last look at a diverged former writer's recovery jobs (r2close).
+    /// The last look at a diverged former writer's recovery jobs.
     recovery_checked: Option<Instant>,
 }
 
@@ -659,7 +658,7 @@ impl ClusterFailover {
         }
     }
 
-    // ---- writers someone else fails over (r2opfix) -------------------------
+    // ---- writers someone else fails over ----------------------------------
 
     /// Publishes the writer of a cluster someone else fails over
     /// ([`super::observed`]).
@@ -869,7 +868,7 @@ impl ClusterFailover {
             }
             Step::Blocked(why) => self.blocked(cx, rec, &mut f, why).await,
             Step::FailOver { sources } => {
-                // Chapter 52: held only when the platform says so.
+                // Held for approval only when the platform says so.
                 if let Some(why) =
                     crate::approvals::failover_gate(&self.dc, c, &writer.clone()).await
                 {
@@ -1287,8 +1286,7 @@ impl ClusterFailover {
         Ok(())
     }
 
-    /// A diverged former writer (chapter 25, "Recovery after an outage"
-    /// steps 2-3): its `errant_extract` job, then, once the extract is
+    /// A diverged former writer (recovery after an outage): its `errant_extract` job, then, once the extract is
     /// verified, its `node_rebuild` job; `rebuilt` when that succeeds.
     /// Jobs start on their own only in `failover.mode = auto`; an
     /// operator's jobs (`sprigctl cluster extract|rebuild`) are followed

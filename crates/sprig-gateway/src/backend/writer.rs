@@ -1,10 +1,9 @@
-//! Writer selection per topology (chapter 06, "Writer selection"; build
-//! step 5).
+//! Writer selection per topology.
 //!
 //! | Topology | Writer for shard `S` |
 //! |---|---|
-//! | Galera | the usable node of the published writer set with the highest weighted rendezvous score for `S` (chapter 09's `choose_writer`) |
-//! | Primary and replicas | the node the controller publishes (chapter 25): the holder of `leases/writer/<cluster_id>`, else the writer the last failover recorded, else the record's registered writer (its first node); the gateway's checks may only veto it |
+//! | Galera | the usable node of the published writer set with the highest weighted rendezvous score for `S` (`choose_writer`) |
+//! | Primary and replicas | the node the controller publishes: the holder of `leases/writer/<cluster_id>`, else the writer the last failover recorded, else the record's registered writer (its first node); the gateway's checks may only veto it |
 //! | Single node | the node |
 //! | External | the declared writer endpoint |
 //!
@@ -30,7 +29,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use super::cluster::{ClusterView, NodeRef, PublishedWriter};
 use super::health::{NodeRole, NodeTable};
 
-/// Chooses a shard's writer (chapter 06, "Interfaces").
+/// Chooses a shard's writer.
 pub trait WriterSelector: Send + Sync {
     /// The writer of `shard` on `cluster`.
     ///
@@ -75,7 +74,7 @@ impl TopologyWriters {
 }
 
 /// A published writer read longer ago than this isn't trusted
-/// (`failover.writer_lease_seconds`' default, chapter 25): a failover may
+/// (`failover.writer_lease_seconds`' default): a failover may
 /// have moved the lease since.
 pub const PUBLISHED_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
 

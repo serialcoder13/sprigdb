@@ -1,7 +1,5 @@
-//! MySQL 8.4's answers to DDL where MariaDB 11.8 answers differently
-//! (chapter 28, "DDL and types" and "Error mapping"; R4 round 6, gaps
-//! row 78). Each was found by Sequelize's or Rails' suite and measured
-//! against MySQL 8.4.11.
+//! MySQL 8.4's answers to DDL where MariaDB 11.8 answers differently. Each was
+//! found by Sequelize's or Rails' suite and measured against MySQL 8.4.11.
 //!
 //! - **Long names** ([`long_name`]): a table, view, database or stored
 //!   program named with more than 64 characters fails with MySQL's 1059

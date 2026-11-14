@@ -24,6 +24,7 @@ Both listeners are on by default. Studio is served on them too.
 | `listener.https.bind` | text | `0.0.0.0:8443` | Address and port |
 | `listener.https.tls` | text | `required` | `required`, `optional` or `off` |
 | `listener.http.cert`, `listener.https.cert` | text | `default` | Certificate bundles |
+| `listener.http.client_cert`, `listener.https.client_cert` | text | `off` | Client certificates: `off`, `optional` or `required` (see [Client certificates](../security/tls.md#client-certificates)). `http` needs its TLS turned on first |
 
 Use 8443 for anything that leaves the machine: Basic authentication and logins carry the password. A plaintext request to a listener that requires TLS gets `400 Bad Request`, "This listener needs TLS.".
 
@@ -60,6 +61,8 @@ Every data call carries an `Authorization` header (gRPC: `authorization` metadat
 With Basic, the user name names the tenant: `acme.app` is user `app` of tenant `acme`. Alternatively send the plain user name with the header `x-sprig-tenant: acme`.
 
 The checks are those of every other protocol: account locks, expired passwords (refused with 1862, since HTTP has no sandbox mode), `REQUIRE SSL`, `auth.require_tls`, failure delays and the per-address limit.
+
+Client-certificate requirements are checked too, on Basic, on API keys and on the password login at `POST /v1/auth/login`. An account with `REQUIRE X509` needs a client certificate the listener verified, and one with `REQUIRE SUBJECT` or `REQUIRE ISSUER` needs a certificate whose subject or issuer is exactly the name given. Set `listener.https.client_cert` to `optional` so that the gateway asks for one, and send it with the request, for example `curl --cert app.pem --key app-key.pem`. A request that doesn't meet the requirement gets 401, like a wrong password. The certificate is checked in addition to the credential, never instead of it.
 
 | Refusal | Status | Body `code` |
 |---|---|---|

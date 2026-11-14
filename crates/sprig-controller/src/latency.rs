@@ -1,6 +1,5 @@
-//! The latency matrix and the DC lifecycle (chapter 23, "Measuring the
-//! latency matrix" and "Bootstrapping the first DC and adding later
-//! ones"; build steps 12 and 13).
+//! The latency matrix and the DC lifecycle (bootstrapping the first DC
+//! and adding later ones).
 //!
 //! ```text
 //! latency loop, each DC leader, every control.latency_probe_seconds, for each
@@ -9,7 +8,7 @@
 //! 2. over a 5-minute window compute p50, p90, p99
 //! 3. write latency/<self>/<d> if p50 moved by > control.latency_publish_change_pct,
 //!    reachability changed, or 10 minutes passed
-//! rtt(d, d) = 0.2 ms (the book's floor; gateways don't report writer RTTs yet)
+//! rtt(d, d) = 0.2 ms (a fixed floor; gateways don't report writer RTTs yet)
 //!
 //! dc_registry loop, global leader, every 5 s:
 //! - joining -> active once dc-leases/<dc> exists and latency rows exist both ways
@@ -17,13 +16,12 @@
 //! - draining -> retired once no tenant is homed in the DC
 //! ```
 //!
-//! Readers ([`Matrix`]) ignore rows older than 30 minutes. Chapter 24's
-//! move recommendation weighs traffic by these RTTs ([`crate::traffic`]).
+//! Readers ([`Matrix`]) ignore rows older than 30 minutes. The DC move
+//! recommendation weighs traffic by these RTTs ([`crate::traffic`]).
 //!
-//! **Where it differs from the book.** `Peer.Ping` is
-//! `GET /internal/v1/peer/ping` on the controllers' internal address
-//! (decision F2), found in `dc-observe/<d>`; the book's long-lived mTLS
-//! channel is a pooled HTTP/1.1 connection.
+//! **Transport.** `Peer.Ping` is `GET /internal/v1/peer/ping` on the
+//! controllers' internal address, found in `dc-observe/<d>`, over a pooled
+//! HTTP/1.1 connection rather than a long-lived mTLS channel.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};

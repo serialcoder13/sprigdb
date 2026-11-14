@@ -1,8 +1,7 @@
-//! Validation of a candidate index (chapter 13, build steps 7, 8 and 9;
-//! "Validation harness").
+//! Validation of a candidate index.
 //!
 //! Three validators, chosen by the cluster's `derived.validation`
-//! (chapter 09) through [`method_for`]:
+//! through [`method_for`]:
 //!
 //! - [`replica::ReplicaValidator`] (`replica`): builds the candidate on one
 //!   replica with `sql_log_bin = 0`, replays there, drops it;
@@ -20,7 +19,7 @@
 //! validator has cleaned up; `Err` is kept for plans that make no sense.
 //!
 //! **Taking the node out of service** goes through [`NodeMarker`], which
-//! the controller implements against chapter 06's read routing (and, on
+//! the controller implements against the gateway's read routing (and, on
 //! Galera, the writer weight). The validators call it; they don't route.
 //!
 //! **One at a time.** A validator never runs two validations on one node
@@ -96,8 +95,8 @@ pub struct IndexTarget {
     pub pk: Vec<String>,
 }
 
-/// The cost model's prediction for one target fingerprint (chapter 13,
-/// "Cost model"), which estimate-and-canary validation checks.
+/// The cost model's prediction for one target fingerprint, which
+/// estimate-and-canary validation checks.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Prediction {
     /// The fingerprint.
@@ -133,9 +132,8 @@ pub struct ValidationSettings {
     pub abort_replica_lag: Duration,
     /// `auto_index.max_build_hours` (6): the longest a build may run.
     pub max_build: Duration,
-    /// Run `ANALYZE LOCAL ... PERSISTENT` for the new index after the build
-    /// (chapter 13, replica build step 2). The statistics rows are put back
-    /// as they were afterwards.
+    /// Run `ANALYZE LOCAL ... PERSISTENT` for the new index after the build.
+    /// The statistics rows are put back as they were afterwards.
     pub analyze_after_build: bool,
     /// Galera: the least time to wait for `Synced` after an RSU statement;
     /// the wait is `max(this, 2 × the statement's time)`.
@@ -156,7 +154,7 @@ pub struct ValidationSettings {
     /// `auto_index.max_cover_columns` (3), for the covering retry.
     pub max_cover_columns: usize,
     /// `auto_index.vector_min_recall` (0.95): a vector candidate must find
-    /// at least this share of the true nearest neighbours (R6 round 4).
+    /// at least this share of the true nearest neighbours.
     pub vector_min_recall: f64,
 }
 
@@ -198,8 +196,8 @@ pub struct ValidationPlan {
     /// Columns each fingerprint reads on the table, for the covering retry
     /// (from the fingerprint's shape).
     pub columns_read: BTreeMap<Fingerprint, Vec<String>>,
-    /// Keep the index on the node when accepted (chapter 13 step 4: when
-    /// the rollout starts within 6 hours). Off: always drop.
+    /// Keep the index on the node when accepted (when the rollout starts
+    /// within 6 hours). Off: always drop.
     pub keep_if_accepted: bool,
     /// Settings.
     pub settings: ValidationSettings,
@@ -297,14 +295,14 @@ pub struct ValidationReport {
     pub node_check: NodeCheck,
     /// Estimate and canary: the canary under observation.
     pub canary: Option<CanaryState>,
-    /// A vector candidate's measured recall (R6 round 4).
+    /// A vector candidate's measured recall.
     pub recall: Option<Recall>,
 }
 
 /// A vector candidate's recall at `k` on the validation node: the share
 /// of the exact `k` nearest neighbours (the same `ORDER BY` with the index
 /// ignored) that the index's search returned, over `queries` of the
-/// table's own vectors (chapter 13, "Other models"; chapter 34, V3).
+/// table's own vectors.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Recall {
     /// Mean recall at `k`, 0 to 1.
@@ -347,8 +345,7 @@ impl ValidationReport {
     }
 }
 
-/// A validator (chapter 13, "Interfaces"). The chapter's signature takes
-/// `(&Candidate, &ValidationPlan)`; here the plan carries the candidate.
+/// A validator. The plan carries the candidate.
 #[async_trait::async_trait]
 pub trait Validator: Send + Sync {
     /// Validates one candidate.
@@ -359,7 +356,7 @@ pub trait Validator: Send + Sync {
     async fn validate(&self, plan: &ValidationPlan) -> Result<ValidationReport>;
 }
 
-/// Takes a node out of service while it validates (chapter 06 stops
+/// Takes a node out of service while it validates (the gateway stops
 /// routing reads there; on Galera the writer weight goes to 0).
 #[async_trait::async_trait]
 pub trait NodeMarker: Send + Sync {
@@ -465,7 +462,7 @@ pub(crate) async fn replay_on(
         abort(r, why);
     }
     // An approximate index changes results: it must also find enough of
-    // the true neighbours (R6 round 4).
+    // the true neighbours.
     if r.verdict.kind == VerdictKind::Accepted
         && plan.candidate.def.kind == super::model::IndexKind::Vector
     {
@@ -617,8 +614,8 @@ pub fn covering_variant(plan: &ValidationPlan, fingerprint: Fingerprint) -> Opti
 
 /// Validates, and on a rejection whose regressing statement read the index
 /// with many primary-key lookups, validates once more with the covering
-/// variant (chapter 13, "Covering retry"; worked example 3). Returns one
-/// report, or two when the retry ran (the retry last).
+/// variant. Returns one report, or two when the retry ran (the retry
+/// last).
 ///
 /// # Errors
 /// As [`Validator::validate`].

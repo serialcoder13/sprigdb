@@ -120,7 +120,7 @@ fn example1() -> Env {
     env
 }
 
-/// Worked example 1: B `(customer_id, created_at)` is chosen over A
+/// Example 1: B `(customer_id, created_at)` is chosen over A
 /// `(customer_id, status, created_at)`, which pays the status updates.
 #[tokio::test]
 async fn worked_example_1_chooses_the_variant_that_writes_less() {
@@ -145,7 +145,7 @@ async fn worked_example_1_chooses_the_variant_that_writes_less() {
     let b = &t.queued[0];
     assert_eq!(cols(&b.candidate), ["customer_id", "created_at"]);
     assert_eq!(b.route, Route::ValidateThenRollOut);
-    // The chapter's numbers: B 190,500 ms/h, Wc 7,200, 2.24 GB.
+    // The expected numbers: B 190,500 ms/h, Wc 7,200, 2.24 GB.
     assert!(
         (b.estimate.benefit_ms_h - 190_500.0).abs() < 200.0,
         "{}",
@@ -210,7 +210,7 @@ fn example2() -> Env {
     env
 }
 
-/// Worked example 2: F2 merges into F1's index; F3 keeps primary-key
+/// Example 2: F2 merges into F1's index; F3 keeps primary-key
 /// order and is deferred; F4 is unsargable and gets an explanation.
 #[tokio::test]
 async fn worked_example_2_merges_keeps_order_and_explains_the_unsargable() {
@@ -268,9 +268,9 @@ async fn worked_example_2_merges_keeps_order_and_explains_the_unsargable() {
     assert!(ev2.tables.is_empty());
 }
 
-/// Worked example 3: C1 `(state, due_date)` goes to validation (where it
-/// is rejected for F6's regression and retried covering: chapter 13's
-/// validation, not evaluation).
+/// Example 3: C1 `(state, due_date)` goes to validation (where it is
+/// rejected for F6's regression and retried covering: that is validation's
+/// job, not evaluation's).
 #[tokio::test]
 async fn worked_example_3_proposes_c1_for_validation() {
     let mut env = Env::new(vec![(INVOICES, invoices())]);
@@ -307,7 +307,7 @@ async fn worked_example_3_proposes_c1_for_validation() {
     );
 }
 
-/// Worked example 4: a MongoDB shape's field columns get
+/// Example 4: a MongoDB shape's field columns get
 /// `(_sprig_p_customer_id, _sprig_p_createdat)`.
 #[tokio::test]
 async fn worked_example_4_field_columns() {
@@ -823,8 +823,8 @@ impl WorkloadSource for SplitSource {
     fn watch(&self, _tenant: TenantId, _fp: Fingerprint) {}
 }
 
-/// M0.4 follow-up: an index built inside the window that serves example
-/// 1's fingerprint is judged on the runs since its build, so the slow runs
+/// An index built inside the window that serves example 1's
+/// fingerprint is judged on the runs since its build, so the slow runs
 /// from before it don't propose redundant variants beside it.
 #[tokio::test]
 async fn a_served_fingerprint_counts_only_runs_since_its_index() {

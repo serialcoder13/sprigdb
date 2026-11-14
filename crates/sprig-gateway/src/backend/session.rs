@@ -26,9 +26,9 @@ use super::writer::WriterSelector as _;
 use super::{Backends, unavailable};
 use crate::reads::{self, GtidSet, ReadTarget};
 
-/// The rendezvous key whose Galera writer is the cluster's lock node
-/// (chapter 28, "Locks"; R4 round 4): not a shard, a fixed key every
-/// gateway hashes the same way.
+/// The rendezvous key whose Galera writer is the cluster's lock node for
+/// user-level locks: not a shard, a fixed key every gateway hashes the
+/// same way.
 pub(crate) const LOCK_NODE_KEY: ShardId = ShardId(u32::MAX);
 
 /// Options of a session's backend side, from its login.
@@ -48,7 +48,7 @@ pub struct SessionOpts {
     pub collation: u16,
     /// The schema named at login.
     pub schema: Option<String>,
-    /// The shard (M0.2: the login's cluster has one, shard 0).
+    /// The shard (shard 0 for a login's unsharded cluster).
     pub shard: ShardId,
 }
 
@@ -85,7 +85,7 @@ pub enum RouteKind {
     GaleraSyncWait,
     /// On a Galera node other than the writer whose polled position didn't
     /// show the causal target yet, after the bounded check
-    /// (`reads.galera_unconfirmed = check`, decision D14).
+    /// (`reads.galera_unconfirmed = check`).
     GaleraUnconfirmed,
 }
 
@@ -129,8 +129,7 @@ enum Sent {
     WaitTimedOut,
 }
 
-/// What the gateway answers itself after a release (chapter 06,
-/// "Acquire, sync and release").
+/// What the gateway answers itself after a release.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Captured {
     /// `SHOW WARNINGS` of the last statement (empty when it had none).
@@ -195,9 +194,9 @@ struct Current {
     /// It writes generated `AUTO_INCREMENT` values explicitly
     /// ([`BackendSession::explicit_ids_next_statement`]).
     explicit_ids: bool,
-    /// The statement's `backend.query` trace span (chapter 47): open from
-    /// `run` until `finish` drops the statement. A light child of the
-    /// request's span (S142), not a `tracing` span.
+    /// The statement's `backend.query` trace span: open from `run` until
+    /// `finish` drops the statement. A light child of the request's span,
+    /// not a `tracing` span.
     span: Option<sprig_common::telemetry::trace::ChildSpan>,
 }
 
@@ -286,17 +285,17 @@ pub struct BackendSession {
     /// Probe the next statement's rows examined.
     probe_next: bool,
     /// The next statement writes `AUTO_INCREMENT` values the gateway
-    /// generated (chapter 19's ID blocks): its OK packet's insert id is
-    /// an explicit value, not the connection's `LAST_INSERT_ID()`.
+    /// generated (from ID blocks): its OK packet's insert id is an explicit
+    /// value, not the connection's `LAST_INSERT_ID()`.
     explicit_ids_next: bool,
     /// The running statement's `backend.query` trace context, for the
-    /// propagated `traceparent` (S142).
+    /// propagated `traceparent`.
     trace_ctx: Option<sprig_common::telemetry::trace::TraceContext>,
-    /// Sprig 2PC (R3): a held branch's record of its writes
+    /// Sprig 2PC: a held branch's record of its writes
     /// (`sprig_txn::BranchConn::start_redo`, in `backend::txn`).
     pub(super) redo: Option<super::txn::Recording>,
     /// The held connection (thread id) and when its database-level
-    /// grants were last refreshed with a `USE` (bugfix-64).
+    /// grants were last refreshed with a `USE`.
     grants_seen: Option<(u64, std::time::Instant)>,
 }
 
@@ -344,13 +343,13 @@ fn internal(e: &ClientError) -> SprigError {
     SprigError::new(SprigCode::BackendProtocol, e.to_string())
 }
 
-/// ST31 (bugfix5): a session dropped with a statement under way stops that
-/// statement. The router's per-shard streams (scatter, gather, analytic
-/// reads) are sessions of their own, dropped with the request when its
-/// REST or gRPC client goes away; their connections close with them, but
-/// MariaDB would run a statement such as `SELECT SLEEP(30)` to its end.
-/// The connection is never reused (a dropped lease closes it), so the
-/// `KILL QUERY` can't reach another statement.
+/// A session dropped with a statement under way stops that statement. The
+/// router's per-shard streams (scatter, gather, analytic reads) are
+/// sessions of their own, dropped with the request when its REST or gRPC
+/// client goes away; their connections close with them, but MariaDB would
+/// run a statement such as `SELECT SLEEP(30)` to its end. The connection is
+/// never reused (a dropped lease closes it), so the `KILL QUERY` can't
+/// reach another statement.
 impl Drop for BackendSession {
     fn drop(&mut self) {
         if !self.in_flight() {
@@ -458,7 +457,7 @@ impl BackendSession {
 
     /// The statement in flight's first packet, when it is an ERR (after
     /// [`query`](Self::query) returned): the router reads it before
-    /// relaying, to retry after a stale shard map (chapter 17).
+    /// relaying, to retry after a stale shard map.
     #[must_use]
     pub fn first_error(&self) -> Option<&ErrPacket> {
         match &self.cur.as_ref()?.first.as_ref()?.kind {
@@ -542,10 +541,9 @@ impl BackendSession {
     }
 
     /// Measures the rows the next statement (`query` or `execute`)
-    /// examines (chapter 12, "Sampling rows examined"): the connection's
-    /// `Handler_read_*` sum is read before it runs and after it ends, on
-    /// the same connection, and the difference less the reading's own
-    /// cost lands in [`StmtOutcome::examined`].
+    /// examines: the connection's `Handler_read_*` sum is read before it
+    /// runs and after it ends, on the same connection, and the difference
+    /// less the reading's own cost lands in [`StmtOutcome::examined`].
     ///
     /// Only statements that leave the connection free are measured *(the
     /// reading after would replace the diagnostics a pinned session reads
@@ -557,11 +555,11 @@ impl BackendSession {
         self.probe_next = true;
     }
 
-    /// Marks the next statement as one that writes `AUTO_INCREMENT`
-    /// values the gateway generated (chapter 19): its OK packet's insert
-    /// id then changes neither the session's `LAST_INSERT_ID()` nor what
-    /// the connection is known to hold (MariaDB keeps the old value after
-    /// explicit values). The router sets the session's value itself.
+    /// Marks the next statement as one that writes `AUTO_INCREMENT` values
+    /// the gateway generated: its OK packet's insert id then changes
+    /// neither the session's `LAST_INSERT_ID()` nor what the connection is
+    /// known to hold (MariaDB keeps the old value after explicit values).
+    /// The router sets the session's value itself.
     pub fn explicit_ids_next_statement(&mut self) {
         self.explicit_ids_next = true;
     }
@@ -585,8 +583,7 @@ impl BackendSession {
 
     /// A statement the gateway's rewrites made longer than the cluster's
     /// `max_allowed_packet` is refused with 1153 before it is sent:
-    /// MariaDB would drop the connection, leaving the outcome unknown
-    /// (chapter 05, "Packet limit").
+    /// MariaDB would drop the connection, leaving the outcome unknown.
     fn check_packet(&self, len: usize) -> Result<()> {
         match self.backends.packet_limit(&self.target.cluster) {
             Some(limit) if len > limit => Err(super::packet_too_large()),
@@ -594,10 +591,10 @@ impl BackendSession {
         }
     }
 
-    /// Chapter 29 (decision RL18): `sql` reading the session's protected
-    /// tables through their policy views, if it reads any. The session's
-    /// account can't read the tables themselves, so a reference this
-    /// misses fails (1142) rather than reading unfiltered rows.
+    /// `sql` reading the session's protected tables through their policy
+    /// views, if it reads any. The session's account can't read the tables
+    /// themselves, so a reference this misses fails (1142) rather than
+    /// reading unfiltered rows.
     fn policy_views(&self, sql: &[u8]) -> Option<Vec<u8>> {
         let v = self.vars();
         let swap = v.rls_views.as_ref()?;
@@ -613,15 +610,15 @@ impl BackendSession {
     }
 
     /// Whether this connection records its writes for a held branch's
-    /// redo (chapter 18's Sprig 2PC).
+    /// redo (Sprig 2PC).
     #[must_use]
     pub fn recording(&self) -> bool {
         self.redo.is_some()
     }
 
     /// The next [`execute`](Self::execute)'s statement with its bound
-    /// values written in, for the redo record (decision Q17): a prepared
-    /// write on a recording branch is then replayable.
+    /// values written in, for the redo record: a prepared write on a
+    /// recording branch is then replayable.
     pub fn bind_text(&mut self, text: String) {
         if let Some(r) = self.redo.as_mut() {
             r.bound = Some(text);
@@ -839,12 +836,12 @@ impl BackendSession {
             observed.unexplained = false;
         }
         self.vars.apply(&observed);
-        // Chapter 28 (R4): the MySQL persona's sql_mode view.
+        // The MySQL persona's sql_mode view.
         self.vars.mysql_sql_mode_after(&observed);
         cur.lease.conn().applied.apply(&observed);
         if observed.charset_changed() {
             // Tracking names the character set only: read the collation
-            // back (chapter 06, "Login collation").
+            // back.
             let set_names = cur.stmt.sets_names();
             let conn = cur.lease.conn();
             match conn.capture_collation().await {
@@ -889,7 +886,7 @@ impl BackendSession {
         // timestamp`) in place of `last_gtid` after a commit. A statement
         // that may have committed and reported variables but no GTID reads
         // the GTID itself, or the session's next read could go to a
-        // replica that hasn't applied its own commit (R3, agent r3d).
+        // replica that hasn't applied its own commit.
         let committing = cur.stmt.effects.contains(&Effect::Commit)
             || (cur.stmt.class == StmtClass::Write
                 && !cur
@@ -948,9 +945,9 @@ impl BackendSession {
                 self.pending_capture.push(v.clone());
             }
         }
-        // Chapter 29 (RL57): a failed statement (an interrupted one too)
-        // may have left a definer routine's context in `@sprig_rls`; it is
-        // sent again before the connection's next statement.
+        // A failed statement (an interrupted one too) may have left a
+        // definer routine's context in `@sprig_rls`; it is sent again
+        // before the connection's next statement.
         if cur.error.is_some()
             && self.vars.user_vars.get("sprig_rls").is_some_and(|v| {
                 matches!(v, super::state::VarValue::Text(t) if t.windows(5).any(|w| w == b"\"d\":{"))
@@ -1144,8 +1141,8 @@ impl BackendSession {
     }
 
     /// The client set `wsrep_sync_wait` itself: it asks for causal reads
-    /// across gateways, which the shard's writer gives (decision D13), so
-    /// its plain reads stay there.
+    /// across gateways, which the shard's writer gives, so its plain reads
+    /// stay there.
     fn client_sync_wait(&self) -> bool {
         self.vars
             .gateway_vars
@@ -1153,14 +1150,14 @@ impl BackendSession {
             .is_some_and(|v| !v.parse::<u32>().is_ok_and(|n| n == 0))
     }
 
-    /// bugfix-64 (RLS round 6, item 6): MariaDB keeps a connection's
-    /// database-level privileges from its last `USE` (or its login). Pooled
-    /// connections of an account whose grants changed are retired, but a
-    /// pinned session keeps its connection, and after
-    /// `rls.backend_enforcement` moved from `views` to `triggers` its reads
-    /// failed with 1142 until it reconnected. So a held connection opened
-    /// (or refreshed) before the account's last retirement sends `USE` of
-    /// the session's database again before its next statement.
+    /// MariaDB keeps a connection's database-level privileges from its last
+    /// `USE` (or its login). Pooled connections of an account whose grants
+    /// changed are retired, but a pinned session keeps its connection, and
+    /// after `rls.backend_enforcement` moved from `views` to `triggers` its
+    /// reads would fail with 1142 until it reconnected. So a held
+    /// connection opened (or refreshed) before the account's last
+    /// retirement sends `USE` of the session's database again before its
+    /// next statement.
     fn refresh_grants(&mut self, lease: &mut BackendLease) {
         let Some(at) = self.backends.pools.retired_at(&lease.key().account) else {
             return;
@@ -1189,8 +1186,8 @@ impl BackendSession {
             .increment(1);
     }
 
-    /// The error for a connection lost mid-statement (chapter 06, "Failure
-    /// handling"); the session forgets what the connection held.
+    /// The error for a connection lost mid-statement; the session forgets
+    /// what the connection held.
     fn lost(&mut self, stmt: &StmtInfo, in_trx: bool, relayed: bool, node: &NodeKey) -> SprigError {
         let lost_state = self.pins.holds_state();
         self.pins.lose_connection();
@@ -1238,9 +1235,9 @@ impl BackendSession {
     }
 
     /// The error for a held connection the server closed before this
-    /// statement was sent (chapter 06, "Failure handling"): nothing ran, so
-    /// only what the connection held is lost. 1213 for an open transaction
-    /// (rolled back), 39033 for other pinned state.
+    /// statement was sent: nothing ran, so only what the connection held is
+    /// lost. 1213 for an open transaction (rolled back), 39033 for other
+    /// pinned state.
     fn lost_unsent(&mut self, node: &NodeKey) -> SprigError {
         let lost_state = self.pins.holds_state();
         self.pins.lose_connection();
@@ -1363,19 +1360,19 @@ impl BackendSession {
         exclude: &mut Vec<NodeId>,
         deadline: Instant,
     ) -> Result<(BackendLease, RouteKind, Wait)> {
-        // Chapter 28, "Locks" (R4 round 4): on Galera, user-level lock
-        // functions run on one node of the cluster, the writer of
-        // `LOCK_NODE_KEY` that every gateway's rendezvous agrees on, so
-        // sessions on any gateway (and any shard) meet on the same locks.
-        // Lock names are scoped per tenant, so tenants share the node.
+        // On Galera, user-level lock functions run on one node of the
+        // cluster, the writer of `LOCK_NODE_KEY` that every gateway's
+        // rendezvous agrees on, so sessions on any gateway (and any shard)
+        // meet on the same locks. Lock names are scoped per tenant, so
+        // tenants share the node.
         let shard = if info.user_lock && view.topology == TopologyKind::Galera {
             LOCK_NODE_KEY
         } else {
             self.opts.shard
         };
         // With autocommit = 0 every statement, a plain read too, opens a
-        // transaction (chapter 06, "Pins"): it belongs on the writer, where
-        // the rest of that transaction runs.
+        // transaction: it belongs on the writer, where the rest of that
+        // transaction runs.
         let plain = info.class == StmtClass::Read
             && self.pins.is_empty()
             && !force_writer
@@ -1483,11 +1480,11 @@ impl BackendSession {
     }
 
     /// [`run_statement`](Self::run_statement) inside a `backend.query`
-    /// span (chapter 47), adding its time to the request's backend time.
+    /// span, adding its time to the request's backend time.
     async fn run(&mut self, info: &StmtInfo, req: Req<'_>) -> Result<()> {
         use sprig_common::telemetry::trace::ChildSpan;
         // One `tracing` span per request (the caller's `gateway.request`);
-        // this step is a light child of it (perf1, S142).
+        // this step is a light child of it.
         let mut span = ChildSpan::start("backend.query");
         if let Some(sp) = span.as_mut() {
             sp.record("cluster", &self.target.cluster);
@@ -1533,8 +1530,7 @@ impl BackendSession {
         // `USE x` sets the schema itself, so any pooled connection serves
         // it, including one that already has a default schema.
         let sets_schema = matches!(req, Req::Text(sql) if is_use(sql));
-        // Running it twice changes nothing: a lost connection retries it
-        // (chapter 06, "Failure handling").
+        // Running it twice changes nothing: a lost connection retries it.
         let harmless = info.class == StmtClass::Read || matches!(req, Req::Prepare { .. });
         let explicit_ids = std::mem::take(&mut self.explicit_ids_next);
         let probe = std::mem::take(&mut self.probe_next)
@@ -1575,9 +1571,9 @@ impl BackendSession {
             {
                 // MariaDB can't unset the default schema: this connection can't
                 // serve a session without one. New connections have none.
-                // (Before M0.7 this also dropped the connection for the
-                // session's own `USE`, so every session opened with a default
-                // database closed a pooled connection and opened a new one.)
+                // (The session's own `USE` doesn't drop it: otherwise every
+                // session opened with a default database would close a pooled
+                // connection and open a new one.)
                 drop(lease);
                 continue;
             }
@@ -1644,8 +1640,7 @@ impl BackendSession {
                         Wait::None => {}
                     }
                     // Sampled statements carry their trace context to
-                    // MariaDB (chapter 47, "Propagation"), after
-                    // fingerprinting.
+                    // MariaDB, after fingerprinting.
                     if let Some(tc) = self
                         .trace_ctx
                         .or_else(sprig_common::telemetry::trace::current)
@@ -1725,8 +1720,8 @@ impl BackendSession {
             match sent {
                 Ok(Sent::Ready) => {}
                 Ok(Sent::WaitFailed | Sent::WaitTimedOut) => {
-                    // The read reruns on the writer (chapter 06: "Replica too
-                    // slow", and decisions D13 and D14 for Galera).
+                    // The read reruns on the writer (the replica, or the
+                    // Galera node, was too slow).
                     metrics::counter!("sprig_backend_gtid_wait_timeouts_total", "cluster" => cluster.to_string())
                         .increment(1);
                     metrics::histogram!("sprig_backend_gtid_wait_seconds", "cluster" => cluster.to_string())
@@ -1951,8 +1946,8 @@ impl BackendSession {
         Some(self.lost(info, in_trx, false, node))
     }
 
-    /// The executor dropped the future of a statement (`KILL QUERY`, chapter
-    /// 04's `abandoned`): `KILL QUERY` on its backend thread, then end it.
+    /// The executor dropped the future of a statement (`KILL QUERY`, or an
+    /// abandoned request): `KILL QUERY` on its backend thread, then end it.
     /// A statement with a response under way is drained (up to `drain`), so
     /// the connection and an open transaction survive, as on MySQL. One
     /// dropped before its first packet took its connection with it: an
@@ -2036,8 +2031,8 @@ impl BackendSession {
         Ok(())
     }
 
-    /// Points the session at another cluster: its tenant moved (chapter
-    /// 10, "Cutover"). A held connection is discarded (the old cluster
+    /// Points the session at another cluster: its tenant moved (a mover
+    /// cutover). A held connection is discarded (the old cluster
     /// rolls back an open transaction, which the next statement reports as
     /// 1213, as for any lost connection); tracked session state is replayed
     /// on the next connection, which comes from the new cluster's pools.
@@ -2051,8 +2046,8 @@ impl BackendSession {
             let limits = self.backends.limits(&self.target.cluster);
             self.backends.pools.release(lease, Release::Discard, limits);
             self.connection_gone();
-            // Chapter 24: state that can't follow the tenant to another
-            // DC ends the session with 39502 (SQLSTATE 08S01).
+            // State that can't follow the tenant to another DC ends the
+            // session with 39502 (SQLSTATE 08S01).
             let other_dc = sprig_cluster::registry::dc_of(&self.target.cluster)
                 != sprig_cluster::registry::dc_of(&cluster);
             if other_dc
@@ -2114,9 +2109,9 @@ async fn consume_statement(
 
 /// The metric handles every statement updates (`sprig_backend_reads_total`,
 /// `sprig_backend_state_syncs_total`, `sprig_backend_pool_wait_seconds`),
-/// kept per runtime thread and cluster (perf1, S144): registering them with
-/// their labels on every statement cost three label strings and three
-/// lookups in the shared registry per point read. Same series, same values.
+/// kept per runtime thread and cluster: registering them with their labels
+/// on every statement cost three label strings and three lookups in the
+/// shared registry per point read. Same series, same values.
 mod stmt_metrics {
     use std::cell::RefCell;
     use std::collections::HashMap;

@@ -1,4 +1,4 @@
-//! The SprigDB statement comment (chapter 38, "Statement comments").
+//! The SprigDB statement comment.
 //!
 //! The gateway's backend layer prefixes every write statement with one
 //! comment, which MariaDB copies into the statement's `ANNOTATE_ROWS`
@@ -28,7 +28,7 @@ pub enum OpHint {
     /// `x`: a TTL expiry.
     Expire,
     /// `k`: a Redis command's write, whose keyspace notifications the
-    /// command sent itself (chapter 40; RLS round 5, RL51): the gateways'
+    /// command sent itself: the gateways'
     /// notifications from the feed pass over its rows.
     Notified,
 }
@@ -110,7 +110,7 @@ impl SprigComment {
     }
 }
 
-/// A statement comment for a Redis command's write (`o=k`, RL51), with an
+/// A statement comment for a Redis command's write (`o=k`), with an
 /// HLC in the feed's layout (seconds in the high 32 bits, a counter in the
 /// low 32) that never goes backwards in this process.
 #[must_use]
@@ -139,7 +139,7 @@ pub fn notified_comment() -> String {
 #[must_use]
 pub fn parse_comment(text: &str) -> Option<SprigComment> {
     let t = text.trim_start();
-    // RL51: an inner statement of a compound statement (`BEGIN NOT ATOMIC`)
+    // An inner statement of a compound statement (`BEGIN NOT ATOMIC`)
     // is annotated without any comment before it, so writers mark those
     // right after the verb: `INSERT /*sprig ...*/ INTO ...`.
     let rest = t.strip_prefix("/*sprig ").or_else(|| {

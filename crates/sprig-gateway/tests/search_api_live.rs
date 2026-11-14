@@ -1,5 +1,4 @@
-//! `Search.Query` over REST and gRPC (chapter 39, "Queries"; chapter 37;
-//! build step 11; R5 round 6).
+//! `Search.Query` over REST and gRPC.
 //!
 //! ```sh
 //! export SPRIG_TEST_SEARCH_API=127.0.0.1:23306,127.0.0.1:23080   # MySQL, HTTP
@@ -13,7 +12,7 @@
 //! - pages of 4 follow the cursor to the end: every visible matching row
 //!   once, best score first, none of the hidden ones;
 //! - a filter clause (`range` on a filter field), facets, highlights and
-//!   rows; facets count only the rows the user may see (decision S24),
+//!   rows; facets count only the rows the user may see,
 //!   and every row once the owner is no longer bound (`NO FORCE`);
 //! - errors: an unknown index (39820), a bad query (39822), a sort (39823);
 //! - gRPC (h2c on the same port) answers the first page as REST does;
@@ -216,7 +215,7 @@ async fn search_query_over_rest_and_grpc() {
     );
     let row: Value = serde_json::from_str(h0["row"].as_str().unwrap()).unwrap();
     assert!(row["name"].as_str().unwrap().contains("running"), "{row}");
-    // Decision S24: facets count only the rows the user may see. The
+    // Facets count only the rows the user may see. The
     // matches are rows 3, 6, 9 and 12; row 12 ('hidden') is hidden by the
     // policy, so 'hidden' must not appear and acme counts 2, zeta 1.
     let facets: Value = serde_json::from_str(v["facets"].as_str().unwrap()).unwrap();
@@ -263,7 +262,7 @@ async fn search_query_over_rest_and_grpc() {
         ],
         "an unbound owner sees every row: {unbound}"
     );
-    // Decision S25: EXPLAIN of a MATCH shows MariaDB's plan and then the
+    // EXPLAIN of a MATCH shows MariaDB's plan and then the
     // search: a SEARCH row naming the index, with its hits and SearchScan.
     let plan: Vec<mysql_async::Row> = c
         .query("EXPLAIN SELECT id FROM items WHERE MATCH (name) AGAINST ('running')")
@@ -287,7 +286,7 @@ async fn search_query_over_rest_and_grpc() {
     c.query_drop("ALTER TABLE items FORCE ROW LEVEL SECURITY")
         .await
         .unwrap();
-    // A bound user gets no EXPLAIN of the protected table (RL26).
+    // A bound user gets no EXPLAIN of the protected table.
     let e = c
         .query_drop("EXPLAIN SELECT id FROM items WHERE MATCH (name) AGAINST ('running')")
         .await
@@ -358,7 +357,7 @@ async fn search_query_over_rest_and_grpc() {
     assert!(!r.after.is_empty());
     println!("Search.Query over gRPC: first page equal to REST's");
 
-    // A key-value namespace (R5 round 6): JSON values by path.
+    // A key-value namespace: JSON values by path.
     for (k, note) in [
         ("s1", "remember the red shoe"),
         ("s2", "buy milk"),

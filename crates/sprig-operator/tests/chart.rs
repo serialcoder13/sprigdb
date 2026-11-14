@@ -115,6 +115,30 @@ fn helper_list(name: &str) -> Vec<String> {
     line.split(',').map(str::to_owned).collect()
 }
 
+/// Where the template block opened at `open` (`{{- if`, `range` or
+/// `with`) ends: the index of its matching `{{- end }}`.
+fn block_end(t: &str, open: usize) -> usize {
+    let mut depth = 0_i32;
+    let mut i = open;
+    while let Some(off) = t[i..].find("{{") {
+        let at = i + off;
+        let body = t[at + 2..].trim_start_matches('-').trim_start();
+        if ["if ", "range ", "with ", "define "]
+            .iter()
+            .any(|k| body.starts_with(k))
+        {
+            depth += 1;
+        } else if body.starts_with("end") {
+            depth -= 1;
+            if depth == 0 {
+                return at;
+            }
+        }
+        i = at + 2;
+    }
+    panic!("unbalanced block at {open}");
+}
+
 #[test]
 fn client_certificates_are_set_on_every_listener_with_the_gateways_keys() {
     let all = helper_list("sprigdb.allListeners");
@@ -154,6 +178,17 @@ fn client_certificates_are_set_on_every_listener_with_the_gateways_keys() {
     assert!(ca < modes, "client_ca_path must be set before client_cert");
     assert!(job.contains("{{- if and (include \"sprigdb.anyClientCert\" .) (not $caPath) }}"));
     assert!(job.contains("{{- fail \"gateway.clientTls.clientCert asks for client certificates"));
+    // The CA path and every mode are written only inside `if $caPath`, so
+    // without gateway.clientTls.clientCa an upgrade leaves values set by
+    // hand at the DC's scope alone (authfix2).
+    let open = job.find("{{- if $caPath }}").expect("if $caPath");
+    let close = block_end(&job, open);
+    assert!(open < ca && ca < close, "client_ca_path outside if $caPath");
+    assert!(
+        open < modes && modes < close,
+        "client_cert outside if $caPath"
+    );
+    assert_eq!(job.matches(".client_cert {{").count(), 1);
 
     let gw_t = template("gateway.yaml");
     assert!(
@@ -285,5 +320,153 @@ fn every_role_with_telemetry_has_a_service_the_service_monitor_scrapes() {
     assert!(
         template("operator.yaml")
             .contains("  - apiGroups: [batch]\n    resources: [jobs]\n    verbs: [list]\n")
+    );
+}
+
+/// Every pod the chart runs carries the chart's labels: the network policies
+/// admit only pods with `app.kubernetes.io/name: sprigdb` to the Admin and
+/// etcd ports. The settings Job had none, so on a cluster that enforces
+/// network policies it never reached the controllers (found on kind).
+#[test]
+fn every_pod_template_carries_the_chart_labels() {
+    let t = chart().join("templates");
+    let mut checked = 0;
+    for e in std::fs::read_dir(&t).unwrap() {
+        let path = e.unwrap().path();
+        let s = std::fs::read_to_string(&path).unwrap();
+        for doc in s.split("\n---\n") {
+            // The innermost pod template: after the last `template:` line.
+            let Some(i) = doc.rfind("template:\n") else {
+                continue;
+            };
+            if !(doc.contains("kind: Deployment")
+                || doc.contains("kind: StatefulSet")
+                || doc.contains("kind: Job")
+                || doc.contains("kind: CronJob"))
+            {
+                continue;
+            }
+            let pod = &doc[i..];
+            let spec = pod.find("spec:").unwrap();
+            assert!(
+                pod[..spec].contains("include \"sprigdb.labels\""),
+                "{}: a pod template without the chart's labels",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    // controller, gateway, worker, operator, etcd-dc, etcd-global, the
+    // settings Job and the defrag CronJob.
+    assert_eq!(checked, 8);
+}
+
+/// The settings Job's calls only the DC leader serves are sent again to
+/// the leader's own name when the controller Service lands on another
+/// controller (39504); before, with two or more controllers the Job failed
+/// until every call happened to land on the leader (found on kind).
+#[test]
+fn the_settings_job_follows_the_leader() {
+    let job = template("settings-job.yaml");
+    assert!(job.contains("ctl() {"));
+    assert!(job.contains("send the request to the leader, \\([A-Za-z0-9._-]*\\)"));
+    assert!(
+        job.contains(
+            "://$leader.sprigdb-controller-pods.{{ .Release.Namespace }}.svc:7480\" \"$@\""
+        )
+    );
+    assert!(template("controller.yaml").contains("  serviceName: sprigdb-controller-pods\n"));
+    // Every Admin call goes through ctl.
+    assert_eq!(
+        job.matches("sprigctl --endpoint").count(),
+        2,
+        "only inside ctl"
+    );
+    for l in job.lines().filter(|l| l.contains(" settings set ")) {
+        assert!(l.trim_start().starts_with("ctl settings set "), "{l}");
+    }
+    // dc register's tags: key=value pairs joined by commas, none trailing
+    // (sprigctl refuses an empty tag), and no --tags without tags.
+    assert!(job.contains("{{ if $tags }} --tags {{ join \",\" $tags | squote }}{{ end }}"));
+}
+
+/// The operator's cluster registration follows the DC leader as the
+/// settings Job does: its leader-address template names the controller's
+/// own name under the headless Service, with the Admin API's scheme.
+#[test]
+fn the_operator_registers_through_the_leader() {
+    let op = template("operator.yaml");
+    assert!(op.contains(
+        "{name: SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN, value: \"{{ include \"sprigdb.adminScheme\" . }}://{leader}.sprigdb-controller-pods.{{ .Release.Namespace }}.svc:7480\"}"
+    ));
+    let cfg = sprig_operator::OperatorConfig::from_env("ns", &|k| {
+        (k == "SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN")
+            .then(|| "https://{leader}.sprigdb-controller-pods.ns.svc:7480".to_owned())
+    });
+    assert_eq!(
+        cfg.controller_leader_admin.as_deref(),
+        Some("https://{leader}.sprigdb-controller-pods.ns.svc:7480")
+    );
+}
+
+/// Gateways register `<pod IP, dashed>.sprigdb-gateway-pods.<ns>.svc`,
+/// which the headless Service resolves and the gateway certificate
+/// covers. Before, a gateway registered its hostname, which nothing else
+/// in Kubernetes resolves: Kafka's metadata named it, and other gateways
+/// and the workers couldn't reach its peer service (found on kind).
+#[test]
+fn gateways_register_an_address_kubernetes_resolves() {
+    let g = template("gateway.yaml");
+    let svc = g
+        .split("\n---\n")
+        .find(|d| d.contains("name: sprigdb-gateway-pods\n") && d.contains("kind: Service"))
+        .expect("the headless Service");
+    assert!(svc.contains("clusterIP: None"));
+    assert!(svc.contains("publishNotReadyAddresses: true"));
+    assert!(svc.contains("selector: {app.kubernetes.io/component: gateway}"));
+    assert!(
+        !svc.contains("9180"),
+        "telemetry is sprigdb-gateway-health's"
+    );
+    let line = g
+        .lines()
+        .find(|l| l.contains("export SPRIGDB_GATEWAY_ADVERTISE_ADDR="))
+        .expect("the advertised address");
+    assert!(line.contains(
+        "\"$(printf '%s' \"$POD_IP\" | tr '.:' '--').sprigdb-gateway-pods.{{ .Release.Namespace }}.svc\""
+    ));
+    assert!(g.contains("exec /usr/bin/sprigdb gateway --config /etc/sprigdb/config/sprigdb.toml"));
+    assert!(g.contains(
+        "- name: POD_IP\n              valueFrom: {fieldRef: {fieldPath: status.podIP}}"
+    ));
+    // The gateway reads it as [gateway] advertise_addr.
+    let addr = "10-244-0-7.sprigdb-gateway-pods.sprigdb.svc";
+    let cfg = sprig_common::ProcessConfig::from_toml_and_env(
+        "[node]\ndc = \"fra1\"\n",
+        [("SPRIGDB_GATEWAY_ADVERTISE_ADDR".to_owned(), addr.to_owned())],
+    )
+    .unwrap();
+    assert_eq!(cfg.gateway.advertise_addr.as_deref(), Some(addr));
+    assert!(
+        template("certificates.yaml")
+            .contains("- \"*.sprigdb-gateway-pods.{{ $.Release.Namespace }}.svc\"")
+    );
+}
+
+/// With TLS, the per-user backend connections check MariaDB's certificate
+/// against the CA bundle the gateways mount; without `ca_file` they used
+/// the public roots and every login failed with `UnknownIssuer` (found on
+/// kind). A secret made by an older chart gets the line on upgrade.
+#[test]
+fn backend_connections_check_mariadb_against_the_ca_bundle() {
+    let b = template("gateway-backends.yaml");
+    assert!(b.contains("{{- $ca := \"/etc/sprigdb/ca/ca.crt\" }}"));
+    assert!(b.contains("tls = \\\"verify\\\"\\nca_file = \\\"%s\\\"\\n"));
+    assert!(b.contains("(not (contains \"ca_file\" $text))"));
+    // The bundle is mounted there on the gateways when TLS is on.
+    let helpers = template("_helpers.tpl");
+    assert!(helpers.contains("- {name: ca-bundle, mountPath: /etc/sprigdb/ca, readOnly: true}"));
+    assert!(
+        template("gateway.yaml").contains("{{- include \"sprigdb.tlsMounts\" . | nindent 12 }}")
     );
 }

@@ -1,9 +1,8 @@
-//! Stored code keeps its tables in place (chapter 16, "Stored code keeps
-//! its tables in place"; decision bugfix-31).
+//! Stored code keeps its tables in place.
 //!
 //! A view, procedure, function, package, trigger or event lives in one
 //! MariaDB schema and reads its tables there, by unqualified names (or by
-//! the physical names chapter 07's rewrite put in its text). The first
+//! the physical names the gateway's name rewrite put in its text). The first
 //! design's regroup moves tables into their group's schema with `RENAME
 //! TABLE`, and the group's shards later split, merge and move to other
 //! clusters; code left behind then fails with 1146 for every user, and no
@@ -25,7 +24,7 @@
 //!
 //! Row-level security's own objects (`__sprig_rls*`: policy views, their
 //! context function and write-check triggers) move with their table at the
-//! regroup (decision RL29) and are not counted. [`conflicts`] checks a
+//! regroup and are not counted. [`conflicts`] checks a
 //! stored design against the code that exists when it is applied.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,8 +125,8 @@ pub async fn read(c: &mut Conn, tenant: TenantId) -> Result<Vec<StoredCode>> {
         });
     }
     // Views and triggers one schema at a time: a LIKE on their schema
-    // reads every table of every tenant on the server (R9, r9scale;
-    // `sprig_catalog::infoschema`).
+    // reads every table of every tenant on the server
+    // (`sprig_catalog::infoschema`).
     let schemas = sprig_catalog::infoschema::schemas_like(c, &like).await?;
     let views: Vec<(String, String, Option<String>)> = sprig_catalog::infoschema::read_per_schema(
         c,

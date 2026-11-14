@@ -58,7 +58,7 @@ const fn rate() -> HardBounds {
 
 keys! {
     /// `workload.bucket_minutes`.
-    BUCKET_MINUTES: u32 = "workload.bucket_minutes", 60, TENANT,
+    BUCKET_MINUTES: u32 = "workload.bucket_minutes", 60, GW,
         HardBounds::range(1, 1440), "Statistics bucket size";
     /// `workload.retention_days`.
     RETENTION_DAYS: u32 = "workload.retention_days", 30, TENANT,
@@ -73,37 +73,37 @@ keys! {
     ROLLUP_DELAY_MINUTES: u32 = "workload.rollup_delay_minutes", 10, GW,
         HardBounds::range(0, 1440), "Wait after a bucket closes";
     /// `workload.max_text_bytes`.
-    MAX_TEXT_BYTES: u32 = "workload.max_text_bytes", 4096, TENANT,
+    MAX_TEXT_BYTES: u32 = "workload.max_text_bytes", 4096, GW,
         HardBounds::range(64, 1 << 20), "Longest normalized text";
     /// `workload.max_memory_mb`.
     MAX_MEMORY_MB: u32 = "workload.max_memory_mb", 128, GW,
         HardBounds::range(1, 65_536), "Recorder memory per gateway";
     /// `workload.watch_p95_ms`.
-    WATCH_P95_MS: u32 = "workload.watch_p95_ms", 50, Scopes::DATA,
+    WATCH_P95_MS: u32 = "workload.watch_p95_ms", 50, GW,
         HardBounds::range(0, 3_600_000), "p95 that makes a fingerprint watched";
     /// `workload.examined_sample_rate`.
-    EXAMINED_SAMPLE_RATE: f64 = "workload.examined_sample_rate", 0.02, Scopes::DATA,
+    EXAMINED_SAMPLE_RATE: f64 = "workload.examined_sample_rate", 0.02, GW,
         rate(), "Probe rate for watched fingerprints";
     /// `workload.full_probe_ms`.
-    FULL_PROBE_MS: u32 = "workload.full_probe_ms", 100, Scopes::DATA,
+    FULL_PROBE_MS: u32 = "workload.full_probe_ms", 100, GW,
         HardBounds::range(0, 3_600_000), "Mean latency from which every execution is probed";
     /// `workload.capture_samples`.
     CAPTURE_SAMPLES: bool = "workload.capture_samples", true, Scopes::DATA,
         HardBounds::NONE, "Parameter capture switch";
     /// `workload.sample_rate`.
-    SAMPLE_RATE: f64 = "workload.sample_rate", 0.01, Scopes::DATA,
+    SAMPLE_RATE: f64 = "workload.sample_rate", 0.01, GW,
         rate(), "Capture rate for watched fingerprints";
     /// `workload.samples_per_bucket`.
-    SAMPLES_PER_BUCKET: u32 = "workload.samples_per_bucket", 3, TENANT,
+    SAMPLES_PER_BUCKET: u32 = "workload.samples_per_bucket", 3, GW,
         HardBounds::range(0, 100), "Per gateway per bucket";
     /// `workload.max_samples_per_fingerprint`.
-    MAX_SAMPLES_PER_FINGERPRINT: u32 = "workload.max_samples_per_fingerprint", 50, TENANT,
+    MAX_SAMPLES_PER_FINGERPRINT: u32 = "workload.max_samples_per_fingerprint", 50, GW,
         HardBounds::range(0, 10_000), "Stored samples kept";
     /// `workload.sample_retention_days`.
-    SAMPLE_RETENTION_DAYS: u32 = "workload.sample_retention_days", 7, TENANT,
+    SAMPLE_RETENTION_DAYS: u32 = "workload.sample_retention_days", 7, GW,
         HardBounds::range(1, 365), "Sample lifetime";
     /// `workload.max_in_list_values`.
-    MAX_IN_LIST_VALUES: u32 = "workload.max_in_list_values", 1000, TENANT,
+    MAX_IN_LIST_VALUES: u32 = "workload.max_in_list_values", 1000, GW,
         HardBounds::range(1, 1_000_000), "IN values kept in a sample";
 }
 

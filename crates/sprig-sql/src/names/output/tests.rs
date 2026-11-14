@@ -162,7 +162,7 @@ fn leak_detector() {
 
 #[test]
 fn chosen_column_names_that_look_like_accounts_stay() {
-    // R4 round 5: Rails' eager loading names columns t0_r0, t1_r2; they
+    // Rails' eager loading names columns t0_r0, t1_r2; they
     // read as backend role accounts of tenant 0 and 1 and became `?`.
     let m = acme();
     let ctx = OutputCtx::new(&m);

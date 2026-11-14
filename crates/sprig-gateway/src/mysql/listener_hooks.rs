@@ -1,5 +1,4 @@
-//! Live listener changes for the MySQL family (chapter 05, "Live listener
-//! changes"; build step 12).
+//! Live listener changes for the MySQL family.
 //!
 //! - **Per greeting:** mode, certificate and `tls.min_version` come from
 //!   the listener snapshot the connection was accepted under
@@ -12,7 +11,7 @@
 //!   allows ([`Strictness::keeps`]: plaintext under `required`, TLS 1.2
 //!   under a 1.3 minimum, any session of a moved or disabled listener) are
 //!   marked `close_at_safe_point` (reason `ListenerRetired`) once
-//!   `listener.drain_seconds` has passed (chapter 04). The front end then
+//!   `listener.drain_seconds` has passed. The front end then
 //!   answers their next command with 39004 and closes; a session inside a
 //!   transaction closes after it ends. A session that already meets the
 //!   new spec (TLS, at a high enough version) stays open.

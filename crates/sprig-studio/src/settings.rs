@@ -72,7 +72,7 @@ def!(FEED_VIEW_MAX_EVENTS: u64 = "studio.feed_view_max_events", 5000, TENANT_GLO
     HardBounds::range(10, 1_000_000), "Events kept in the feed view");
 def!(GRAPH_MAX_ELEMENTS: u64 = "studio.graph_max_elements", 2000, TENANT_GLOBAL, HardBounds::range(10, 1_000_000),
     "Nodes plus relationships drawn");
-def!(MAP_TILE_URL: Cow<'static, str> = "studio.map_tile_url", Cow::Borrowed(""), Scopes::TREE, HardBounds::NONE,
+def!(MAP_TILE_URL: Cow<'static, str> = "studio.map_tile_url", Cow::Borrowed(""), Scopes::PROCESS, HardBounds::NONE,
     "Base-map tiles; origin added to the CSP");
 def!(VIEW_AS: Cow<'static, str> = "studio.view_as", Cow::Borrowed("on"), Scopes::TREE,
     HardBounds::one_of(&["on", "off"]), "Allow the row-level security tester");

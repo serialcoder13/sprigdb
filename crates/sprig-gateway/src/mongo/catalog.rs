@@ -1,6 +1,5 @@
-//! Collections in the tenant catalog (chapter 31, "Catalog tables"; build
-//! step 4): the `doc` catalog module and the document engine's
-//! [`DocCatalog`] over it.
+//! Collections in the tenant catalog: the `doc` catalog module and the
+//! document engine's [`DocCatalog`] over it.
 //!
 //! - **Tables.** `collections`, `doc_indexes` and `promoted_fields` in
 //!   `t<tenant>_sprig`, created by the module's migration the first time a
@@ -8,8 +7,8 @@
 //!   `objects.object_id` of its table (an ordinary `table` row, created by
 //!   the engine's `CREATE TABLE` through the user's session).
 //! - **Changes.** Registering or removing a collection, its indexes, and a
-//!   new array path are each one versioned catalog change (chapter 08), so
-//!   every gateway's cache reloads them.
+//!   new array path are each one versioned catalog change, so every
+//!   gateway's cache reloads them.
 //! - **Reads.** Commands read collections from the gateway's cached
 //!   snapshot ([`DocState`]): no metadata read per command. The snapshot
 //!   is the newest the directory watch has delivered, and never older
@@ -19,9 +18,8 @@
 //!   that database in each gateway process imports its rows into the
 //!   catalog and drops the table.
 //!
-//! Not built: the publication wait of `check_flags` (every gateway
-//! acknowledging a new array path before the write commits); see
-//! `decisions/r5-interim.md`, D13.
+//! The publication wait of `check_flags` (every gateway acknowledging a
+//! new array path before the write commits) is in [`super::publish`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -122,7 +120,7 @@ const DDL_PROMOTED_FIELDS: &str = "CREATE TABLE IF NOT EXISTS promoted_fields (
 ) ENGINE=InnoDB";
 
 /// Format 2: array paths registered but not yet confirmed by every
-/// gateway (the publication wait, `decisions/r5-interim.md` D13).
+/// gateway (the publication wait).
 const DDL_PENDING: &str =
     "ALTER TABLE collections ADD COLUMN IF NOT EXISTS array_paths_pending JSON NULL";
 
@@ -647,7 +645,7 @@ pub struct CatalogDocs {
     seen: Mutex<HashMap<u64, u64>>,
     /// Databases checked for an old `__sprig_doc_meta`, by tenant.
     legacy: Mutex<HashMap<u64, HashSet<String>>>,
-    /// The publication wait (D13); `None` without a DC tier.
+    /// The publication wait; `None` without a DC tier.
     publisher: Option<Arc<super::publish::Publisher>>,
 }
 
@@ -673,7 +671,7 @@ type StoredRow = (
     Option<i64>,
 );
 
-/// One MongoDB shape's totals in chapter 12's workload store (S137): every
+/// One MongoDB shape's totals in the workload store: every
 /// gateway's flushed counts, kept for the store's retention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredShape {
@@ -696,7 +694,7 @@ pub struct StoredShape {
 }
 
 impl CatalogDocs {
-    /// The tenant's MongoDB shapes in the workload store (S137), with
+    /// The tenant's MongoDB shapes in the workload store, with
     /// their totals over every row the store keeps; a tenant whose
     /// workload tables don't exist yet has none.
     ///
@@ -758,7 +756,7 @@ impl CatalogDocs {
         }
     }
 
-    /// With the publication wait of chapter 31's `check_flags`.
+    /// With the publication wait of `check_flags`.
     #[must_use]
     pub fn with_publisher(mut self, p: Arc<super::publish::Publisher>) -> Self {
         self.publisher = Some(p);
@@ -892,7 +890,7 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
-        // Decision PF2: the version row is locked first and a version is
+        // The version row is locked first and a version is
         // allocated only when something is written, so finding the
         // collection already registered leaves no gap.
         let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
@@ -963,7 +961,7 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
-        // Decision PF2: allocate only when `f` changed something.
+        // Allocate only when `f` changed something.
         let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
         let r: Result<bool> = async {
             let (store, tx) = ch.tx().parts();
@@ -1001,10 +999,10 @@ impl CatalogDocs {
     /// database, or a table dropped by SQL), in one change.
     async fn purge_orphans(&self, tenant: TenantId) -> Result<()> {
         self.prepare(tenant).await?;
-        // Decision PF2: after nearly every `dropDatabase` there is nothing
-        // to purge; the version row is locked, and a version allocated only
-        // when rows go (before, each call left a gap that held every
-        // `Freshness::Latest` load of the tenant for `catalog.version_wait_ms`).
+        // After nearly every `dropDatabase` there is nothing to purge; the
+        // version row is locked, and a version allocated only when rows go
+        // (before, each call left a gap that held every `Freshness::Latest` load
+        // of the tenant for `catalog.version_wait_ms`).
         let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
         let r: Result<u64> = async {
             let (store, tx) = ch.tx().parts();
@@ -1124,7 +1122,7 @@ impl DocCatalog for CatalogDocs {
     ) -> std::result::Result<(), MongoError> {
         if let Some(tenant) = tenant_of(sql) {
             // Once a database was checked, the one-time work is done: no
-            // catalog snapshot per command (R5 round 8).
+            // catalog snapshot per command.
             if self.legacy_checked(tenant, db) {
                 return Ok(());
             }
@@ -1255,8 +1253,8 @@ impl DocCatalog for CatalogDocs {
             .await
             .map_err(|e| mongo(&e))?;
         // 2. Every gateway loads a version holding them before the write
-        // commits (chapter 31's check_flags). Paths an earlier write
-        // registered without a confirmation are confirmed now.
+        // commits (check_flags). Paths an earlier write registered without
+        // a confirmation are confirmed now.
         if let Some(p) = &self.publisher {
             let cat = self.snapshot(tenant).await.map_err(|e| mongo(&e))?;
             let version = added.unwrap_or(cat.version).max(cat.version);

@@ -1,5 +1,5 @@
-//! Trigger evaluation (chapter 13, "Trigger evaluation"; build steps 2 and
-//! 22): which fingerprints of a tenant's window deserve an index, and why.
+//! Trigger evaluation: which fingerprints of a tenant's window deserve an
+//! index, and why.
 //!
 //! ```text
 //! qualify(tenant):
@@ -21,10 +21,10 @@
 //!
 //! The fast trigger's per-run conditions (`scan_min_examined` rows
 //! examined, at most `scan_max_returned_ratio` of them returned) are
-//! applied by chapter 12's recorder when it counts `scan_runs` and
+//! applied by the workload recorder when it counts `scan_runs` and
 //! `scan_sessions`; qualification only counts runs and sessions.
 //!
-//! **Choices where the chapter is open** (also in the report):
+//! **Choices:**
 //!
 //! - **Per object.** A fingerprint over several objects is qualified once
 //!   per object, with that object's thresholds and mode; `include_studio`
@@ -39,7 +39,7 @@
 //! - **Rows examined per row returned** counts each probed run as
 //!   returning at least one row ([`examined_per_returned`]), so writes and
 //!   lookups that return nothing don't look like scans.
-//! - **Strictness** follows Kiran's wording: "50 runs" is at least 50,
+//! - **Strictness:** "50 runs" is at least 50,
 //!   "p95 over 100 ms" and "more than 100 rows per row returned" are
 //!   strict.
 
@@ -64,14 +64,14 @@ use super::store::CandidateRow;
 /// Bytes in a gigabyte, for `auto_index.scan_recommend_above_gb`.
 pub const GB: f64 = 1e9;
 
-/// Where a window's runs came from (chapter 12: Studio's statements are
+/// Where a window's runs came from (Studio's statements are
 /// recorded with `caller = studio` in their own statistics bucket).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunSource {
     /// Applications: every front end except Studio.
     Client,
-    /// Studio (chapter 44); counted only with `auto_index.include_studio`.
+    /// Studio; counted only with `auto_index.include_studio`.
     Studio,
 }
 
@@ -104,10 +104,10 @@ impl SourcedWindow {
     }
 }
 
-/// Where trigger evaluation reads the workload: chapter 12's
+/// Where trigger evaluation reads the workload: the workload store's
 /// `WorkloadStore::window`, plus the request to watch a fingerprint.
 ///
-/// The catalog-backed store is being built (chapter 12 step 4); until it
+/// The catalog-backed store is being built; until it
 /// exists, [`RecorderSource`] reads a gateway's open buckets.
 #[async_trait::async_trait]
 pub trait WorkloadSource: Send + Sync {
@@ -123,8 +123,8 @@ pub trait WorkloadSource: Send + Sync {
         to: SystemTime,
     ) -> Result<Vec<SourcedWindow>>;
 
-    /// Asks chapter 12 to watch `fp` (probe rows examined, capture
-    /// parameter samples): every qualifying fingerprint is watched.
+    /// Asks the workload recorder to watch `fp` (probe rows examined,
+    /// capture parameter samples): every qualifying fingerprint is watched.
     fn watch(&self, tenant: TenantId, fp: Fingerprint);
 }
 
@@ -208,7 +208,7 @@ pub enum Trigger {
 }
 
 impl Trigger {
-    /// The chapter's reason text.
+    /// The reason text.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -262,7 +262,7 @@ impl Signals {
 
 /// Rows examined per row returned over the probed runs, each probed run
 /// counted as returning at least one row: `rows_examined /
-/// max(examined_samples, returned_sampled)`. Chapter 12's
+/// max(examined_samples, returned_sampled)`. The workload store's
 /// `rows_examined / max(1, returned_sampled)` floors only the sum, so
 /// statements that return nothing (writes by primary key, lookups that
 /// miss) would look like scans. `None` without probes.
@@ -413,7 +413,7 @@ pub struct Qualified {
     pub fp: Fingerprint,
     /// The object it qualified on.
     pub object: ObjectId,
-    /// The chapter's reason: the first trigger that held, in the order
+    /// The reason: the first trigger that held, in the order
     /// slow, top-N, fast.
     pub trigger: Trigger,
     /// Every trigger that held.
@@ -491,7 +491,7 @@ pub struct QualifyInput<'a> {
 }
 
 /// Fingerprint kinds automatic indexing reads: SQL statements and
-/// MongoDB shapes (translated to field columns, R5).
+/// MongoDB shapes (translated to field columns).
 #[must_use]
 pub const fn indexable_kind(k: FpKind) -> bool {
     matches!(k, FpKind::Sql | FpKind::Mongo)
@@ -643,10 +643,10 @@ pub fn advise_for(trigger: Trigger, data_bytes: Option<u64>, p: &ObjectPolicy) -
         && data_bytes.is_some_and(|b| b as f64 > p.trigger.scan_recommend_above_gb * GB)
 }
 
-/// Chapter 13's `qualify` over a window `W` (see [`window_of`]): one
+/// `qualify` over a window `W` (see [`window_of`]): one
 /// verdict per fingerprint and object.
 #[must_use]
-#[allow(clippy::too_many_lines)] // the chapter's loop, in one place
+#[allow(clippy::too_many_lines)] // the whole loop, in one place
 pub fn qualify(
     w: BTreeMap<Fingerprint, FpWindowStats>,
     excluded: &[Fingerprint],

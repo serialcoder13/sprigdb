@@ -272,8 +272,8 @@ meaning = "The sink tried to use the worker's own cloud identity (instance metad
 what_to_do = "Give the connection explicit credentials, or ask an operator to allow platform identity with `sink.platform_identity`."
 
 [ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST]
-meaning = "The sink's owner can no longer read its source, for example after a `REVOKE`, so the sink pauses."
-what_to_do = "Grant the owner read access to the source again, or recreate the sink under a user who has it, then resume the sink."
+meaning = "A sink paused because its owner can no longer read its source: the owner lost `SELECT` on the stream, queue or table (after a `REVOKE`, a role change or a dropped grant), its account was locked, or it was dropped. The sink's state is `paused` and its reason starts with this code and says why, for example `the owner 'etl'@'%' lost SELECT on shop.orders`. Nothing is delivered while it is paused; records wait in the source."
+what_to_do = "Give the owner read access again (`GRANT SELECT ON ...`, or `ALTER USER ... ACCOUNT UNLOCK`): the sink resumes by itself within seconds, from where it stopped. Or make another account that can read the source the owner with `ALTER SINK ... OWNER TO`, then `ALTER SINK ... RESUME`. `SHOW SINKS` shows the state and the reason."
 
 [ER_SPRIG_SINK_DISABLED]
 meaning = "Sinks are turned off (`sink.enabled` is off), or the target kind isn't listed in `sink.allowed_kinds`."
@@ -423,6 +423,18 @@ what_to_do = "List operators with `sprigctl operator list` or tokens with `sprig
 meaning = "The operator token has expired or was revoked, or its owner was disabled."
 what_to_do = "Log in again with `sprigctl login`, or issue a new token with `sprigctl token create`."
 
+[ER_SPRIG_PRIVILEGE_DROPPED]
+meaning = "A warning: `GRANT` named a server-wide privilege (`SUPER`, `FILE` and the like), which means nothing inside a tenant, so it was dropped and the rest of the grant applied. This happens while `auth.unsafe_privilege_action` is `warn`."
+what_to_do = "Nothing is needed. Remove the privilege from the statement to stop the warning, or set `auth.unsafe_privilege_action = error` to refuse such grants with error 1227 instead."
+
+[ER_SPRIG_AUTH_PROPAGATION_PENDING]
+meaning = "A warning after an account or grant change (`CREATE USER`, `GRANT`, `REVOKE` and so on): the gateway already enforces the change, but it couldn't yet apply it to MariaDB's own grants on the tenant's cluster."
+what_to_do = "Nothing is needed: access through SprigDB already follows the change. The gateway applies MariaDB's grants again on the tenant's next statement and every `auth.reconcile_interval_seconds`. If the warning keeps coming back, check the cluster with `sprigctl cluster show <id>`."
+
+[ER_SPRIG_ACCOUNT_AS_ROLE]
+meaning = "`GRANT <role> TO ...` named a user account where only a role is allowed. Only roles can be granted to accounts."
+what_to_do = "Grant a role instead: create one with `CREATE ROLE`, grant it the privileges, and grant that role to the account. A retry won't help."
+
 [ER_SPRIG_TENANT_EXISTS]
 meaning = "A tenant with that name already exists (tenant names are unique across the platform), possibly one still being created or deleted."
 what_to_do = "Choose another name, or inspect the existing tenant with `sprigctl tenant show <name>`."
@@ -452,12 +464,16 @@ meaning = "The statement touches a table whose rows the tenant's row-level secur
 what_to_do = "Rewrite the statement as plain `SELECT`, `INSERT`, `UPDATE` or `DELETE` on the table, or run it as a user the policy doesn't restrict."
 
 [ER_SPRIG_DEFINER_REFUSED]
-meaning = "A stored program (procedure, function, trigger, view or event) wasn't recorded by MariaDB with the session's own backend account as its definer, so the gateway dropped it again."
-what_to_do = "Create the program without a `DEFINER` clause, or with `DEFINER = CURRENT_USER`; programs always run as their creator's account."
+meaning = "A stored program (procedure, function, trigger, view or event) wasn't recorded by MariaDB with the definer SprigDB asked for (your own account, or the account a `DEFINER` clause named with `SET_ANY_DEFINER`), so the gateway dropped it again."
+what_to_do = "Create the object again without a `DEFINER` clause, or with `DEFINER = CURRENT_USER`, or naming an existing account of the tenant while you hold `SET_ANY_DEFINER`. If it keeps failing, check that the tenant's cluster is healthy."
 
 [ER_SPRIG_AUTHORIZER_UNKNOWN_TO_GATEWAYS]
 meaning = "A change of `auth.authorizer` names an authorization engine that some live gateways don't support yet; the message lists them and their data centres."
 what_to_do = "Upgrade the listed gateways to a version that knows the engine, then make the change again."
+
+[ER_SPRIG_RLS_DEFINER_DEFAULT]
+meaning = "A note on `CREATE PROCEDURE` or `CREATE FUNCTION`: the routine has no `SQL SECURITY` clause and reads tables with row-level security policies, so it runs as `SQL SECURITY DEFINER` and applies its definer's policies, not its caller's. The message names the tables."
+what_to_do = "If callers should see only their own rows, recreate the routine with `SQL SECURITY INVOKER`. If definer rights are intended, write `SQL SECURITY DEFINER` explicitly and the note goes away."
 
 [ER_SPRIG_META_UNAVAILABLE]
 meaning = "The control plane's store (etcd) can't be reached, or a session with it was lost, so the operation that needs it fails."
@@ -843,6 +859,118 @@ what_to_do = "Send a smaller message, broadcast less often or to fewer members, 
 meaning = "`DROP DATABASE` was refused because the database's cross-tenant outbox still holds committed messages not forwarded after `inherit.outbox_drain_seconds`; the message gives the count."
 what_to_do = "Retry later once the messages are forwarded; check that the receiving tenants' clusters are reachable."
 
+[ER_SPRIG_MQ_NOT_FOUND]
+meaning = "The virtual host, exchange or queue named doesn't exist. A virtual host is a database of the tenant, so an unknown virtual host means the tenant has no such database (`amqp.default_vhost_database` maps `/`). AMQP 0-9-1 clients get reply code 404 `NOT_FOUND`; AMQP 1.0 clients get `amqp:not-found`."
+what_to_do = "Check the name and the virtual host, or declare the exchange or queue first. A retry helps only once the object exists."
+
+[ER_SPRIG_MQ_PRECONDITION]
+meaning = "The request breaks a rule of the object: a redeclare with different arguments or properties (`inequivalent arg`), an unknown delivery tag, deleting a queue that is in use or not empty with `if-unused` or `if-empty`, switching a channel between confirm and transaction mode, or an unknown queue type. Clients get AMQP reply code 406 `PRECONDITION_FAILED` and the channel closes."
+what_to_do = "Fix the request the message describes: declare with the same arguments as the existing object (or delete it first), and ack only delivery tags of the same channel. A retry as it is won't help."
+
+[ER_SPRIG_MQ_RESOURCE_LOCKED]
+meaning = "An exclusive queue is held by another connection, or the exclusive flag doesn't match the queue's original declaration. Clients get AMQP reply code 405 `RESOURCE_LOCKED` (AMQP 1.0: `amqp:resource-locked`)."
+what_to_do = "Use the queue from the connection that declared it, or declare it without `exclusive`. An exclusive queue goes away when its connection closes, so a retry after that can succeed."
+
+[ER_SPRIG_MQ_ACCESS_REFUSED]
+meaning = "The user lacks the configure, write or read permission the operation needs on the virtual host, exchange or queue, or the operation isn't allowed on a built-in object: publishing to an internal exchange, changing the default exchange, or declaring a name that starts with `amq.`. Clients get AMQP reply code 403 `ACCESS_REFUSED` (AMQP 1.0: `amqp:unauthorized-access`)."
+what_to_do = "Grant the user the missing privilege on the tenant database or object, or use another name. A retry won't help until the privilege is granted."
+
+[ER_SPRIG_MQ_NOT_IMPLEMENTED]
+meaning = "An AMQP method, flag or argument SprigDB doesn't support, such as `basic.qos` with `prefetch_size`, `immediate=true`, `channel.flow` with `active=false`, stream queues, or the queue engine not running on this gateway. Clients get AMQP reply code 540 `NOT_IMPLEMENTED`, which closes the connection (AMQP 1.0: `amqp:not-implemented`)."
+what_to_do = "Change the client to avoid the feature the message names. If the message says the queue engine isn't running here, connect to a gateway that runs it."
+
+[ER_SPRIG_MQ_UNROUTABLE]
+meaning = "A message published with `mandatory` reached no queue: no binding of the exchange matched its routing key. AMQP 0-9-1 clients get the message back with `basic.return` and reply code 312 `NO_ROUTE`; `CALL sprig.mq_publish` returns this error."
+what_to_do = "Bind a queue that matches the routing key, or check the exchange and routing key. Publish again once a queue is bound."
+
+[ER_SPRIG_MQ_QUEUE_FULL]
+meaning = "A publish to a queue that is at its length limit with overflow `reject-publish`. With publisher confirms the message is nacked; AMQP 1.0 clients see it rejected with `amqp:resource-limit-exceeded`; `CALL sprig.mq_publish` returns this error."
+what_to_do = "Publish again later, once consumers have drained the queue. If it stays full, add consumers or raise the queue's `x-max-length` or `x-max-length-bytes`."
+
+[ER_SPRIG_MQ_MESSAGE_TOO_LARGE]
+meaning = "A message body is larger than `amqp.max_message_bytes` (16 MiB by default). AMQP 0-9-1 clients get reply code 406 `PRECONDITION_FAILED`; AMQP 1.0 clients get `amqp:link:message-size-exceeded`."
+what_to_do = "Send smaller messages, or store the payload elsewhere and send a reference. Raise `amqp.max_message_bytes` only if MariaDB's packet size allows it."
+
+[ER_SPRIG_MQ_ALREADY_SETTLED]
+meaning = "`CALL sprig.mq_ack` inside a transaction named a message that was already settled: acknowledged by someone else, returned to the queue after its lease ran out, or its queue was deleted. The transaction is rolled back."
+what_to_do = "Run the whole transaction again from the start, fetching a fresh message with `sprig.mq_get`. Process and ack messages within their lease so they aren't returned first."
+
+[ER_SPRIG_MQ_DELIVERY_TOKEN_INVALID]
+meaning = "The delivery token passed to `sprig.mq_ack` or `sprig.mq_nack` is malformed, was changed, or belongs to another tenant."
+what_to_do = "Pass the token exactly as `sprig.mq_get` returned it, from the same tenant. A retry with the same token won't help."
+
+[ER_SPRIG_MQ_OWNER_MOVED]
+meaning = "The gateway that owns the queue changed, stopped or couldn't be reached during the call, for example while queues are rebalanced or a gateway restarts. AMQP 0-9-1 clients get reply code 541 `INTERNAL_ERROR`; SQL clients get SQLSTATE 40001."
+what_to_do = "Retry: the error is safe to retry and the next attempt reaches the new owner. If the message says the queue is served by another gateway, connect there."
+
+[ER_SPRIG_MQ_CONFIRM_TIMEOUT]
+meaning = "A published message wasn't committed within `amqp.publish_timeout_ms` (10 seconds by default), so the publish is nacked. The write may still complete afterwards."
+what_to_do = "Publish again; consumers should tolerate a duplicate, since the first copy may still have been stored. If it happens often, check the health of the cluster that holds the queue."
+
+[ER_SPRIG_MQ_CONSUMER_TIMEOUT]
+meaning = "A delivery stayed unacknowledged longer than the consumer timeout (`amqp.consumer_timeout_ms`, 30 minutes by default, or the queue's `x-consumer-timeout`). The consumer is cancelled (AMQP reply code 406 `PRECONDITION_FAILED`) and the message returns to the queue."
+what_to_do = "Acknowledge messages sooner, or raise the timeout for slow work. Start the consumer again; the message is delivered again."
+
+[ER_SPRIG_MQ_TXN_NEEDS_XA]
+meaning = "Reserved: this release doesn't return it. It is kept for an ack inside a transaction that would add a cluster without XA while `txn.non_xa_policy` is `reject`."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_MQ_DELAY_OUT_OF_RANGE]
+meaning = "A message's `x-delay` header is above `queue.delay_max_ms`. Clients get AMQP reply code 406 `PRECONDITION_FAILED`."
+what_to_do = "Send a shorter delay, or raise `queue.delay_max_ms` for the tenant. A retry with the same delay won't help."
+
+[ER_SPRIG_MQ_RESIDENCY]
+meaning = "Reserved: this release doesn't return it. It is kept for a queue login or publish outside the data centres the tenant's residency allows."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_MQ_QUOTA]
+meaning = "The tenant published more bytes in a second than `amqp.quota_publish_bytes_per_sec`. SprigDB sends `connection.blocked` with this code to the virtual host's connections and unblocks them a second later."
+what_to_do = "Nothing is needed: publishing resumes when the connection is unblocked. If it happens often, slow the publishers down or raise `amqp.quota_publish_bytes_per_sec`."
+
+[ER_SPRIG_MQ_VHOST_LIMIT]
+meaning = "Declaring a queue would go over the virtual host's `max-queues` limit. Clients get AMQP reply code 406 `PRECONDITION_FAILED`."
+what_to_do = "Delete queues that are no longer used, or raise the virtual host's `max-queues` limit. A retry helps only after that."
+
+[ER_SPRIG_AMQP_FRAME_ERROR]
+meaning = "The client sent a malformed AMQP frame or command, or a method out of order: a bad frame end, a frame over `frame_max`, content on a channel that isn't open, or a missing handshake step. AMQP 0-9-1 clients get a reply code from 501 to 505 and the connection closes."
+what_to_do = "This is a client library bug or a non-AMQP client on the port. Update the client library, and check that it connects to the AMQP listener."
+
+[ER_SPRIG_AMQP_SASL_FAILED]
+meaning = "AMQP login failed: the user name or password is wrong, the SASL mechanism isn't offered (`amqp.sasl_mechanisms`), or the AMQP 1.0 SASL exchange was malformed. AMQP 0-9-1 clients get reply code 403 `ACCESS_REFUSED`; AMQP 1.0 clients get `amqp:unauthorized-access`."
+what_to_do = "Check the user name (with its tenant), the password and the mechanism the client uses. A retry with the same credentials won't help."
+
+[ER_SPRIG_AMQP_PROTOCOL_HEADER]
+meaning = "The client sent a protocol header SprigDB doesn't speak, or none in time. SprigDB answers with the header it supports and closes the connection."
+what_to_do = "Use an AMQP 0-9-1 or AMQP 1.0 client, and check that it connects to the AMQP listener and not to another port."
+
+[ER_SPRIG_AMQP_CHANNEL_LIMIT]
+meaning = "The client asked for a `channel_max` above the server's (`amqp.channel_max`), or opened a channel number above the negotiated `channel_max`. Clients get AMQP reply code 530 `NOT_ALLOWED` and the connection closes."
+what_to_do = "Use fewer channels per connection, or set the client's channel limit at or below the server's. Raise `amqp.channel_max` if many channels are really needed."
+
+[ER_SPRIG_AMQP10_LINK_REFUSED]
+meaning = "An AMQP 1.0 link was refused: its source or target address is missing, isn't in a form SprigDB serves (such as `/queues/<queue>` for a source), or names no such queue or exchange. Clients get `amqp:not-found` or `amqp:invalid-field`."
+what_to_do = "Fix the address the message names, and declare the queue or exchange first."
+
+[ER_SPRIG_AMQP10_UNSUPPORTED]
+meaning = "An AMQP 1.0 feature SprigDB doesn't support: transactions, link recovery or the `second` receiver settle mode. Clients get `amqp:not-implemented`."
+what_to_do = "Configure the client not to use the feature, for example the `first` receiver settle mode and no AMQP transactions."
+
+[ER_SPRIG_MQ_STREAM_OFFSET]
+meaning = "Reserved: this release doesn't return it. It is kept for a bad `x-stream-offset`; stream queues aren't served in this release."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_MQ_DIRECT_REPLY_TO]
+meaning = "Direct reply-to (`amq.rabbitmq.reply-to`) was misused: a reply consumer that isn't in auto-ack mode, a second reply consumer on the channel, a publish naming a reply consumer that doesn't exist, or an AMQP 1.0 reply link that isn't pre-settled. Clients get AMQP reply code 406 `PRECONDITION_FAILED`."
+what_to_do = "Consume from `amq.rabbitmq.reply-to` with auto-ack, once per channel, before publishing the request on the same channel."
+
+[ER_SPRIG_MQ_MGMT_UNSUPPORTED]
+meaning = "Reserved: this release doesn't return it. It is kept for a RabbitMQ management endpoint SprigDB doesn't serve."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_MQ_DEAD_LETTER_CYCLE]
+meaning = "A message was dropped because dead-lettering would send it round a cycle back to a queue it already died in. No client receives this error; the gateway logs it with this code."
+what_to_do = "Check the queues' `x-dead-letter-exchange` and `x-dead-letter-routing-key` and break the cycle."
+
 [ER_SPRIG_RATE_LIMITED]
 meaning = "The request is over a rate limit or admission control: the tenant has `api.stream.max_per_tenant` change streams open on this gateway, or too many analytics queries run (`analytics.max_concurrent_per_tenant`, `analytics.max_concurrent_per_gateway`)."
 what_to_do = "Retry with backoff; close idle change streams, or ask an operator to raise the limit the message names."
@@ -986,6 +1114,86 @@ what_to_do = "Run workers in an allowed data centre."
 [ER_SPRIG_SEARCH_STALE_IN_TXN]
 meaning = "A warning: a search inside a transaction that wrote the indexed object reads committed data only, so it doesn't see the transaction's own changes. Declared for this case; no current path raises it."
 what_to_do = "Search after `COMMIT` if you need to see your own writes."
+
+[ER_SPRIG_TRANSLATE_LIMIT]
+meaning = "A `LATERAL` derived table that SprigDB can't rewrite as plain SQL is applied by the gateway, and it reads more than 10,000 distinct outer value tuples, or its rows add up to more than 8 MiB."
+what_to_do = "Filter the outer query to fewer rows, or rewrite the `LATERAL` with equality correlations only so it runs as plain SQL. A retry won't help."
+
+[ER_SPRIG_NEEDS_GATEWAY]
+meaning = "A `CREATE` of a view, procedure, function, trigger or event uses something only the gateway can do while it runs: a `LATERAL` the rewrite can't turn into SQL, a `performance_schema` or `sys` table, a `CALL sprig.<procedure>`, or a write to a document collection. MariaDB runs stored code without the gateway, so the statement is refused."
+what_to_do = "Run that part from the client instead of inside stored code, or rewrite it without the feature the message names."
+
+[ER_SPRIG_CURSOR_LIMIT]
+meaning = "The tenant already has `mongo.max_cursors_per_tenant` cursors open on this gateway, so a new MongoDB cursor was refused. MongoDB clients see `codeName` `SprigCursorLimit`."
+what_to_do = "Close cursors when done (exhaust them or call `killCursors`), and avoid `noCursorTimeout`. Idle cursors close after `mongo.cursor_timeout_ms`, so a retry later can succeed. Raise `mongo.max_cursors_per_tenant` if the load is legitimate."
+
+[ER_SPRIG_DOC_ID_TOO_LONG]
+meaning = "A document's `_id`, once encoded, is longer than 1,024 bytes. MongoDB clients see `codeName` `SprigDocIdTooLong`."
+what_to_do = "Use a shorter `_id`, such as an `ObjectId` or a hash of the long value, and keep the long value in another field."
+
+[ER_SPRIG_DOC_FEATURE_UNSUPPORTED]
+meaning = "A MongoDB command, operator or option that this release doesn't support, such as `$where`, `mapReduce`, capped or time-series collections, `startAtOperationTime` on a change stream, or some `explain` targets. The message names it. MongoDB clients see `codeName` `SprigDocFeatureUnsupported`."
+what_to_do = "Rewrite the operation without the feature the message names, for example with an aggregation pipeline instead of `$where` or `mapReduce`. A retry won't help."
+
+[ER_SPRIG_SHARD_KEY_ARRAY]
+meaning = "Reserved: this release doesn't return it. It is kept for an array value in a collection's shard key field."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_PATH_PUBLISH_TIMEOUT]
+meaning = "A write added a new array path to a collection, and not every gateway confirmed it within `doc.path_publish_timeout_ms`. Nothing of the write was committed. MongoDB clients see `codeName` `SprigPathPublishTimeout`."
+what_to_do = "Retry the write: it is safe to retry. If it keeps happening, look for gateways that are slow or unreachable with `sprigctl gateway list`."
+
+[ER_SPRIG_DOC_TOO_DEEP]
+meaning = "A document is nested more than 32 levels deep, MariaDB's JSON limit. MongoDB clients see `codeName` `SprigDocTooDeep`."
+what_to_do = "Flatten the document so it nests 32 levels or fewer. A retry won't help."
+
+[ER_SPRIG_PACKET_TOO_SMALL]
+meaning = "Reserved: this release doesn't return it. It is kept for a MongoDB message too short to hold its header."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_DOC_INVALID]
+meaning = "Reserved: this release doesn't return it. It is kept for a document SprigDB can't store."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_DOC_ID_IMMUTABLE]
+meaning = "Reserved: this release doesn't return it. It is kept for an update that changes `_id`."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_REDIS_UNSUPPORTED]
+meaning = "A Redis 7.2 command that this release doesn't support, such as the HyperLogLog and stream commands, `MONITOR`, `SWAPDB` or `CLIENT REPLY OFF`. Clients get an error starting `SPRIG REDIS_UNSUPPORTED 39840`."
+what_to_do = "Use another command, or keep that data in a SQL table or a SprigDB stream. A retry won't help."
+
+[ER_SPRIG_REDIS_LUA_UNSUPPORTED]
+meaning = "A Lua scripting feature SprigDB doesn't offer, such as `SCRIPT DEBUG` or loading bytecode. Clients get an error starting `SPRIG REDIS_LUA_UNSUPPORTED 39841`."
+what_to_do = "Debug scripts outside SprigDB, and send scripts as Lua source."
+
+[ER_SPRIG_REDIS_RESTRICTED]
+meaning = "A Redis administrative command SprigDB doesn't offer, such as `CONFIG SET`, `ACL SETUSER`, some `CLIENT` subcommands, or a command SprigDB doesn't list. Clients get an error starting `SPRIG REDIS_RESTRICTED 39842`."
+what_to_do = "Manage SprigDB through SQL, the Admin API or `sprigctl` instead. A retry won't help."
+
+[ER_SPRIG_REDIS_MULTI_TOO_LARGE]
+meaning = "A `MULTI` block queued more commands than `redis.max_multi_commands`. The command that went over the limit gets this error, and `EXEC` then fails with `EXECABORT`."
+what_to_do = "Split the work into smaller `MULTI` blocks, or raise `redis.max_multi_commands`."
+
+[ER_SPRIG_REDIS_TOO_MANY_BLOCKED]
+meaning = "A blocking command (`BLPOP`, `BRPOP`, `BLMOVE` and the like) would put the tenant over `redis.max_blocked_per_tenant` clients waiting at once. Clients get an error starting `SPRIG REDIS_TOO_MANY_BLOCKED 39845`."
+what_to_do = "Retry later; the error is safe to retry. If it is common, use fewer blocked clients, or raise `redis.max_blocked_per_tenant`."
+
+[ER_SPRIG_REDIS_SHARD_BUSY]
+meaning = "A write kept meeting conflicting writes to the same keys until its retries ran out. Clients get an error starting `TRYAGAIN`, as Redis Cluster sends."
+what_to_do = "Retry the command after a short pause; it is safe to retry. Spread hot keys if it happens often."
+
+[ER_SPRIG_REDIS_PUBSUB_UNAVAILABLE]
+meaning = "`PUBLISH` couldn't reach any pub/sub hub, so the message wasn't delivered. Clients get an error starting `SPRIG REDIS_PUBSUB_UNAVAILABLE 39848`."
+what_to_do = "Retry with backoff; it is safe to retry. If it lasts, check the gateways with `sprigctl gateway list` and the network between them."
+
+[ER_SPRIG_REDIS_LUA_BUDGET_EXCEEDED]
+meaning = "A Lua script or function ran past `redis.lua_time_limit_ms` or used more memory than `redis.lua_memory_limit_mb`, so it was stopped and its writes rolled back. Clients get an error starting `SPRIG REDIS_LUA_BUDGET_EXCEEDED 39850`."
+what_to_do = "Make the script do less work per call, for example by splitting it into several calls, or raise the limit the message names. A retry as it is will usually fail again."
+
+[ER_SPRIG_REDIS_LUA_UNDECLARED_KEY]
+meaning = "A script called `redis.call` on a key that isn't in `KEYS` and lives on another shard than the declared keys. Clients get an error starting `SPRIG REDIS_LUA_UNDECLARED_KEY 39851`."
+what_to_do = "Pass every key the script touches in `KEYS`, as Redis Cluster requires. A retry won't help."
 
 [ER_SPRIG_LOGIC_NOT_FOUND]
 meaning = "No logic function, procedure, version or binding with that name exists."
@@ -1151,6 +1359,34 @@ what_to_do = "Retry the produce."
 meaning = "The offset asked for is below the partition's log start (retention removed it) or above its high watermark (Kafka clients see `OFFSET_OUT_OF_RANGE`)."
 what_to_do = "Restart from the earliest or latest offset; set the consumer's offset reset policy accordingly."
 
+[ER_SPRIG_STREAM_TRUNCATED]
+meaning = "Reserved: this release doesn't return it. It is kept for a failover that loses records a consumer had already read."
+what_to_do = "Nothing: no client sees this code in this release."
+
+[ER_SPRIG_KAFKA_ACKS_ZERO]
+meaning = "A Kafka produce request with `acks=0`. SprigDB always acknowledges after the records commit, so it refuses the request and closes the connection."
+what_to_do = "Set the producer's `acks` to `1` or `all`. A retry with `acks=0` won't help."
+
+[ER_SPRIG_KAFKA_TRANSACTIONS_UNSUPPORTED]
+meaning = "A Kafka producer set `transactional.id` or sent a transactional batch. SprigDB has no Kafka transactions; the client sees Kafka's `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` or `INVALID_TXN_STATE`, with this code in the message."
+what_to_do = "Remove `transactional.id` from the producer. For atomic writes, publish inside a database transaction instead: `INSERT INTO <stream>` in SQL, or `db.publish` in logic."
+
+[ER_SPRIG_KAFKA_UNSUPPORTED_API]
+meaning = "A Kafka client sent an API, or a version of one, that SprigDB doesn't serve. SprigDB closes the connection, as Kafka does; the message names the API and the versions served."
+what_to_do = "Use a client version that negotiates with `ApiVersions`, or turn off the client feature that needs the API. A retry won't help."
+
+[ER_SPRIG_KAFKA_SASL_FAILED]
+meaning = "Kafka SASL login failed: wrong user name or password, or a malformed SASL exchange. The client gets Kafka's `SASL_AUTHENTICATION_FAILED` with this code in the message, and the connection closes."
+what_to_do = "Check the user name (with its tenant), the password and the SASL mechanism. A retry with the same credentials won't help."
+
+[ER_SPRIG_KAFKA_NOT_COORDINATOR]
+meaning = "Reserved: this release doesn't return it. Kafka clients whose consumer group moved to another gateway get Kafka's own `NOT_COORDINATOR` instead."
+what_to_do = "Nothing: Kafka clients handle `NOT_COORDINATOR` themselves by finding the new coordinator."
+
+[ER_SPRIG_KAFKA_QUOTA]
+meaning = "Reserved: this release doesn't return it. It is kept for a Kafka client over a tenant quota."
+what_to_do = "Nothing: no client sees this code in this release."
+
 [ER_SPRIG_STREAM_COMPACT_NEEDS_KEY]
 meaning = "A record without a key was written to a compacted stream, which needs a key for every record (Kafka clients see `INVALID_RECORD`)."
 what_to_do = "Give every record a key."
@@ -1267,6 +1503,42 @@ what_to_do = "Correct the value as the message shows."
 meaning = "A test email or webhook for approvals failed; the message gives the SMTP or HTTP error."
 what_to_do = "Check `approvals.smtp_url`, `approvals.smtp_from` and the credentials, or the webhook's URL and connection, then test again."
 
+[ER_SPRIG_SHELL_PROFILE_INVALID]
+meaning = "`sprig` couldn't use its connection settings: `profiles.toml` in the config directory (`$SPRIG_CONFIG_DIR`, or `sprig` under `$XDG_CONFIG_HOME` or `~/.config`) is unreadable or invalid, it has no profile of the name given, or a profile or option has a bad address, URL or no user."
+what_to_do = "Fix the file or option the message names, or pick an existing profile."
+
+[ER_SPRIG_SHELL_SECRET_UNAVAILABLE]
+meaning = "`sprig` couldn't read or store a profile's password or token: the OS keychain is unusable, or the `secrets.toml` file is unreadable or readable by other users."
+what_to_do = "Unlock or repair the keychain, or set `secrets = \"file\"` in `profiles.toml` to use a file instead. Make the secrets file readable only by you (`chmod 600`)."
+
+[ER_SPRIG_SHELL_CONFIRMATION_REQUIRED]
+meaning = "`sprig` was run non-interactively with a destructive statement (`DROP`, `TRUNCATE`, `DELETE` or `UPDATE` without `WHERE`, `FLUSHALL`, a queue purge and the like), and without `--yes`, so it refused to run it."
+what_to_do = "Check the statement, then run it again with `--yes` (`-y`)."
+
+[ER_SPRIG_SHELL_LANGUAGE_UNSUPPORTED]
+meaning = "`sprig` can't send that language over the chosen transport: an unknown `--lang` or `--protocol`, a language the connection doesn't speak, or a command that needs the Admin API."
+what_to_do = "Pick a language and protocol that match: SQL, MongoDB, Redis or Cypher over the REST API, or the native protocol of that language."
+
+[ER_SPRIG_SHELL_SPRIGCTL_MISSING]
+meaning = "`sprig admin` runs `sprigctl`, and found none beside `sprig` or on the `PATH`, or couldn't start it."
+what_to_do = "Install `sprigctl` beside `sprig` or on the `PATH`, or set `SPRIGCTL` to its path."
+
+[ER_SPRIG_SHELL_PARSE]
+meaning = "`sprig` couldn't split or parse the input: an unterminated string, quoted name or comment, unbalanced brackets, a bad escape, a bad command argument, or a reply it couldn't read."
+what_to_do = "Fix the input at the place the message names. A retry as it is won't help."
+
+[ER_SPRIG_SHELL_CANCELLED]
+meaning = "The statement was cancelled in `sprig`, usually with Ctrl-C or by declining a confirmation, or its output was closed."
+what_to_do = "Nothing is needed. Run the statement again if you still want it; whether the server finished a cancelled write isn't known, so check before repeating one."
+
+[ER_SPRIG_SHELL_UNREACHABLE]
+meaning = "`sprig` couldn't reach the gateway or native endpoint, or the connection closed or sent a reply it couldn't read."
+what_to_do = "Check the address, port and TLS settings of the profile, and that the gateway is running and reachable. Retry once it is."
+
+[ER_SPRIG_SHELL_INSECURE_TRANSPORT]
+meaning = "`sprig` refused to send a password over plain HTTP to a host other than this machine, before sending anything."
+what_to_do = "Use `https` (port 8443 by default). If the network is trusted, pass `--allow-insecure-http` or set `allow_insecure_http = true` in the profile."
+
 [ER_SPRIG_CONFIG_INVALID]
 meaning = "A configuration value is invalid: `sprigdb.toml` or its environment overrides at process start, a secret file, a peer or etcd setting, or an input such as an API key name. Processes refuse to start with it."
 what_to_do = "Fix the key the message names in `sprigdb.toml` or the environment, then start the process again; for API input, correct the field."
@@ -1277,93 +1549,6 @@ what_to_do = "Note the time, gateway and statement, find the error in that proce
 
 # Codes not raised by this build. Kept for when they are; the generator
 # shows only codes in SprigCode.
-
-[ER_SPRIG_MQ_NOT_FOUND]
-meaning = "404, amqp:not-found."
-
-[ER_SPRIG_MQ_PRECONDITION]
-meaning = "406."
-
-[ER_SPRIG_MQ_RESOURCE_LOCKED]
-meaning = "405."
-
-[ER_SPRIG_MQ_ACCESS_REFUSED]
-meaning = "403, amqp:unauthorized-access."
-
-[ER_SPRIG_MQ_NOT_IMPLEMENTED]
-meaning = "540, amqp:not-implemented."
-
-[ER_SPRIG_MQ_UNROUTABLE]
-meaning = "312 (return)."
-
-[ER_SPRIG_MQ_QUEUE_FULL]
-meaning = "Nack, rejected."
-
-[ER_SPRIG_MQ_MESSAGE_TOO_LARGE]
-meaning = "406, amqp:message-size-exceeded."
-
-[ER_SPRIG_MQ_ALREADY_SETTLED]
-meaning = "Ack in a transaction of a message already settled or lost to a lease expiry; the transaction rolls back."
-
-[ER_SPRIG_MQ_DELIVERY_TOKEN_INVALID]
-meaning = "Malformed or forged delivery token."
-
-[ER_SPRIG_MQ_OWNER_MOVED]
-meaning = "Owner changed during a call (retryable, 40001)."
-
-[ER_SPRIG_MQ_CONFIRM_TIMEOUT]
-meaning = "Nack."
-
-[ER_SPRIG_MQ_CONSUMER_TIMEOUT]
-meaning = "406, cancel."
-
-[ER_SPRIG_MQ_TXN_NEEDS_XA]
-meaning = "Ack in a transaction would add a non-XA cluster under reject."
-
-[ER_SPRIG_MQ_DELAY_OUT_OF_RANGE]
-meaning = "406."
-
-[ER_SPRIG_MQ_RESIDENCY]
-meaning = "403."
-
-[ER_SPRIG_MQ_QUOTA]
-meaning = "Connection.blocked."
-
-[ER_SPRIG_MQ_VHOST_LIMIT]
-meaning = "406, 530."
-
-[ER_SPRIG_AMQP_FRAME_ERROR]
-meaning = "501, 502, 503, 504, 505."
-
-[ER_SPRIG_AMQP_SASL_FAILED]
-meaning = "403, amqp:unauthorized-access."
-
-[ER_SPRIG_AMQP_PROTOCOL_HEADER]
-meaning = "Header, close."
-
-[ER_SPRIG_AMQP_CHANNEL_LIMIT]
-meaning = "530."
-
-[ER_SPRIG_AMQP10_LINK_REFUSED]
-meaning = "Amqp:not-found, amqp:invalid-field."
-
-[ER_SPRIG_AMQP10_UNSUPPORTED]
-meaning = "Amqp:not-implemented."
-
-[ER_SPRIG_MQ_STREAM_OFFSET]
-meaning = "406."
-
-[ER_SPRIG_MQ_DIRECT_REPLY_TO]
-meaning = "406."
-
-[ER_SPRIG_MQ_MGMT_UNSUPPORTED]
-meaning = "HTTP 501."
-
-[ER_SPRIG_MQ_DEAD_LETTER_CYCLE]
-meaning = "Message dropped in a dead-letter cycle (logged)."
-
-[ER_SPRIG_AUTH_PROPAGATION_PENDING]
-meaning = "Warning: the change holds in the gateway; MariaDB's grants (or other data centers) haven't applied it yet."
 
 [ER_SPRIG_ROLE_ACTIVATION_TIMEOUT]
 meaning = "Combined role not ready."
@@ -1383,9 +1568,6 @@ meaning = "Grant up or sideways the tree."
 [ER_SPRIG_TENANT_NOT_IN_SUBTREE]
 meaning = "USE TENANT or management outside the subtree."
 
-[ER_SPRIG_RLS_DEFINER_DEFAULT]
-meaning = "Note-level warning: a `CREATE PROCEDURE` or `CREATE FUNCTION` without `SQL SECURITY` names policy-protected tables, so it runs as `DEFINER` and applies its definer's policies; the message names the tables."
-
 [ER_SPRIG_STALE_EPOCH]
 meaning = "An internal request names an older epoch."
 
@@ -1401,26 +1583,8 @@ meaning = "HY000."
 [ER_SPRIG_XA_NOT_SUPPORTED]
 meaning = "HY000."
 
-[ER_SPRIG_TRANSLATE_LIMIT]
-meaning = "Lateral apply too large."
-
 [ER_SPRIG_CLAUSE_IGNORED]
 meaning = "ENCRYPTION, AUTOEXTEND_SIZE, SECONDARY_ENGINE."
-
-[ER_SPRIG_CURSOR_LIMIT]
-meaning = "MongoDB `SprigCursorLimit`: a new cursor past `mongo.max_cursors_per_tenant` or the cursor memory budget."
-
-[ER_SPRIG_DOC_ID_TOO_LONG]
-meaning = "MongoDB `SprigDocIdTooLong`: the encoded `_id` is over 1024 bytes."
-
-[ER_SPRIG_DOC_FEATURE_UNSUPPORTED]
-meaning = "MongoDB `SprigDocFeatureUnsupported`: `$where`, `mapReduce`, capped and time-series collections, and features not in this release."
-
-[ER_SPRIG_PATH_PUBLISH_TIMEOUT]
-meaning = "MongoDB `SprigPathPublishTimeout`: not every gateway confirmed a new array path within `doc.path_publish_timeout_ms`; nothing of the write committed (retryable)."
-
-[ER_SPRIG_DOC_TOO_DEEP]
-meaning = "MongoDB `SprigDocTooDeep`: a document nested deeper than MariaDB's JSON limit (32 levels)."
 
 [ER_SPRIG_TYPE_NOT_FOUND]
 meaning = "Unknown type."
@@ -1467,41 +1631,14 @@ meaning = "Watched object dropped or renamed."
 [ER_SPRIG_FEED_DIVERGED]
 meaning = "Failover lost delivered transactions (280)."
 
-[ER_SPRIG_REDIS_UNSUPPORTED]
-meaning = "SPRIG: a Redis 7.2 command not in this release."
-
-[ER_SPRIG_REDIS_LUA_UNSUPPORTED]
-meaning = "SPRIG: a Lua feature not offered (SCRIPT DEBUG, bytecode)."
-
-[ER_SPRIG_REDIS_RESTRICTED]
-meaning = "SPRIG: administrative command not offered."
-
 [ER_SPRIG_REDIS_TLS_REQUIRED]
 meaning = "SPRIG, then close."
-
-[ER_SPRIG_REDIS_MULTI_TOO_LARGE]
-meaning = "EXECABORT past redis.max_multi_commands."
-
-[ER_SPRIG_REDIS_TOO_MANY_BLOCKED]
-meaning = "SPRIG past redis.max_blocked_per_tenant."
-
-[ER_SPRIG_REDIS_SHARD_BUSY]
-meaning = "TRYAGAIN: cutover hold expired or retries spent."
 
 [ER_SPRIG_REDIS_CROSS_SHARD_TOO_LARGE]
 meaning = "SPRIG past redis.max_cross_shard_elements."
 
-[ER_SPRIG_REDIS_PUBSUB_UNAVAILABLE]
-meaning = "SPRIG: no hub reachable."
-
 [ER_SPRIG_REDIS_OUTPUT_BUFFER_LIMIT]
 meaning = "Logged; the client is closed, as Redis does."
-
-[ER_SPRIG_REDIS_LUA_BUDGET_EXCEEDED]
-meaning = "SPRIG: time or memory budget; rolled back."
-
-[ER_SPRIG_REDIS_LUA_UNDECLARED_KEY]
-meaning = "SPRIG: redis.call on a key not in KEYS."
 
 [ER_SPRIG_GRAPH_PLUGIN_FAILED]
 meaning = "Internal; the call falls back."
@@ -1514,54 +1651,6 @@ meaning = "Closed before the handshake."
 
 [ER_SPRIG_STUDIO_VERSION_MISMATCH]
 meaning = "Studio needs a newer API (409)."
-
-[ER_SPRIG_STREAM_TRUNCATED]
-meaning = "A failover lost records a consumer had seen (leader epoch moved)."
-
-[ER_SPRIG_KAFKA_ACKS_ZERO]
-meaning = "Acks=0: SprigDB always acknowledges after commit."
-
-[ER_SPRIG_KAFKA_TRANSACTIONS_UNSUPPORTED]
-meaning = "Transactional.id set."
-
-[ER_SPRIG_KAFKA_UNSUPPORTED_API]
-meaning = "An API or version not listed above."
-
-[ER_SPRIG_KAFKA_SASL_FAILED]
-meaning = "Authentication failed (also Kafka's SASL_AUTHENTICATION_FAILED)."
-
-[ER_SPRIG_KAFKA_NOT_COORDINATOR]
-meaning = "Group moved to another gateway (Kafka NOT_COORDINATOR, retryable)."
-
-[ER_SPRIG_KAFKA_QUOTA]
-meaning = "Over a tenant quota; the response carries throttle_time_ms."
-
-[ER_SPRIG_SHELL_PROFILE_INVALID]
-meaning = "`sprig`: the profiles file is unreadable or invalid, or names no such profile."
-
-[ER_SPRIG_SHELL_SECRET_UNAVAILABLE]
-meaning = "`sprig`: the OS keychain is unusable, or `secrets.toml` is readable by others."
-
-[ER_SPRIG_SHELL_CONFIRMATION_REQUIRED]
-meaning = "`sprig`: a destructive statement in CLI mode without `--yes`."
-
-[ER_SPRIG_SHELL_LANGUAGE_UNSUPPORTED]
-meaning = "`sprig`: the language can't be sent over the chosen transport."
-
-[ER_SPRIG_SHELL_SPRIGCTL_MISSING]
-meaning = "`sprig admin` found no `sprigctl` beside it or on the PATH."
-
-[ER_SPRIG_SHELL_PARSE]
-meaning = "`sprig`: input the shell can't split or parse."
-
-[ER_SPRIG_SHELL_CANCELLED]
-meaning = "`sprig`: the user cancelled the statement."
-
-[ER_SPRIG_SHELL_UNREACHABLE]
-meaning = "`sprig`: the gateway or native endpoint can't be reached."
-
-[ER_SPRIG_SHELL_INSECURE_TRANSPORT]
-meaning = "`sprig`: a password login over plain HTTP to another host, refused before sending."
 
 [ER_SPRIG_DOCS_UNAVAILABLE]
 meaning = "The docs pack isn't loaded or failed verification."

@@ -41,8 +41,6 @@ Commands:
   whoami           Who the Admin API takes you for
   operator         Named platform and DC operators
   token            Tokens you issue for scripts and services
-  feed             Change feeds
-  import           Copy data and index definitions from a live source
   help             Print this message or the help of the given subcommand(s)
 
 Options:
@@ -231,7 +229,7 @@ MariaDB clusters
 Usage: sprigctl cluster [OPTIONS] <COMMAND>
 
 Commands:
-  register      Precheck and register an external cluster
+  register      Check an existing MariaDB cluster and register it with SprigDB
   list          List the DC's clusters
   show          Show a cluster: nodes, health, capability profile, gaps
   probe         Probe a cluster now and publish what changed
@@ -259,7 +257,7 @@ Options:
 #### `sprigctl cluster register`
 
 ```text
-Precheck and register an external cluster
+Check an existing MariaDB cluster and register it with SprigDB
 
 Usage: sprigctl cluster register [OPTIONS] [name]
 
@@ -282,7 +280,7 @@ Options:
       --declare <declare>          A TOML file of [declared] facts
   -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
       --dry-run                    Show what would change
-      --memory-gb <memory-gb>      Server memory, GB (for tuning)
+      --memory-gb <memory-gb>      Server memory, GB (recorded; not used yet)
       --storage-gb <storage-gb>    Storage, GB (for placement)
       --yes                        Don't ask for confirmation
   -h, --help                       Print help
@@ -513,12 +511,14 @@ Commands:
   list       List tenants
   show       Show a tenant: state, ancestry, catalog cluster and versions
   delete     Delete a leaf tenant and drop its catalog
-  user       Users of a tenant (interim, until CREATE USER)
+  user       A tenant's users, created by an operator (inside the tenant, CREATE USER does the same)
   export     Export a tenant: schemas, rows, users and grants, settings
   import     Load a tenant export into a tenant and verify checksums and grants
   settings   The tenant's own setting rows (tenant, database and object scope)
   pin        Pin a tenant to its cluster and DC: the balancer won't move it; drains and residency changes report it as blocked
   unpin      Let the balancer manage a pinned tenant again
+  suspend    Suspend a tenant and its subtree: logins fail with 39303, open sessions close (auth.close_sessions_on_revoke), triggers, sinks and schedules wait
+  resume     Resume a suspended tenant: logins and background work start again
   move       Move a tenant to another data center, online
   traffic    A tenant's traffic by client data center, and the move it suggests
   failover   Fail a tenant over to its standby in another data center
@@ -633,7 +633,7 @@ Options:
 #### `sprigctl tenant user`
 
 ```text
-Users of a tenant (interim, until CREATE USER)
+A tenant's users, created by an operator (inside the tenant, CREATE USER does the same)
 
 Usage: sprigctl tenant user [OPTIONS] <COMMAND>
 
@@ -798,6 +798,53 @@ Options:
 Let the balancer manage a pinned tenant again
 
 Usage: sprigctl tenant unpin [OPTIONS] <name>
+
+Arguments:
+  <name>  The tenant
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+#### `sprigctl tenant suspend`
+
+```text
+Suspend a tenant and its subtree: logins fail with 39303, open sessions close (auth.close_sessions_on_revoke), triggers, sinks and schedules wait
+
+Usage: sprigctl tenant suspend [OPTIONS] --reason <reason> <name>
+
+Arguments:
+  <name>  The tenant
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --reason <reason>            Why; shown by tenant show and kept in the audit log
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+#### `sprigctl tenant resume`
+
+```text
+Resume a suspended tenant: logins and background work start again
+
+Usage: sprigctl tenant resume [OPTIONS] <name>
 
 Arguments:
   <name>  The tenant
@@ -1047,7 +1094,7 @@ Arguments:
 
 Options:
       --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --scope <scope>              The context in form, such as object:acme.shop.orders
+      --scope <scope>              The context as one string, such as object:acme.shop.orders
       --tenant <tenant>            A tenant's name
       --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
       --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
@@ -1084,7 +1131,7 @@ Options:
       --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
       --cluster <cluster>          A cluster id, such as mum1-c7
       --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or form: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
+      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or one context string: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
       --dc <dc>                    Data center to act in
       --reason <reason>            Why (audited)
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
@@ -1118,7 +1165,7 @@ Options:
       --cluster <cluster>          A cluster id, such as mum1-c7
       --dc <dc>                    Data center to act in
   -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or form: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
+      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or one context string: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
       --dry-run                    Show what would change
       --reason <reason>            Why (audited)
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
@@ -1153,7 +1200,7 @@ Options:
       --object <object>            An object (table, collection, ...) of the database, or <db>.<object>
       --cluster <cluster>          A cluster id, such as mum1-c7
       --dry-run                    Show what would change
-      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or form: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
+      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or one context string: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
       --yes                        Don't ask for confirmation
       --reason <reason>            Why (audited)
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
@@ -1180,7 +1227,7 @@ Options:
       --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
       --cluster <cluster>          A cluster id, such as mum1-c7
       --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or form: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
+      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or one context string: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
       --dc <dc>                    Data center to act in
       --reason <reason>            Why (audited)
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
@@ -1210,7 +1257,7 @@ Options:
       --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
       --cluster <cluster>          A cluster id, such as mum1-c7
       --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or form: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
+      --scope <scope>              global, dc, cluster, tenant, database or object (with --tenant, --db, --object, --cluster, --dc), or one context string: dc:<id>, cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>
       --dc <dc>                    Data center to act in
       --reason <reason>            Why (audited)
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
@@ -1421,7 +1468,7 @@ Options:
       --actor <actor>              Who, recorded as op:<actor> [default: $USER] [env: SPRIGCTL_ACTOR=]
       --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
       --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --off                        Unpin instead
+      --off                        Unpin instead (the same as `unpin`)
       --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
       --dc <dc>                    Data center to act in
   -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
@@ -4079,162 +4126,6 @@ Arguments:
 Options:
       --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
       --reason <reason>            Why (audited)
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-### `sprigctl feed`
-
-```text
-Change feeds
-
-Usage: sprigctl feed [OPTIONS] <COMMAND>
-
-Commands:
-  list
-  show
-  lag
-  help  Print this message or the help of the given subcommand(s)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-#### `sprigctl feed list`
-
-```text
-Usage: sprigctl feed list [OPTIONS] [args]...
-
-Arguments:
-  [args]...  Arguments (not parsed yet)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-#### `sprigctl feed show`
-
-```text
-Usage: sprigctl feed show [OPTIONS] [args]...
-
-Arguments:
-  [args]...  Arguments (not parsed yet)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-#### `sprigctl feed lag`
-
-```text
-Usage: sprigctl feed lag [OPTIONS] [args]...
-
-Arguments:
-  [args]...  Arguments (not parsed yet)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-### `sprigctl import`
-
-```text
-Copy data and index definitions from a live source
-
-Usage: sprigctl import [OPTIONS] <COMMAND>
-
-Commands:
-  mongodb
-  mysql
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-#### `sprigctl import mongodb`
-
-```text
-Usage: sprigctl import mongodb [OPTIONS] [args]...
-
-Arguments:
-  [args]...  Arguments (not parsed yet)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
-      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
-      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
-      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
-      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
-      --dc <dc>                    Data center to act in
-  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
-      --dry-run                    Show what would change
-      --yes                        Don't ask for confirmation
-  -h, --help                       Print help
-```
-
-#### `sprigctl import mysql`
-
-```text
-Usage: sprigctl import mysql [OPTIONS] [args]...
-
-Arguments:
-  [args]...  Arguments (not parsed yet)
-
-Options:
-      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
       --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
       --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
       --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]

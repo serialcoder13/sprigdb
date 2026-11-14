@@ -1,12 +1,11 @@
-//! MongoDB shapes in automatic indexing (chapter 13, "Other models",
-//! documents; R5; decisions S130-S133).
+//! MongoDB shapes in automatic indexing.
 //!
 //! A MongoDB command's fingerprint (`sprig_workload::fingerprint::mongo`)
 //! names the collection's table and one `json_path` predicate per
 //! top-level filter condition: `func` `mongo` for a path no document has
 //! held an array on, `mongo_multikey` for one that crosses an array, and
 //! `cmp` the condition. [`candidates`] turns the scalar ones into a
-//! **document index**: chapter 31's index on field columns, built the way
+//! **document index**: an index on field columns, built the way
 //! `createIndexes` builds one, so the document engine plans with it like a
 //! user index once it is registered in `doc_indexes` with origin `auto`.
 //!
@@ -14,7 +13,7 @@
 //! paths := equalities (=, $in, null) by path, then one range, at most
 //!          MAX_PATHS (no sort: the engine reads in _id order and sorts in
 //!          the gateway)
-//! each path p := the pair of field columns of chapter 31
+//! each path p := the pair of field columns of the document engine
 //!          (_sprig_p_<slug>_c, _n, _s)
 //! definition := field_column(c1, n1, s1, c2, ...); options doc.<i> = path
 //! ```
@@ -22,7 +21,7 @@
 //! The columns are `VIRTUAL`: builds add them instantly first
 //! ([`add_fields_clause`]), then build the index online; the index costs
 //! every write that changes `doc`. A path crossing an array would need
-//! chapter 31's side table (a multikey index), which isn't built: such
+//! a side table (a multikey index), which isn't built: such
 //! shapes are skipped with the reason `doc_multikey`.
 //!
 //! **Replay.** A MongoDB sample is the condition values by slot, not SQL.
@@ -61,8 +60,8 @@ pub const MAX_PATHS: usize = 3;
 /// `_id`-ordered batches).
 pub const FIRST_BATCH: u32 = 1000;
 
-/// Whether `stats` describe a collection table (chapter 31: `_id`, `doc`,
-/// `_types`, `_v`).
+/// Whether `stats` describe a collection table (`_id`, `doc`, `_types`,
+/// `_v`).
 #[must_use]
 pub fn is_collection_table(stats: &TableStats) -> bool {
     ["_id", DOC_COLUMN, "_types", "_v"]
@@ -213,7 +212,7 @@ pub fn candidates(
         .collect();
     // Equalities, then one range. Not the sort (MongoDB's equality-sort-
     // range rule): the engine reads the collection in `_id` order and
-    // sorts in the gateway, so an index's order would serve nothing (S131).
+    // sorts in the gateway, so an index's order would serve nothing.
     if paths.len() < MAX_PATHS
         && let Some(r) = range
             .into_iter()
@@ -257,7 +256,7 @@ pub fn bytes(def: &IndexDef, stats: &TableStats) -> f64 {
     stats.rows() * (paths * (1.0 + 8.0 + s) + stats.pk_length() + 14.0) / 0.75
 }
 
-/// The class code (chapter 31's MongoDB order) and the field column a
+/// The class code and the field column a
 /// sampled value compares on: `false` for the number column, `true` for
 /// the string column.
 fn class_of(v: &SampleValue) -> Option<(u8, bool)> {
@@ -311,7 +310,7 @@ fn eq_text(path: &str, v: &SampleValue) -> Option<String> {
 /// document index `def` (module docs), in logical names; `None` when the
 /// index holds none of its paths or a value has no field column.
 #[must_use]
-#[allow(clippy::many_single_char_names)] // c, n, s: chapter 31's pair columns
+#[allow(clippy::many_single_char_names)] // c, n, s: the pair columns
 pub fn replay_sql(shape: &Shape, sample: &SampledLiterals, def: &IndexDef) -> Option<String> {
     let t = shape.main_table()?;
     let db = t.db.as_deref()?;

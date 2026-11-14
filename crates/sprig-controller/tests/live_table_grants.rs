@@ -1,5 +1,5 @@
-//! bugfix-25 (decisions/bugfix-interim.md): table, column and routine
-//! grants follow a table through regroups, splits, merges and moves.
+//! Table, column and routine grants follow a table through regroups,
+//! splits, merges and moves.
 //!
 //! - A user whose only privileges are on single tables, columns and a
 //!   procedure of `gr` (`GRANT ... ON gr.cust`, `GRANT SELECT (k, v),
@@ -333,7 +333,7 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
                 "DROP PROCEDURE IF EXISTS gr.pcount",
                 // The routine names no table: a body naming a table the
                 // advisor regroups fails with 1146 for every user once the
-                // table leaves the default schema (bugfix-28).
+                // table leaves the default schema.
                 "CREATE PROCEDURE gr.pcount() SELECT 41 + 1",
                 "CREATE USER IF NOT EXISTS 'tbl'@'%' IDENTIFIED BY 'sprig-table-grants-pw'",
                 "GRANT SELECT, INSERT, UPDATE ON gr.cust TO 'tbl'@'%'",
@@ -529,7 +529,7 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
             t.ok, t.errors, t.first
         );
         // 1205: the gateway's fence wait running out while the data kept
-        // moving (H3); drivers retry it. Anything else is a failure.
+        // moving; drivers retry it. Anything else is a failure.
         for (k, v) in &t.errors {
             if k != "1205" {
                 failed.push(format!("table user: {v} x {k}: {}", t.first[k]));

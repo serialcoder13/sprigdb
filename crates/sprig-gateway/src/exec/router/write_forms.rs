@@ -1,5 +1,4 @@
-//! R3's write forms (chapter 17, "`INSERT … SELECT` and `LOAD DATA` (R3)"):
-//! statements that write a sharded table from rows the router can't route
+//! Write forms (`INSERT … SELECT` and `LOAD DATA`): statements that write a sharded table from rows the router can't route
 //! as one statement.
 //!
 //! ```text

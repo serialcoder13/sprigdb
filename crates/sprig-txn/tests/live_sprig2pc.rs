@@ -1,4 +1,4 @@
-//! Sprig 2PC live (chapter 18, R3): two separate single-node Galera
+//! Sprig 2PC live: two separate single-node Galera
 //! clusters with `wsrep_on` (MariaDB refuses `XA START` there with 1235),
 //! policy `sprig_2pc`.
 //!

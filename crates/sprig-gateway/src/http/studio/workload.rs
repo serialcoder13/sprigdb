@@ -1,5 +1,4 @@
-//! `Workload.ListFingerprints` and `Workload.Series` (chapter 37, "APIs
-//! for Studio"; chapter 44, "Automatic indexing": the Fingerprints and
+//! `Workload.ListFingerprints` and `Workload.Series` (the Fingerprints and
 //! Before-and-after views), for the caller's own tenant.
 //!
 //! | Route | Does |
@@ -7,7 +6,7 @@
 //! | `GET /v1/workload/fingerprints?hours=&limit=&source=` | Top fingerprints by total time over the last `hours` (24): runs, errors, p50, p95, max, rows examined per row returned, unsargable predicates, and `caller` (`studio` for Studio's own runs) |
 //! | `GET /v1/workload/fingerprints/{id}/series?days=` | One fingerprint per bucket over the last `days` (7): runs, p50, p95, total |
 //!
-//! Both read chapter 12's tables in the tenant's catalog directly (the
+//! Both read the workload tables in the tenant's catalog directly (the
 //! gateway already reaches the catalog writer), so they need no controller
 //! call. A fingerprint is shown only when the caller has a privilege on its
 //! database (any grant naming it, or `*.*`) or is a tenant administrator:
@@ -156,8 +155,8 @@ pub(super) async fn list(
     let seen = visible(core, caller).await?;
     let (mut conn, t, cat) = tables(core, caller).await?;
     let to = SystemTime::now() + Duration::from_secs(3600);
-    // From the start of the hour: older buckets are rolled up to hours
-    // (chapter 12), so a window cut mid-hour would miss them.
+    // From the start of the hour: older buckets are rolled up to hours,
+    // so a window cut mid-hour would miss them.
     let from_s = secs(SystemTime::now()).saturating_sub(hours * 3600) / 3600 * 3600;
     let from = UNIX_EPOCH + Duration::from_secs(from_s);
     let window = t.window(&mut conn, cat.tenant, from, to).await?;

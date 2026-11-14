@@ -1,5 +1,5 @@
-//! `errant_extract` and `node_rebuild` with the real binaries (chapter 25,
-//! "Recovery after an outage" steps 2-3; r2close).
+//! `errant_extract` and `node_rebuild` with the real binaries: recovery of
+//! a diverged writer after an outage.
 //!
 //! ```sh
 //! cargo build -p sprigdb -p sprigctl
@@ -31,7 +31,7 @@
 //! `sprigctl cluster rebuild` of the healthy replica `db3` from `db1`,
 //! and the refusal to rebuild the writer.
 //!
-//! With `SPRIG_TEST_INTERNAL_TLS=1` (r2final, decision RC2) every process
+//! With `SPRIG_TEST_INTERNAL_TLS=1` every process
 //! gets a `[tls]` section from a test CA (etcd runs with client
 //! certificates too): the agents' internal services are mutual TLS, the
 //! backups stream over it, and the test checks that a plain-HTTP request
@@ -63,11 +63,11 @@ const ROOT_PW: &str = "sprig-r2close-root";
 const REPL_PW: &str = "sprig-r2close-repl";
 const DEPLOYMENT: &str = "sprigdb-r2close";
 const DC: &str = "fra1";
-/// A tenant-shaped schema (rule 8b's range for port 41406), only on this
-/// test's own containers.
+/// A tenant-shaped schema (in the tenant id range of a private deployment
+/// on port 41406: port x 100,000), only on this test's own containers.
 const SCHEMA: &str = "t4140600001_r2close";
 
-// This agent's ports: 41426-41442.
+// This test's ports: 41426-41442.
 const CTL_ADMIN: u16 = 41426;
 const CTL_INTERNAL: u16 = 41427;
 const CTL_TEL: u16 = 41428;
@@ -77,7 +77,7 @@ const AGENT_TEL: [u16; 3] = [41440, 41441, 41442];
 /// The rebuild stream's cap for the test, MB/s.
 const RATE_MB: u64 = 20;
 
-/// `SPRIG_TEST_INTERNAL_TLS=1`: every process with `[tls]` (RC2).
+/// `SPRIG_TEST_INTERNAL_TLS=1`: every process with `[tls]`.
 fn internal_tls() -> bool {
     std::env::var_os("SPRIG_TEST_INTERNAL_TLS").is_some_and(|v| v == "1")
 }
@@ -581,7 +581,7 @@ async fn deploy() -> Option<Deployment> {
         ),
     )
     .expect("creds");
-    // The workers' extract keyring (chapter 12's format).
+    // The workers' extract keyring (the workload keyring's format).
     std::fs::write(
         work.join("extract.keys"),
         "# r2close test key\n1 7f1c0d2e3a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5\n",
@@ -1146,7 +1146,7 @@ async fn bins_diverged_writer_is_extracted_and_rebuilt() {
     d.done();
 }
 
-/// RC2: the agents publish `https://` services, plain HTTP gets nothing,
+/// Internal TLS: the agents publish `https://` services, plain HTTP gets nothing,
 /// a client certificate from another CA gets nothing, and one of the
 /// internal CA does (a refused token: 403, never a backup).
 async fn tls_checks(d: &Deployment, cluster: &str) {

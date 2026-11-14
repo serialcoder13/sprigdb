@@ -300,7 +300,7 @@ fn functions() {
 
 #[test]
 fn statement_digests() {
-    // R4 round 5: the gateway's digests in MySQL's digest summary and sys views.
+    // The gateway's digests in MySQL's digest summary and sys views.
     let v = vars();
     let d = [PsDigest {
         schema: Some("shop".to_owned()),
@@ -386,7 +386,7 @@ fn statement_digests() {
 
 #[test]
 fn show_tables_in_the_system_schemas() {
-    // R4 round 5: after `USE performance_schema`, and named.
+    // After `USE performance_schema`, and named.
     let s = rw("SHOW TABLES", Some("performance_schema"))
         .unwrap()
         .unwrap();

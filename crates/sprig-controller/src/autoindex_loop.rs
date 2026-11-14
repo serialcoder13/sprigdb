@@ -1,12 +1,11 @@
-//! The `auto_index` loop (chapter 13 "Flows", chapter 23's DC-leader loop
-//! table): evaluate → validate → roll out → observe, per tenant, paced.
+//! The `auto_index` loop, on the DC leader: evaluate → validate → roll out → observe, per tenant, paced.
 //!
 //! ```text
 //! auto_index (DC leader), key = tenant homed here and active:
 //!   pass(tenant):
-//!     1. every eval_every: CandidateSource::evaluate (steps 2-5), which writes
+//!     1. every eval_every: CandidateSource::evaluate (trigger evaluation), which writes
 //!        its own `validating` rows; the retirements it returns are applied
-//!     2. each `validating` row: ValidationHook::validate                (steps 7-9 hook)
+//!     2. each `validating` row: ValidationHook::validate                (validation hook)
 //!        accepted → `rolling_out` (mode on, a build method exists)
 //!                   or `recommended` (mode recommend, advice, no method)
 //!        rejected → `rejected`
@@ -15,33 +14,33 @@
 //!     4. each serving, retiring, dropping or failed row: observe::step
 //!     4b. every user_every, each table read in the last hour or holding a
 //!         retiring or recommended user index: observe::user::object_pass
-//!         (decision O1: user and migrated indexes judged by usage)
+//!         (user and migrated indexes judged by usage)
 //!     5. every drift_every, each object with live rows: observe::drift
 //!   requeue after the soonest of: a rollout's next try, the next observation,
 //!   the next evaluation (bounded to [min_requeue, max_requeue])
 //! ```
 //!
 //! Objects whose `auto_index.mode` is `off` are skipped entirely: nothing
-//! is built, observed or dropped for them (chapter 13: existing indexes
-//! are kept as they are).
+//! is built, observed or dropped for them (existing indexes are kept as
+//! they are).
 //!
-//! **Builds run in the controller in M0.4.** Chapter 13 makes them worker
-//! jobs (`auto_index_build`), but the worker role has no job runtime yet.
-//! The loop runs them itself, on the DC leader only, and keeps chapter 23's
-//! slot rule: a build starts only while fewer than
+//! **Builds run in the controller.** They are meant to become worker jobs
+//! (`auto_index_build`), but the worker role has no job runtime for them
+//! yet. The loop runs them itself, on the DC leader only, and keeps the
+//! scheduler's slot rule: a build starts only while fewer than
 //! `auto_index.max_builds_per_cluster` builds hold the cluster, counting
 //! this process's builds, `sprig_auto_*` builds running on the writer (a
 //! deposed leader's, say) and the scheduler's `build`-class jobs. A deposed
 //! leader's reconcile is dropped, and its build killed with it
 //! ([`KillGuard`](sprig_advisor::autoindex::rollout::node::KillGuard)).
 //!
-//! **Hooks.** [`CandidateSource`] is trigger evaluation (steps 2-5,
-//! `autoindex_env::EvalShim`); [`ValidationHook`] runs a validator for a
+//! **Hooks.** [`CandidateSource`] is trigger evaluation
+//! (`autoindex_env::EvalShim`); [`ValidationHook`] runs a validator for a
 //! `validating` row (`autoindex_validate::SampleValidation`);
-//! [`WorkloadSource`] is chapter 12's store as the observer reads it
-//! (`autoindex_workload::ObserveSource`); [`ShardLocks`] and [`CopySwapHook`] are chapter 10's.
-//! [`JobShardLocks`] implements the shard lock from the job list: no build
-//! while a copy job runs for the tenant (chapter 23, rule 3b).
+//! [`WorkloadSource`] is the workload store as the observer reads it
+//! (`autoindex_workload::ObserveSource`); [`ShardLocks`] and
+//! [`CopySwapHook`] are the mover's. [`JobShardLocks`] implements the shard
+//! lock from the job list: no build while a copy job runs for the tenant.
 
 #[cfg(test)]
 mod tests;
@@ -90,8 +89,8 @@ pub struct Evaluated {
     pub retire: Vec<(ObjectId, String, DropReason)>,
 }
 
-/// Trigger evaluation and selection (chapter 13 steps 2-5,
-/// `sprig_advisor::autoindex::evaluate`). It writes its own rows: routed
+/// Trigger evaluation and selection
+/// (`sprig_advisor::autoindex::evaluate`). It writes its own rows: routed
 /// candidates as `validating` (recommend-routed ones carry
 /// `observed = {"route": "recommend"}`), with its re-proposal rules (a
 /// dropped or failed row of the same name is reused; a rejected one blocks
@@ -134,8 +133,8 @@ pub enum Validated {
     Pending,
 }
 
-/// Validation of a `validating` row (chapter 13 steps 7-9): builds the
-/// validation plan (samples from chapter 12) and runs the cluster's
+/// Validation of a `validating` row: builds the validation plan (samples
+/// from the workload store) and runs the cluster's
 /// validator.
 #[async_trait::async_trait]
 pub trait ValidationHook: Send + Sync {
@@ -188,7 +187,7 @@ pub struct ObjectEnv {
     /// Validation settings, resolved at the object (the replay keys, the
     /// thresholds, lock waits and the estimate margin).
     pub validation: ValidationSettings,
-    /// The object's database: id and name (chapter 52's items name it).
+    /// The object's database: id and name (approval items name it).
     pub db: Option<(sprig_common::ids::DbId, String)>,
 }
 
@@ -222,23 +221,22 @@ pub trait AutoIndexEnv: Send + Sync {
 /// The loop's hooks.
 #[derive(Clone)]
 pub struct AutoIndexHooks {
-    /// Step 2.
+    /// Trigger evaluation and selection.
     pub candidates: Arc<dyn CandidateSource>,
-    /// Steps 7-9.
+    /// Validation.
     pub validation: Arc<dyn ValidationHook>,
-    /// Chapter 12's store, for observation.
+    /// The workload store, for observation.
     pub workload: Arc<dyn WorkloadSource>,
-    /// Chapter 10's shard locks.
+    /// The mover's shard locks.
     pub locks: Arc<dyn ShardLocks>,
-    /// Chapter 10's copy-and-swap (M0.6).
+    /// The mover's copy-and-swap.
     pub mover: Option<Arc<dyn CopySwapHook>>,
     /// Takes Galera nodes out of service during rolling builds.
     pub marker: Arc<dyn NodeMarker>,
     /// Decisions.
     pub decisions: Arc<dyn DecisionLog>,
-    /// Chapter 31's `doc_indexes` rows of automatic document indexes
-    /// (S133); `None` registers none (tests, controllers that don't change
-    /// tenant catalogs).
+    /// The `doc_indexes` rows of automatic document indexes; `None`
+    /// registers none (tests, controllers that don't change tenant catalogs).
     pub docs: Option<Arc<crate::autoindex_doc::DocRegistry>>,
 }
 
@@ -261,7 +259,7 @@ pub struct Cadence {
     pub min_requeue: Duration,
     /// The longest requeue.
     pub max_requeue: Duration,
-    /// User and migrated indexes' usage pass (decision O1); each index is
+    /// User and migrated indexes' usage pass; each index is
     /// counted at most every `usage_every` of its table.
     pub user_every: Duration,
     /// The longest a pass may hold its catalog connection, apart from its
@@ -337,7 +335,7 @@ pub struct Memory {
     pub last_drift: Option<SystemTime>,
     /// The last pass over user and migrated indexes.
     pub last_user: Option<SystemTime>,
-    /// The last pass saw an automatic document index (S133): the next one
+    /// The last pass saw an automatic document index: the next one
     /// reconciles `doc_indexes` even when none is left.
     pub docs_seen: bool,
 }
@@ -405,7 +403,7 @@ pub async fn tenant_pass(
     }
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // chapter 13's five steps
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // the pass's five steps
 async fn pass(
     env: &dyn AutoIndexEnv,
     hooks: &AutoIndexHooks,
@@ -450,7 +448,7 @@ async fn pass(
     let mut states = vec![IndexState::Validating, IndexState::RollingOut];
     states.extend(SERVING);
     let rows = store.indexes_in(&mut q, &states).await?;
-    // Automatic document indexes in chapter 31's catalog (S133).
+    // Automatic document indexes in the catalog.
     if let Some(d) = &hooks.docs {
         let any = rows
             .iter()
@@ -607,7 +605,7 @@ async fn pass(
         }
     }
 
-    // 4b. User and migrated indexes (decision O1).
+    // 4b. User and migrated indexes.
     let user_due = memory
         .last_user
         .is_none_or(|t| now < t || now.duration_since(t).unwrap_or_default() >= cadence.user_every);
@@ -827,9 +825,9 @@ async fn table_bytes(o: &ObjectEnv) -> u64 {
     max
 }
 
-/// Chapter 10's shard lock from the DC's job list: a tenant's shard is
-/// "moving" while any copy-class job of the tenant isn't final (R0 applies
-/// it per tenant, as dispatch does).
+/// The mover's shard lock from the DC's job list: a tenant's shard is
+/// "moving" while any copy-class job of the tenant isn't final (applied
+/// per tenant, as dispatch does).
 #[derive(Clone)]
 pub struct JobShardLocks {
     dc: Arc<dyn MetaStore>,
@@ -1003,7 +1001,8 @@ impl Reconciler for AutoIndexLoop {
 }
 
 /// Bootstrap hooks that add the `autoindex` catalog module to `H`'s, so
-/// every new tenant catalog gets chapter 13's tables with its core tables.
+/// every new tenant catalog gets the automatic-indexing tables with its
+/// core tables.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WithAutoIndex<H>(pub H);
 

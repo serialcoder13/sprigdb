@@ -1207,7 +1207,9 @@ pub async fn reset(
     layer_op("reset");
     // A hierarchy's paths follow the reset records in this space and below
     // (decision T22).
-    if let Some(h) = crate::hier::hierarchy_of(ctx, &res.obj).filter(|_| crate::hier::has_paths(&res.obj)) {
+    if let Some(h) =
+        crate::hier::hierarchy_of(ctx, &res.obj).filter(|_| crate::hier::has_paths(&res.obj))
+    {
         let tx = Txn::begin(tr(r)).await?;
         let result = async {
             let keys = crate::hier::reset_keys(ctx, r, &res, &h, &cond).await?;

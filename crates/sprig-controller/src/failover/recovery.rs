@@ -1,4 +1,4 @@
-//! Recovery after an outage (chapter 25, "Recovery after an outage"): the
+//! Recovery after an outage: the
 //! returning DC stays fenced, diverged transactions are reported, traffic
 //! returns in steps.
 //!
@@ -37,7 +37,7 @@ use super::promote::quarantine_maps;
 use super::record::ErrantReport;
 
 /// Fences one tenant's copy in the returning DC (revoke write grants,
-/// `KILL USER`, or the mover's rename fence; chapter 10's fences).
+/// `KILL USER`, or the mover's rename fence).
 #[async_trait::async_trait]
 pub trait CopyFence: Send + Sync {
     /// Fences `tenant`'s copy in this DC; idempotent.

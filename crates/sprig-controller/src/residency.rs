@@ -1,4 +1,4 @@
-//! Data residency (chapter 26; R2 items 4): a tenant's policy over DC
+//! Data residency: a tenant's policy over DC
 //! tags, resolved to its allowed DCs, enforced at every place the tenant's
 //! data can move to another DC, and converged when it changes.
 //!
@@ -32,7 +32,7 @@
 //! | Manual failover, standbys (`failover::manual`) | target / standby DC in the set (39505) |
 //! | Placement (`balancer_loop`) | the set in each tenant's view: no cluster with a DC outside it |
 //! | New tenants (`tenants`) | a child's home must be in its parent's set (39507) |
-//! | Logins (gateway) | outside the set: handed to an allowed DC (chapter 14), or 39302 |
+//! | Logins (gateway) | outside the set: handed to an allowed DC, or 39302 |
 //!
 //! A missing or malformed `allowed_dcs` in a residency block allows
 //! nothing (fail closed). The global tier being unreachable leaves every
@@ -85,8 +85,7 @@ fn list_dcs(set: &BTreeSet<DcId>) -> String {
     set.iter().map(DcId::as_str).collect::<Vec<_>>().join(", ")
 }
 
-/// The directory entry's `residency` block (chapter 26, "Data structures
-/// and storage").
+/// The directory entry's `residency` block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResidencyBlock {
     /// The tenant's own policy; empty: whatever the ancestors allow.
@@ -134,9 +133,8 @@ impl ResidencyBlock {
     }
 }
 
-/// The DCs a cluster's data is in: its own, and every replica's (chapter
-/// 26, "The cluster-level replica rule"). Backup targets join when chapter
-/// 47's backups exist.
+/// The DCs a cluster's data is in: its own, and every replica's (the
+/// cluster-level replica rule). Backup targets join once backups exist.
 #[must_use]
 pub fn cluster_dcs(c: &ClusterRecord) -> BTreeSet<DcId> {
     let mut out = BTreeSet::from([c.dc_id.clone()]);
@@ -280,7 +278,7 @@ pub fn standby_dcs(raw: &Map<String, Value>) -> Vec<DcId> {
 /// One step of a compliance plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Move the tenant's home (a `tenant_migration`, chapter 24).
+    /// Move the tenant's home (a `tenant_migration`).
     MoveHome {
         /// From.
         from: DcId,
@@ -299,8 +297,7 @@ pub enum Step {
     /// A move in progress whose target is outside the set: its commit is
     /// refused.
     StopMove(DcId),
-    /// Pause a change-feed subscription consumed outside the set (chapter
-    /// 38): no new consumer job starts there.
+    /// Pause a change-feed subscription consumed outside the set: no new consumer job starts there.
     PauseFeed {
         /// The DC whose workers consume it.
         dc: DcId,
@@ -1217,8 +1214,8 @@ impl Reconciler for ResidencyLoop {
     }
 }
 
-/// Checks a new child's home against its parent's set (chapter 26: a
-/// child's residency lies within its ancestors'). Returns the block the
+/// Checks a new child's home against its parent's set (a child's
+/// residency lies within its ancestors'). Returns the block the
 /// child inherits, if the parent has one.
 ///
 /// # Errors

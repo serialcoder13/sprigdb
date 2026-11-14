@@ -1,5 +1,4 @@
-//! RL14 (r2harden): a mover's fence never reaches a client as 1146 or
-//! 1049 (chapter 10, "Sessions during cutover").
+//! A mover's fence never reaches a client as 1146 or 1049.
 //!
 //! A move's cutover holds the tenant's map, waits `mover.txn_grace_ms`,
 //! then renames the source's tables away (the rename fence); after the
@@ -16,7 +15,7 @@
 //!   held back from the client
 //!   fence := the database it names is one the tenant has, and the
 //!            token moved or a range is held: in the watched copy, else in
-//!            etcd itself (one listing, R34), else (etcd didn't answer)
+//!            etcd itself (one listing), else (etcd didn't answer)
 //!            after waiting up to 1 s for the watch to show it
 //!   not a fence                         -> the ERR goes out as it was
 //!   fence, inside a transaction         -> 1213 (the transaction was on the
@@ -27,11 +26,11 @@
 //! ```
 //!
 //! A DC failover fences the old home by revoking the tenant's write
-//! privileges there (RL13); a write a lagging gateway still sent there gets
+//! privileges there; a write a lagging gateway still sent there gets
 //! 1142, handled the same way (the database check is skipped and the wait
 //! for the watch is 300 ms).
 //!
-//! **What a genuine error costs (R34, bugfix5).** A table that really
+//! **What a genuine error costs.** A table that really
 //! doesn't exist used to cost up to [`SETTLE`]: the gateway waited for its
 //! watch in case it lagged behind a hold. Now it lists the tenant's maps in
 //! etcd once (a linearizable read, about a millisecond): a mover writes its
@@ -71,10 +70,10 @@ pub(super) const MAX_ATTEMPTS: u32 = 3;
 /// How long one request may spend meeting fences, all attempts together.
 pub(super) const MAX_TOTAL: Duration = Duration::from_secs(10);
 /// How long the gateway waits for its watch to show the move that a 1146
-/// suggests, when etcd itself can't be asked (R34), before it treats the
+/// suggests, when etcd itself can't be asked, before it treats the
 /// error as the table's own; also the bound on etcd's answer.
 const SETTLE: Duration = Duration::from_secs(1);
-/// The same for a 1142 (the old home fenced by a failover, RL13): the
+/// The same for a 1142 (the old home fenced by a failover): the
 /// maps were quarantined before the fence, so the watch rarely lags.
 const REVOKED_SETTLE: Duration = Duration::from_millis(300);
 
@@ -119,7 +118,7 @@ fn known_db(e: &SprigError, map: &MemoryNameMap) -> bool {
 
 /// Whether the request that failed with `e` met a mover's fence: the
 /// database is the tenant's and its maps moved (or are held) since
-/// `before`, as the watched copy shows it, else as etcd itself does (R34),
+/// `before`, as the watched copy shows it, else as etcd itself does,
 /// else (etcd didn't answer) waiting up to [`SETTLE`] for the watch to
 /// show it.
 pub(super) async fn met_fence(
@@ -145,7 +144,7 @@ pub(super) async fn met_fence(
     if now.2 || now != *before {
         return true;
     }
-    // R34: etcd itself, whatever the watch's lag (module docs). Asked only
+    // Etcd itself, whatever the watch's lag (module docs). Asked only
     // once the watched copy has loaded: `before` is from that copy.
     let mut confirmed = false;
     if locator.maps_loaded(tenant) {
@@ -316,15 +315,15 @@ impl PassSession {
         let mut attempts = 0u32;
         let mut counted = false;
         loop {
-            // Tenant sessions wait out a mover's hold, a promotion (RL13),
+            // Tenant sessions wait out a mover's hold, a promotion,
             // and follow a move.
             self.follow_tenant().await?;
-            // Chapter 25 (R2): writes of tenants homed here need the DC's
+            // Writes of tenants homed here need the DC's
             // permit, and so do their acknowledgements.
             let gate = self.dc_write_gate(&req).await?;
             if !counted {
                 self.count_traffic(cx, &req);
-                // The session's SHOW STATUS counters (gaps row 46): once
+                // The session's SHOW STATUS counters: once
                 // per request, however often a fence makes it run again.
                 self.count_request(&req, cx.session);
                 counted = true;
@@ -332,7 +331,7 @@ impl PassSession {
             let memo = &mut self.placement_memo;
             let watch = self.tenant.as_deref().map(|ts| {
                 let locator = std::sync::Arc::clone(&ts.services().locator);
-                // Kept per map generation (S148).
+                // Kept per map generation.
                 let token = memo.maps_token(&locator, ts.tenant);
                 (locator, ts.tenant, ts.map(), token)
             });
@@ -429,7 +428,7 @@ mod tests {
     }
 
     mod fresh {
-        //! R34 (bugfix5): a genuine 1146 is answered at once; a fence the
+        //! A genuine 1146 is answered at once; a fence the
         //! watch hasn't shown is still met.
         #![allow(clippy::unwrap_used)]
 
@@ -541,7 +540,7 @@ mod tests {
             let t0 = Instant::now();
             assert!(!met_fence(&l, T, &map, &before, &missing()).await);
             let took = t0.elapsed();
-            // Before R34's fix: SETTLE (1 s).
+            // Before etcd was asked: SETTLE (1 s).
             assert!(took < Duration::from_millis(200), "took {took:?}");
             // A privilege really missing: before, REVOKED_SETTLE (300 ms).
             let denied = SprigError::backend(1142, *b"42000", "INSERT command denied");
@@ -561,7 +560,7 @@ mod tests {
             // The mover holds the map, then renames: the watch shows neither.
             put_map(&store, true).await;
             assert_eq!(l.maps_token(T), before, "the watch must lag here");
-            // Before R34's fix: not a fence after 1 s (the 1146 reached
+            // Before etcd was asked: not a fence after 1 s (the 1146 reached
             // the client).
             assert!(met_fence(&l, T, &map, &before, &missing()).await);
             // The hold released (the cutover committed): still a fence for

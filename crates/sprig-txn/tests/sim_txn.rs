@@ -1,7 +1,6 @@
-//! Distributed transactions under deterministic simulation (chapter 18,
-//! "Testing"; chapter 46; build step 9; the R1 done-when item "XA
-//! transactions survive coordinator and participant crashes in simulation,
-//! with no partial commits after recovery").
+//! Distributed transactions under deterministic simulation: XA
+//! transactions survive coordinator and participant crashes, with no
+//! partial commits after recovery.
 //!
 //! The real coordinator and resolver run against the MariaDB model: a
 //! single node `a` and a semi-sync primary `b` with one replica (both with
@@ -30,7 +29,7 @@
 //!    means the rows are there, an abort row that they are not.
 //! 6. Cleanup: no commit row is left once its participants finished.
 //!
-//! Sprig 2PC (R3, chapter 18): the same world with policy `sprig_2pc`,
+//! Sprig 2PC: the same world with policy `sprig_2pc`,
 //! mostly on three Galera clusters and nothing else (no XA anywhere), the
 //! rest mixed with the XA clusters. Held branches record their writes,
 //! prepare by writing redo rows, and commit by deleting them inside the
@@ -38,7 +37,7 @@
 //! lost and drops aborted ones. The invariants above hold, and no redo
 //! row is left after recovery.
 //!
-//! The relay fence (decision Q36, chapter 18 "The relay fence"): the same
+//! The relay fence: the same
 //! Sprig 2PC world with an agent per Galera writer node (`g1a`, `g2a`,
 //! `g3a`) whose relay carries every gateway connection to that node and
 //! runs `sprig_txn::fence::RelayFence`, a second gateway `gw2` writing the
@@ -49,7 +48,7 @@
 //!
 //! 7. Isolation: every hot row's final list holds each committed append
 //!    exactly once and nothing else.
-//! 8. Read your writes (decision Q37): after `COMMIT` answered OK, the
+//! 8. Read your writes: after `COMMIT` answered OK, the
 //!    session's next read of each cluster it wrote sees its row.
 //!
 //! The `#[ignore]`d tests run without the fence, and with reads that skip
@@ -57,7 +56,7 @@
 //! the fence and the settling fix.
 //!
 //! `SPRIG_SIM_SEEDS=10000 cargo test -p sprig-txn --test sim_txn` runs
-//! the milestone's 10,000 seeds; CI runs the default.
+//! 10,000 seeds; CI runs the default.
 
 #![allow(
     clippy::unwrap_used,
@@ -250,7 +249,7 @@ impl Env {
 }
 
 // ----------------------------------------------------------------------
-// The node agent's relay (decision Q36).
+// The node agent's relay.
 
 /// One relayed connection, as the agent holds it.
 struct Link {
@@ -1293,7 +1292,7 @@ struct Scenario {
     /// through the coordinator (which settles stragglers first),
     /// `Some(false)` on a plain connection that doesn't (invariant 8).
     ryw: Option<bool>,
-    /// Galera writer nodes' agents relay every connection (decision Q36).
+    /// Galera writer nodes' agents relay every connection.
     fence: bool,
     /// A second gateway writes the same rows.
     gw2: bool,
@@ -1393,8 +1392,8 @@ async fn read_back(
         Outcome::Err(_) => None,
     };
     if !settled {
-        // A plain connection, as a read outside the coordinator was before
-        // decision Q37.
+        // A plain connection, as a read outside the coordinator once was,
+        // without settling the session's phase-2 stragglers.
         let d = &CLUSTERS[i];
         let c = backend
             .env
@@ -1609,13 +1608,13 @@ async fn setup(env: &Env) {
 /// Which world a test runs.
 #[derive(Debug, Clone, Copy)]
 enum Kind {
-    /// XA and best effort (R1).
+    /// XA and best effort.
     Xa,
-    /// Sprig 2PC, as built in R3 (no relay).
+    /// Sprig 2PC without the relay.
     Sprig,
     /// Sprig 2PC with read-modify-write hot rows, a second gateway and
-    /// orphaned statements; `fence`: the relays (decision Q36); `ryw`:
-    /// read each row back after an OK commit (decision Q37).
+    /// orphaned statements; `fence`: the relays; `ryw`:
+    /// read each row back after an OK commit.
     Isolation { fence: bool, ryw: Option<bool> },
 }
 
@@ -2083,7 +2082,7 @@ fn xa_transactions_survive_coordinator_and_participant_crashes() {
     print_totals("xa");
 }
 
-/// The R3 done-when item: Sprig 2PC passes the XA crash simulations on
+/// Sprig 2PC passes the XA crash simulations on
 /// all-Galera (coordinator crashes at every step, participant kills,
 /// pauses and partitions), with no partial commit after recovery.
 #[test]
@@ -2116,12 +2115,12 @@ fn isolation_plan(rng: &SimRng) -> FaultPlan {
     FaultPlan::random(rng, &nodes, HORIZON, n)
 }
 
-/// Decisions Q28 and Q36: with the relay fence, a held branch's rows stay
+/// With the relay fence, a held branch's rows stay
 /// out of reach from its holder's loss until it is recovered: no write
 /// is lost to a replay, under gateway crashes at every coordinator step,
 /// a second gateway on the same rows, agent and node kills, pauses,
-/// partitions and slow links. Decision Q37 too: after an OK commit the
-/// session's next read sees its rows.
+/// partitions and slow links. And after an OK commit the session's next
+/// read sees its rows.
 #[test]
 fn sprig_2pc_relay_fence_keeps_held_rows_isolated() {
     Sim::new("txn_sprig2pc_fence")
@@ -2142,13 +2141,13 @@ fn sprig_2pc_relay_fence_keeps_held_rows_isolated() {
     print_totals("sprig_2pc_fence");
 }
 
-/// The same world without the relay fence (Sprig 2PC as built in R3,
-/// decision Q12's window): a held branch whose gateway died is replayed
-/// after another transaction already changed its rows, and that
-/// transaction's committed append is lost. Run with `--ignored` to see
+/// The same world without the relay fence (Sprig 2PC with held
+/// branches on the gateway's own connection): a held branch whose
+/// gateway died is replayed after another transaction already changed
+/// its rows, and that transaction's committed append is lost. Run with `--ignored` to see
 /// the simulation catch it.
 #[test]
-#[ignore = "shows the window the relay fence closes (decision Q12)"]
+#[ignore = "shows the window the relay fence closes"]
 #[should_panic(expected = "isolation")]
 fn without_the_relay_fence_a_replay_overwrites_a_later_write() {
     Sim::new("txn_sprig2pc_nofence")
@@ -2169,11 +2168,11 @@ fn without_the_relay_fence_a_replay_overwrites_a_later_write() {
 }
 
 /// Without settling the session's phase-2 stragglers (a read on a plain
-/// connection, as reads outside the coordinator were before decision
-/// Q37), a read right after an OK commit misses the session's own row
-/// when phase 2 outran `txn.phase2_wait_ms`. Run with `--ignored`.
+/// connection, as reads outside the coordinator once were), a read
+/// right after an OK commit misses the session's own row when phase 2
+/// outran `txn.phase2_wait_ms`. Run with `--ignored`.
 #[test]
-#[ignore = "shows the window decision Q37 closes (Q30)"]
+#[ignore = "shows the window that settling stragglers closes"]
 #[should_panic(expected = "read-your-writes")]
 fn without_settling_a_straggler_the_next_read_misses_it() {
     Sim::new("txn_sprig2pc_nosettle")

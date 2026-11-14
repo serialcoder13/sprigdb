@@ -39,7 +39,7 @@ An account is `name` or `name@host`, as in MySQL:
 
 Names and hosts are at most 255 characters. Accounts live in SprigDB's catalog, not in MariaDB's `mysql.user`; SprigDB derives the MariaDB grants it needs from them. Every change applies on every gateway from the next statement after it commits.
 
-Account changes are audited. While the audit spool is full, every statement on this page except `SHOW GRANTS`, `SET ROLE` and `FLUSH PRIVILEGES` fails with 39970 `ER_SPRIG_AUDIT_UNAVAILABLE`.
+Account changes are audited. While the audit spool is full, every statement on this page except `SHOW GRANTS`, `SHOW CREATE USER`, `SET ROLE` and `FLUSH PRIVILEGES` fails with 39970 `ER_SPRIG_AUDIT_UNAVAILABLE`.
 
 ## CREATE USER
 
@@ -114,7 +114,8 @@ The new user logs in as `acme.reporter`.
 
 **Example:** an account that must log in with a particular client certificate, and carries an attribute for row-level security. The listener must ask for client certificates (`listener.<name>.client_cert`); the development stack doesn't.
 
-```sql
+```sql test
+DROP USER IF EXISTS 'billing'@'%';
 CREATE USER 'billing'@'%' IDENTIFIED BY 's3cret-Passw0rd'
     REQUIRE SUBJECT '/C=GB/O=Acme/CN=billing' AND ISSUER '/C=GB/O=Acme/CN=Acme client CA'
     ATTRIBUTE '{"region": "eu"}';
@@ -316,7 +317,7 @@ These are the privileges SprigDB recognises, and the levels each one is accepted
 | `SPRIG_SINK_ADMIN` | yes | | | | |
 | `SPRIG_FAN_IN` | yes | | | | |
 
-`PROCESS`, `SHOW DATABASES` and `CONNECTION_ADMIN` are scoped to the tenant: `PROCESS` shows the tenant's own sessions, and `CONNECTION_ADMIN` lets `KILL` stop other users' sessions of the tenant (without it, another user's session fails with 1095). `SYSTEM_VARIABLES_ADMIN` is checked by `SET GLOBAL`, `SET PERSIST` and `@@global.` assignments, which fail with 1227 either way, because they would change the MariaDB server for every tenant. `SET_ANY_DEFINER` is needed to name another account in a `DEFINER` clause; see [Definers](#definers). `WATCH`, with `SELECT`, is needed to open change streams; see [Grants and roles](../security/grants-and-roles.md#change-streams-need-watch).
+`PROCESS`, `SHOW DATABASES` and `CONNECTION_ADMIN` are scoped to the tenant: `PROCESS` shows the tenant's own sessions, and `CONNECTION_ADMIN` lets `KILL` stop other users' sessions of the tenant (without it, another user's session fails with 1095). `SYSTEM_VARIABLES_ADMIN` lets `SET GLOBAL`, `SET PERSIST` and `@@global.` assignments set the tenant's defaults for new sessions of `sql_mode`, `time_zone`, `transaction_isolation`, `max_execution_time` and `wait_timeout`; without it they fail with 1227, and any other variable fails with 1227 even with it, because it would change the MariaDB server for every tenant. See [SET GLOBAL sets the tenant's defaults](overview.md#set-global-sets-the-tenants-defaults). `SET_ANY_DEFINER` is needed to name another account in a `DEFINER` clause; see [Definers](#definers). `WATCH`, with `SELECT`, is needed to open change streams; see [Grants and roles](../security/grants-and-roles.md#change-streams-need-watch).
 
 ### SprigDB privileges
 
@@ -444,6 +445,36 @@ GRANT `reporting`@`%` TO `app`@`%`
 
 On the MySQL persona, dynamic privileges (`SPRIG_*`, `ROLE_ADMIN`, `WATCH`, `BYPASS RLS` and the other names not in MySQL's static list) appear on their own `ON *.*` line. On the MariaDB persona, each role is on its own line, followed by `SET DEFAULT ROLE … FOR …`.
 
+## SHOW CREATE USER
+
+```sql
+SHOW CREATE USER account
+```
+
+Shows the `CREATE USER` statement for an account, as MySQL 8.4 prints it on 3306 and as MariaDB prints it on 3307. It never shows a password hash or verifier: on 3306 the authentication clause is `IDENTIFIED WITH '<plugin>'` alone, and on 3307 there is no `IDENTIFIED` clause. The column is named `CREATE USER for name@host`.
+
+Your own account (`SHOW CREATE USER CURRENT_USER()`) needs no privilege. Another account needs `CREATE USER` (else 1142 on the MySQL persona, 1044 on the MariaDB persona), and an account that doesn't exist fails with 1396.
+
+```sql
+CREATE USER 'ledger'@'%' IDENTIFIED BY 's3cret-Passw0rd'
+    REQUIRE SUBJECT '/O=Acme/CN=ledger' AND ISSUER '/O=Acme/CN=Acme client CA';
+SHOW CREATE USER ledger;
+```
+
+On 3306:
+
+```text
+CREATE USER `ledger`@`%` IDENTIFIED WITH 'caching_sha2_password' REQUIRE SUBJECT '/O=Acme/CN=ledger' ISSUER '/O=Acme/CN=Acme client CA' PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
+```
+
+On 3307:
+
+```text
+CREATE USER `ledger`@`%` REQUIRE ISSUER '/O=Acme/CN=Acme client CA' SUBJECT '/O=Acme/CN=ledger'
+```
+
+As in MySQL and MariaDB, the `REQUIRE` clause lists `SUBJECT` and `ISSUER` without `AND`: `SUBJECT` first on 3306, `ISSUER` first on 3307.
+
 ## FLUSH PRIVILEGES
 
 ```sql
@@ -462,7 +493,28 @@ DROP ROLE reporting;
 
 ## Definers
 
-MariaDB runs triggers, events, and `SQL SECURITY DEFINER` routines and views with their definer's rights. In SprigDB, every stored program you create gets your own account as its definer. A `DEFINER = …` clause that names another account, such as one a dump file carries, needs `SET_ANY_DEFINER`, as on MySQL 8.4; without it the statement fails with 1227. With it, the clause is accepted but the definer is still your own account, so naming another account never borrows its rights. If MariaDB records any other definer, SprigDB drops the object and the statement fails with 39367 `ER_SPRIG_DEFINER_REFUSED`. See [Grants and roles](../security/grants-and-roles.md).
+MariaDB runs triggers, events, and `SQL SECURITY DEFINER` routines and views with their definer's rights. Without a `DEFINER` clause, or with `DEFINER = CURRENT_USER`, every view and stored program you create gets your own account as its definer.
+
+A `DEFINER = …` clause on `CREATE` or `ALTER` of a view, procedure, function, trigger or event that names another account, such as one a dump file carries, works as on MySQL 8.4:
+
+| Case | Result |
+|---|---|
+| You don't hold `SET_ANY_DEFINER` | 1227 (`you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s)`) |
+| The account named isn't an account of your tenant | 1227 (`you need (at least one of) the SUPER or ALLOW_NONEXISTENT_DEFINER privilege(s)`) |
+| Otherwise | The named account becomes the definer |
+
+The object then runs as its definer: `SQL SECURITY DEFINER` routines and views, triggers and events use the definer's privileges, and under row-level security the definer's policies. `information_schema` (`VIEWS`, `ROUTINES`, `TRIGGERS`, `EVENTS`) and `SHOW CREATE` name the definer you gave.
+
+```sql
+-- needs SET_ANY_DEFINER; reporter must be an account of the tenant
+CREATE DEFINER = 'reporter'@'%' PROCEDURE shop.order_count()
+    SQL SECURITY DEFINER
+    SELECT COUNT(*) FROM shop.orders;
+```
+
+A caller with only `EXECUTE` on the procedure counts the orders with `reporter`'s `SELECT`. If `reporter` later loses that privilege, the call fails. `SET_ANY_DEFINER` therefore lets its holder run code with any account's rights in the tenant: grant it only to administrators and to the accounts that restore dumps.
+
+If MariaDB records a definer other than the one SprigDB asked for, SprigDB drops the object and the statement fails with 39367 `ER_SPRIG_DEFINER_REFUSED`. Code in `LANGUAGE kirun`, `javascript` or `lua` doesn't take a `DEFINER` clause; see [Logic in SQL](logic.md). See also [Grants and roles](../security/grants-and-roles.md).
 
 ## Errors
 
@@ -470,23 +522,23 @@ MariaDB runs triggers, events, and `SQL SECURITY DEFINER` routines and views wit
 |---|---|---|
 | 1064 | `42000` | Syntax error; on the MariaDB persona also an unknown privilege |
 | 1235 | `42000` | A clause SprigDB doesn't support (see the lists above) |
-| 1227 | `42000` | Missing a tenant-level privilege, such as `CREATE USER`, `ROLE_ADMIN`, `SET_ANY_DEFINER` or `SPRIG_TENANT_ADMIN`; a server-wide privilege with `auth.unsafe_privilege_action = 'error'`; any `SET GLOBAL` |
+| 1227 | `42000` | Missing a tenant-level privilege, such as `CREATE USER`, `ROLE_ADMIN`, `SET_ANY_DEFINER`, `SYSTEM_VARIABLES_ADMIN` or `SPRIG_TENANT_ADMIN`; a `DEFINER` that names no account of the tenant; a server-wide privilege with `auth.unsafe_privilege_action = 'error'`; `SET GLOBAL` of a variable a tenant can't set |
 | 1095 | `HY000` | `KILL` of another user's session without `CONNECTION_ADMIN` |
 | 3934 | `HY000` | `ATTRIBUTE` with a value that isn't a JSON object |
 | 1045 | `28000` | `GRANT … ON *.*` of something you can't grant |
-| 1044 | `42000` | `GRANT … ON db.*` you can't give; another's `SHOW GRANTS` on the MariaDB persona |
-| 1142 | `42000` | `GRANT … ON db.t` you can't give; another's `SHOW GRANTS` on the MySQL persona |
+| 1044 | `42000` | `GRANT … ON db.*` you can't give; another's `SHOW GRANTS` or `SHOW CREATE USER` on the MariaDB persona |
+| 1142 | `42000` | `GRANT … ON db.t` you can't give; another's `SHOW GRANTS` or `SHOW CREATE USER` on the MySQL persona |
 | 1144 | `42000` | A privilege not allowed at that level |
 | 1221 | `HY000` | Database and global privileges mixed wrongly |
 | 1141, 1147 | `42000` | `REVOKE` of a grant that doesn't exist |
-| 1396 | `HY000` | `CREATE USER` of an existing account, `DROP USER` or `ALTER USER` of a missing one, `SET DEFAULT ROLE` for a missing account |
+| 1396 | `HY000` | `CREATE USER` of an existing account, `DROP USER`, `ALTER USER` or `SHOW CREATE USER` of a missing one, `SET DEFAULT ROLE` for a missing account |
 | 1410 / 1133 | `42000` / `28000` | MySQL / MariaDB persona: `GRANT` to an account that doesn't exist |
 | 3929 | `HY000` | MySQL persona: unknown privilege name |
 | 3530 / 1959 | `HY000` / `OP000` | MySQL / MariaDB persona: `SET ROLE` of a role not granted to you |
 | 1819, 3638, 3891, 3892 | `HY000` | Password rules; see [Changing your own password](#changing-your-own-password) |
 | 1820 | `HY000` | The password has expired and must be changed first |
 | 39350 (warning) | `ER_SPRIG_PRIVILEGE_DROPPED` | A server-wide privilege was dropped from the statement |
-| 39367 | `ER_SPRIG_DEFINER_REFUSED` | A stored program was recorded with another definer than your account; it was dropped |
+| 39367 | `ER_SPRIG_DEFINER_REFUSED` | A view or stored program was recorded with another definer than the one asked for; it was dropped |
 | 39970 | `ER_SPRIG_AUDIT_UNAVAILABLE` | The audit spool is full; account changes are refused until it drains |
 | 39070, 39071, 39072 | `ER_SPRIG_CATALOG_UNAVAILABLE`, `ER_SPRIG_CATALOG_CONFLICT`, `ER_SPRIG_TENANT_NOT_READY` | The tenant's catalog couldn't take the change; retry |
 

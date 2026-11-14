@@ -1,6 +1,5 @@
 //! `DROP FUNCTION | PROCEDURE | VALIDATION | TRIGGER | SCHEDULE` of logic
-//! modules in a tenant session (chapter 41, "Deployment and removal";
-//! `sprig_logic::drop`; R7 follow-ups).
+//! modules in a tenant session (`sprig_logic::drop`).
 //!
 //! ```text
 //! the module of that kind and name (none: a FUNCTION, PROCEDURE or
@@ -11,11 +10,11 @@
 //! functions and procedures: dependents → 39875, or CASCADE drops the
 //!   schedules that call it
 //! every shard (sprig_ctl): the routines, packages and MariaDB triggers of
-//!   every version; a validation's CHECK through chapter 21's ALTER TABLE
+//!   every version; a validation's CHECK through the DDL path's ALTER TABLE
 //! the catalog: dropped, versions retired, rollout ended, index entries
 //! ```
 //!
-//! `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name` (ST67) answers what
+//! `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name` answers what
 //! the drop would find, as rows (`Kind`, `Name`, `Cascade`, `Detail`), so
 //! clients needn't read 39875's text.
 
@@ -168,7 +167,7 @@ impl PassSession {
                 format!("no {} {} in {}", d.kind.as_str(), d.name, row.name),
             ));
         };
-        // Chapter 29: dropping code needs the right that created it.
+        // Dropping code needs the right that created it.
         {
             use sprig_auth::authz::{Action, Target};
             let grants = crate::tenant::authz::privileges(ts, &catalog);
@@ -224,8 +223,8 @@ impl PassSession {
                 ));
             }
         }
-        // A validation's CHECK constraints go through chapter 21's ALTER
-        // TABLE path, as the deploy added them.
+        // A validation's CHECK constraints go through the DDL path's ALTER
+        // TABLE, as the deploy added them.
         let binding = store.binding(&mut conn, m.module_id).await?;
         let versions: Vec<u64> = store
             .versions(&mut conn, m.module_id)
@@ -307,7 +306,7 @@ impl PassSession {
         Ok(Some(notes))
     }
 
-    /// `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name` (ST67): what
+    /// `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name`: what
     /// `DROP ... RESTRICT` would refuse with 39875, one row each, with what
     /// `CASCADE` does to it. The same module and the same rights as the
     /// drop (`ALTER ROUTINE` or `CREATE ROUTINE` on the database).
@@ -412,7 +411,7 @@ impl PassSession {
     }
 
     /// Runs an `ALTER TABLE` of the drop through the session, as a
-    /// client's (chapter 21's path).
+    /// client's (the DDL path).
     async fn drop_alter(&mut self, cx: &mut ExecCtx<'_>, alter: &str) -> Result<()> {
         let wire = crate::pipeline::Wire {
             persona: self.persona,

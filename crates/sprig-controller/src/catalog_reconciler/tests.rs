@@ -441,9 +441,9 @@ async fn the_loop_lists_active_tenants_here_and_paces_itself() {
     assert!(rec.all_keys(&cx).await.unwrap().is_empty());
 }
 
-/// Chapter 08's stuck-state handling for a tenant being deleted (the
-/// tenant `r6-inh-c` stayed `deleting` with a stuck `CREATE DATABASE` and
-/// a database nobody could log in to drop): the stuck job is resolved,
+/// Stuck-state handling for a tenant being deleted (a tenant once stayed
+/// `deleting` with a stuck `CREATE DATABASE` and a database nobody could
+/// log in to drop): the stuck job is resolved,
 /// then every database left is dropped through the DDL path, so cleanup
 /// can finish.
 #[tokio::test]
@@ -478,7 +478,7 @@ async fn a_deleting_tenants_stuck_job_and_databases_go() {
     assert!(r.deleted_databases.is_empty() && r.errors.is_empty());
 }
 
-/// bugfix-27: an object left `creating` with no job behind it (an
+/// An object left `creating` with no job behind it (an
 /// inherited instance whose creation a crash or the deletion cut short)
 /// held its database for ever, and the tenant stayed `deleting`. For a
 /// deleted tenant only a live job holds a database.
@@ -527,7 +527,7 @@ impl GroupMaps for FixedGroups {
     }
 }
 
-/// Chapter 20: a split's new shard schemas start empty, and a retired
+/// A split's new shard schemas start empty, and a retired
 /// source waits for the mover to drop it. Shard schemas of a group with a
 /// shard map are never orphans, and when the maps can't be read (or no
 /// source is set) no group's shard schema is.
@@ -569,7 +569,7 @@ async fn shard_schemas_of_mapped_groups_are_never_orphans() {
     assert!(env.exec.has_schema(&child) && env.exec.has_schema(&stray));
 }
 
-/// Whether a gateway process has ended, as the test says (bugfix-45).
+/// Whether a gateway process has ended, as the test says.
 #[derive(Default)]
 struct Ended(std::sync::atomic::AtomicBool);
 
@@ -580,7 +580,7 @@ impl sprig_catalog::ddl::OwnerCheck for Ended {
     }
 }
 
-/// bugfix-45 (bugfix-38's leftover): a gateway that crashed in the middle
+/// A gateway that crashed in the middle
 /// of a DDL statement left its job, and with it the table, for
 /// `catalog.stuck_state_minutes` unless another DDL on the same table came
 /// and resolved it. The reconciler now asks the gateways' process keys: a
@@ -614,7 +614,7 @@ async fn a_job_whose_gateway_process_ended_goes_before_the_stuck_age() {
         stuck: Duration::from_secs(15 * 60),
         ..now_cfg()
     };
-    // Before bugfix-45 (no owner check): the job waits for the stuck age.
+    // Without an owner check the job waits for the stuck age.
     let r = env.reconciler(cfg).pass(env.tenant).await.unwrap();
     assert_eq!((r.jobs_waiting, r.resolved.len()), (1, 0), "{r:?}");
     assert_eq!(r.gateway_jobs_waiting, 1);

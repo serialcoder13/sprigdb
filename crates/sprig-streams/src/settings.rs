@@ -73,6 +73,14 @@ key!(
     "Keep a change topic for the object"
 );
 key!(
+    /// `stream.sequencer_lag_alert_seconds`: a stream sequencer further
+    /// behind than this counts in `sprig_stream_sequencers_lagging`
+    /// (decision r9-132).
+    SEQUENCER_LAG_ALERT_SECONDS: u64 = "stream.sequencer_lag_alert_seconds", 60, Scopes::PROCESS,
+    HardBounds::range(1, 86_400),
+    "Lag past which a stream sequencer counts as lagging"
+);
+key!(
     /// `stream.sequencer_batch_ms`: the batching window of a sequencer.
     SEQUENCER_BATCH_MS: u64 = "stream.sequencer_batch_ms", 10, Scopes::PROCESS,
     HardBounds::range(0, 10_000),

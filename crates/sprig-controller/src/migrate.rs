@@ -1,7 +1,6 @@
-//! Moving a tenant to another data center (chapter 24, "Orchestrating a
-//! move", "One-command moves"; build step 4): `sprigctl tenant move
-//! <tenant> --to <dc>` and the `migration` loop. A tenant pinned with
-//! `sprigctl tenant pin` (chapter 11's pin) or with `pinned_dc` in its
+//! Moving a tenant to another data center: `sprigctl tenant move <tenant>
+//! --to <dc>` and the `migration` loop. A tenant pinned with `sprigctl
+//! tenant pin` (the balancer's pin) or with `pinned_dc` in its
 //! directory entry doesn't move.
 //!
 //! ```text
@@ -28,18 +27,18 @@
 //!   count the move and its pause in the metrics, mark it observed.
 //! ```
 //!
-//! **Where the book differs (R0).** A tenant is one placement unit (its
-//! catalog and every database on one cluster, decision N4), so the parent
-//! job and its `Group` children are one mover job whose commit is the
-//! home change; R1's shards make it several. The hold is the source map's
+//! **Simplifications.** A tenant is one placement unit (its catalog and
+//! every database on one cluster), so the move is one mover job (not a
+//! parent job with `Group` children) whose commit is the home change; a
+//! tenant with table groups doesn't move whole. The hold is the source map's
 //! hold, which every gateway follows wherever it is: it stands in for
 //! `Traffic.Hold` and `Release`. The cutover's lag estimate is the
 //! mover's own: it cuts over once lag stays under `mover.ready_max_lag_ms`
 //! for `mover.ready_sustain_seconds`, and aborts any attempt that would
 //! hold longer than the budget (three attempts, then it rolls back).
 //! `migration.write_pause_target_ms` resolves for the tenant at its home
-//! DC: its own catalog rows over the dc and global scopes (decision RF3,
-//! `crate::tenant_scopes`). Chapter 24's automatic moves
+//! DC: its own catalog rows over the dc and global scopes
+//! (`crate::tenant_scopes`). The automatic moves
 //! (`crate::dc_migrate`) start through the same [`DcMoves::start_caused`].
 
 use std::collections::HashSet;
@@ -142,7 +141,7 @@ pub struct DcMoves {
     pub traffic: Arc<TrafficWindows>,
     /// Tenants whose move from here the loop is watching.
     watching: Mutex<HashSet<TenantId>>,
-    /// Tenants' own catalog rows (decision RF3): tenant-scope
+    /// Tenants' own catalog rows: tenant-scope
     /// `migration.*` values win over the home DC's.
     scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
     /// The automatic decision's soft state (`crate::dc_migrate`).
@@ -221,7 +220,7 @@ impl DcMoves {
             .into_owned()
     }
 
-    /// Whether chapter 11's pin (`sprigctl tenant pin`) holds `tenant` in
+    /// Whether the balancer's pin (`sprigctl tenant pin`) holds `tenant` in
     /// this DC.
     ///
     /// # Errors
@@ -263,8 +262,7 @@ impl DcMoves {
         Ok((na, nb))
     }
 
-    /// Resolves tenant-scope keys with each tenant's own catalog rows too
-    /// (decision RF3).
+    /// Resolves tenant-scope keys with each tenant's own catalog rows too.
     #[must_use]
     pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
         self.scopes = Some(s);
@@ -352,7 +350,7 @@ impl DcMoves {
             .await?
             .into_iter()
             .filter(|c| c.body().admin_state == AdminState::Active)
-            // Chapter 26's cluster rule: every copy inside the residency.
+            // Residency's cluster rule: every copy inside the residency.
             .filter(|c| crate::residency::eligible(c.body(), allowed))
             .map(|c| c.body().cluster_id.clone())
             .collect();
@@ -398,7 +396,7 @@ impl DcMoves {
     }
 
     /// [`Self::start`], recording `cause` in the migration record
-    /// (`operator`, or `residency` for chapter 26's compliance moves).
+    /// (`operator`, or `residency` for residency compliance moves).
     ///
     /// # Errors
     /// As [`Self::start`].
@@ -438,7 +436,7 @@ impl DcMoves {
                 "tenant {name} is pinned to {p}: unpin it first"
             )));
         }
-        // Chapter 26: never to a DC outside the tenant's residency (the
+        // Never to a DC outside the tenant's residency (the
         // commit checks again, against the entry it commits).
         if !e.residency_allows(&to) {
             let allowed: Vec<String> = e
@@ -456,7 +454,7 @@ impl DcMoves {
                 }
             )));
         }
-        // `sprigctl tenant pin` (chapter 11's pin record in this DC).
+        // `sprigctl tenant pin` (the balancer's pin record in this DC).
         if let Some(p) = sprig_balancer::pins::PinStore::new(Arc::clone(&self.store))
             .get(tenant)
             .await?
@@ -483,7 +481,7 @@ impl DcMoves {
                 j.id.0
             )));
         }
-        // Chapter 20 (R1): no move beside the tenant's shard work, and no
+        // No move beside the tenant's shard work, and no
         // whole move of a tenant with table groups.
         self.check_shard_work(tenant, name).await?;
         let (map, _) = TenantMaps::new(Arc::clone(&self.store))
@@ -579,7 +577,7 @@ impl DcMoves {
     /// Refuses the move while a split, merge or shard move of `tenant`
     /// runs here, or the advisor applies its first design (39470), and for
     /// a tenant with table groups (39472): the move would carry the
-    /// catalog's map, not the groups' shard maps (chapters 10 and 20).
+    /// catalog's map, not the groups' shard maps.
     async fn check_shard_work(&self, tenant: TenantId, name: &str) -> Result<()> {
         let js = JobStore::new(
             TierView::over(&self.store, Tier::Dc(self.dc.clone())),
@@ -647,7 +645,7 @@ impl DcMoves {
 
     /// Pins `tenant` to its home DC (`pinned_dc` in its directory entry),
     /// or unpins it: a pinned tenant doesn't move between DCs.
-    /// `sprigctl tenant pin|unpin` calls it with chapter 11's cluster pin.
+    /// `sprigctl tenant pin|unpin` calls it with the balancer's cluster pin.
     ///
     /// # Errors
     /// 39550 to pin a tenant that is moving; the stores' errors.

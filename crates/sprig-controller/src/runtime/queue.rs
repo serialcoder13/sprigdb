@@ -1,5 +1,4 @@
-//! The deduplicated key queue of one loop (chapter 23, "The reconciler
-//! pattern and the loops").
+//! The deduplicated key queue of one loop.
 //!
 //! ```text
 //! 1. a deduplicated key queue; at most one reconcile per key at a time

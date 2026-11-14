@@ -1,6 +1,5 @@
-//! The Bolt listener on 7687 (chapter 43, "Bolt front end"; build steps
-//! 17–19): `sprig-proto-bolt`'s server over chapter 14's logins and the
-//! graph executor.
+//! The Bolt listener on 7687: `sprig-proto-bolt`'s server over the
+//! gateway's logins and the graph executor.
 //!
 //! - **Logins.** `basic` runs the same login as HTTP Basic and AMQP
 //!   `PLAIN`: fast cache, verifiers, policy, lockout, audit. The tenant
@@ -19,7 +18,7 @@
 //!   `WRITE`: `bolt.advertise_address`, else the address the driver used.
 //! - **Bookmarks and replica reads** ([`session`]): signed `SB1:`
 //!   bookmarks carry the commit's GTID positions; reads in `mode: "r"` go
-//!   to a replica that has waited for them (chapter 06's read-your-writes),
+//!   to a replica that has waited for them (read-your-writes),
 //!   else to the writer.
 //! - **Streaming** ([`stream`]): reads whose rows don't depend on each
 //!   other stream to `PULL` with back-pressure; others are buffered.
@@ -77,7 +76,7 @@ macro_rules! key {
 
 key!(
     /// `bolt.max_version`: the highest Bolt version offered. This build
-    /// speaks 5.0 to 5.8 (5.5 to 5.8 since R8 round 8).
+    /// speaks 5.0 to 5.8.
     MAX_VERSION: Text = "bolt.max_version", Cow::Borrowed("5.8"), Scopes::PROCESS,
     HardBounds::one_of(&["5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"]),
     "Highest Bolt version offered"
@@ -409,7 +408,7 @@ pub fn from_pack(v: &PackValue) -> Result<Value> {
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
         PackValue::Struct { tag, fields } => struct_value(*tag, fields)?,
-        // R8 round 8: byte arrays (Neo4j's `byte[]`).
+        // Byte arrays (Neo4j's `byte[]`).
         PackValue::Bytes(b) => Value::Bytes(b.clone()),
     })
 }
@@ -455,7 +454,7 @@ impl BoltGraphService {
     }
 
     /// A session for `principal` outside Bolt: `Sql.Query` with `language:
-    /// cypher` or `gql` over REST and gRPC (chapter 37; tui decision T2).
+    /// cypher` or `gql` over REST and gRPC.
     /// The same statements, graphs, privileges and budgets as a Bolt
     /// login's; `None` without tenant catalogs.
     #[must_use]
@@ -482,16 +481,19 @@ impl BoltService for BoltGraphService {
         info: &ConnInfo,
         auth: &PackValue,
     ) -> std::result::Result<Box<dyn BoltSession>, BoltFailure> {
-        Ok(Box::new(self.logon_session(info, auth).await?))
+        Ok(Box::new(self.logon_session(info, auth, None).await?))
     }
 }
 
 /// One connection's service: [`BoltGraphService`]'s logins, and the
-/// connection's entry in the gateway's session table (round 3), so Bolt
+/// connection's entry in the gateway's session table, so Bolt
 /// sessions show in `SHOW PROCESSLIST` and `KILL` stops them.
 struct ConnService {
     inner: Arc<BoltGraphService>,
     session: std::sync::Mutex<Option<crate::session::Session>>,
+    /// The connection's verified client certificate's names, for the
+    /// login's `REQUIRE X509`, `SUBJECT` and `ISSUER`.
+    client_dn: Option<sprig_auth::mysql::ClientDn>,
 }
 
 #[async_trait]
@@ -501,7 +503,10 @@ impl BoltService for ConnService {
         info: &ConnInfo,
         auth: &PackValue,
     ) -> std::result::Result<Box<dyn BoltSession>, BoltFailure> {
-        let mut gw = self.inner.logon_session(info, auth).await?;
+        let mut gw = self
+            .inner
+            .logon_session(info, auth, self.client_dn.clone())
+            .await?;
         let reg = self
             .session
             .lock()
@@ -521,6 +526,7 @@ impl BoltGraphService {
         &self,
         info: &ConnInfo,
         auth: &PackValue,
+        client_dn: Option<sprig_auth::mysql::ClientDn>,
     ) -> std::result::Result<session::GwSession, BoltFailure> {
         let scheme = auth
             .get("scheme")
@@ -571,8 +577,8 @@ impl BoltGraphService {
                 sni: info.sni.clone(),
                 client_ip: info.peer.ip(),
                 tls: info.tls,
-                client_cert: false,
-                client_dn: None,
+                client_cert: client_dn.is_some(),
+                client_dn,
                 can_handle_expired_password: false,
             })
             .await;
@@ -678,11 +684,15 @@ impl Frontend for BoltFrontend {
                 }
             });
         }
+        let tls = conn.stream.tls_info();
         let svc = ConnService {
             inner: Arc::clone(&self.service),
             session: std::sync::Mutex::new(Some(reg)),
+            client_dn: tls
+                .as_ref()
+                .filter(|t| t.client_cert)
+                .and_then(|t| t.client_dn.clone()),
         };
-        let tls = conn.stream.tls_info();
         let cfg = self.config(conn.listener.handshake_timeout);
         let peer = conn.peer;
         let r = sprig_proto_bolt::server::serve(

@@ -21,7 +21,7 @@ pub enum TlsMode {
     Disabled,
     /// TLS when the server offers it, else plaintext.
     Preferred,
-    /// TLS or fail. Backend connections always use this (chapter 06).
+    /// TLS or fail. Backend connections always use this.
     #[default]
     Required,
 }
@@ -44,7 +44,7 @@ pub struct TlsOptions {
     /// only (MariaDB's self-generated certificates).
     pub skip_verify: bool,
     /// The client certificate, for accounts with `REQUIRE X509` or
-    /// `REQUIRE SUBJECT ... ISSUER ...` (chapter 29).
+    /// `REQUIRE SUBJECT ... ISSUER ...`.
     pub client_cert: Option<ClientCert>,
 }
 
@@ -170,7 +170,7 @@ pub struct ClientConfig {
     pub max_packet: usize,
     /// Negotiate `CLIENT_FOUND_ROWS` (the session's client did).
     pub found_rows: bool,
-    /// Negotiate `CLIENT_LOCAL_FILES`; off unless asked (chapter 05).
+    /// Negotiate `CLIENT_LOCAL_FILES`; off unless asked.
     pub local_files: bool,
     /// Negotiate `CLIENT_MULTI_STATEMENTS` (the gateway's sync prefixes
     /// need it).

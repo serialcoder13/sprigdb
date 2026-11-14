@@ -1,5 +1,5 @@
-//! Pins (chapter 06, "Pinning and pool modes"; build step 4): while a
-//! session has state that can't move, it holds its backend connection.
+//! Pins: while a session has state that can't move, it holds its backend
+//! connection.
 
 use std::collections::BTreeSet;
 
@@ -28,7 +28,7 @@ pub enum PinReason {
     Untracked,
     /// `backend.pool_mode = session`.
     SessionMode,
-    /// A compiled logic routine is running (chapter 41, R7).
+    /// A compiled logic routine is running.
     Routine,
 }
 
@@ -214,7 +214,7 @@ impl Pins {
         self.cursors = self.cursors.saturating_sub(1);
     }
 
-    /// Sets or clears the `Routine` pin (chapter 41).
+    /// Sets or clears the `Routine` pin.
     pub fn set_routine(&mut self, on: bool) {
         self.routine = on;
     }

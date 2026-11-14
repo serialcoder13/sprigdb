@@ -1,4 +1,4 @@
-//! Milestone M0.3 through a running gateway in catalog mode: two tenants on
+//! Tenants through a running gateway in catalog mode: two tenants on
 //! one cluster, logical names, DDL through the catalog and settings in SQL.
 //! Start the gateway first (catalog mode creates the tenants acme and
 //! globex, users acme.app and globex.app):

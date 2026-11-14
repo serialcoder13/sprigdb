@@ -1,5 +1,4 @@
-//! Stream instances (chapter 42, "Instances: created on first use";
-//! chapter 45, "Inherited streams"):
+//! Stream instances, created on first use:
 //!
 //! ```text
 //! ensure(T, D):
@@ -10,7 +9,7 @@
 //!     object id, 'creating'); the loser of a race reads the winner's row
 //!  4. the winner: the database D names, in T, if T has none (CREATE DATABASE as
 //!     the provisioning account); then CREATE STREAM IF NOT EXISTS through the
-//!     stream layer (chapter 45) with id := the claimed id, whose catalog change
+//!     stream layer with id := the claimed id, whose catalog change
 //!     also sets the row 'active'; the stream's sequencer starts as for any
 //!     stream
 //!  5. others wait for 'active' up to inherit.instance_create_wait_ms (39899
@@ -43,8 +42,7 @@ use sprig_streams::{ShardSlot, StreamDef, StreamsState};
 use super::{InstanceIndex, catalog, dropping, target_err, unavailable};
 use crate::tenant::TenantServices;
 
-/// The stream settings a member may override (chapter 42, "What can be
-/// overridden").
+/// The stream settings a member may override.
 pub const OVERRIDABLE: &[&str] = &[
     "stream.retention_hours",
     "stream.retention_bytes",
@@ -283,7 +281,7 @@ pub async fn ensure(
                         .increment(1);
                     tracing::info!(tenant = %t, def = %key, stream = id, ms = started.elapsed().as_millis(), "inherited stream instance created");
                     created = true;
-                    // Chapter 42: inherit.broadcast_replay.
+                    // inherit.broadcast_replay.
                     tokio::spawn(super::broadcast::replay(
                         Arc::clone(svc),
                         Arc::clone(def),
@@ -309,9 +307,9 @@ async fn after_use(
     }
     adopt_settings(svc, chain, def, si).await?;
     super::triggers::ensure_for_stream(svc, chain, def, si).await?;
-    // R9 (r9more): inherited sinks (and their connections) on the instance.
+    // Inherited sinks (and their connections) on the instance.
     super::sinks::ensure_for_stream(svc, chain, def, si).await;
-    // R9 (r9next): fan-in triggers above read the instance.
+    // Fan-in triggers above read the instance.
     super::fanin_triggers::on_instance(svc, chain, def, si).await;
     super::put_index(
         svc,
@@ -487,7 +485,7 @@ async fn adopt_settings(
 
 /// `t`'s snapshot holding database `db`, created (empty, as the
 /// provisioning account) when `t` has none: a member without the
-/// definition's database gets it (r9fet decision 2).
+/// definition's database gets it.
 ///
 /// # Errors
 /// The catalog's and the DDL's.
@@ -542,7 +540,7 @@ pub async fn ensure_database(
 
 /// Step 4: the database and the stream, with id `id`.
 #[allow(clippy::too_many_lines)]
-/// [`create`], tried again after a transient failure (R9, r9last): up to
+/// [`create`], tried again after a transient failure: up to
 /// [`CREATE_TRIES`] tries, 100 ms then 200 ms apart, with the same id
 /// (`CREATE STREAM IF NOT EXISTS` finds what a failed try made). A late
 /// member's first instance once failed with MariaDB's 1412 ("Table
@@ -932,9 +930,8 @@ pub async fn remove(svc: &Arc<TenantServices>, t: TenantId, def: DefKey) -> Resu
 mod tests {
     use super::*;
 
-    /// R9 (r9last): a 1412 from the stream layer (its message passed
-    /// through, as a late member's 39899 showed it) is tried again; a
-    /// refusal isn't.
+    /// A 1412 from the stream layer (its message passed through, as a late
+    /// member's 39899 showed it) is tried again; a refusal isn't.
     #[test]
     fn transient_creation_failures() {
         let e = SprigError::backend(

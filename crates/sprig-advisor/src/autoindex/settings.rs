@@ -1,6 +1,4 @@
-//! The `auto_index.*` keys (chapter 13, "Configuration"; Appendix B),
-//! declared next to the code that reads them (chapter 03, "Declaring a
-//! key"). Names and defaults are the chapter's.
+//! The `auto_index.*` keys, declared next to the code that reads them.
 //!
 //! Every key accepts all six scopes, except the fast-trigger `scan_*` keys,
 //! which accept global, tenant, database and object. All apply live.
@@ -16,7 +14,7 @@
 //! 1-64, every scope (data scopes only tighten it, [`policy`](super::policy)).
 //!
 //! Hard bounds protect the code from nonsense; they are this crate's
-//! choice where the chapter gives none, and wide.
+//! choice, and wide.
 
 use std::borrow::Cow;
 
@@ -24,14 +22,15 @@ use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
 type Text = Cow<'static, str>;
 
-/// `on`, `approve` (chapter 52), `recommend` or `off`.
+/// `on`, `approve`, `recommend` or `off`.
 pub const MODES: &[&str] = &["on", "approve", "recommend", "off"];
 
 /// The key of `auto_index.max_builds_per_cluster`.
 pub const MAX_BUILDS_PER_CLUSTER_KEY: &str = "auto_index.max_builds_per_cluster";
 
-/// `auto_index.max_builds_per_cluster` (chapter 13): concurrent index
-/// builds per cluster, the `build` slot pool of chapter 23's scheduler.
+/// `auto_index.max_builds_per_cluster`: concurrent index
+/// builds per cluster, the `build` slot pool of the controller's job
+/// scheduler.
 pub static MAX_BUILDS_PER_CLUSTER: Setting<u32> = Setting {
     key: MAX_BUILDS_PER_CLUSTER_KEY,
     default: 1,
@@ -109,8 +108,8 @@ keys! {
     MAX_STORAGE_PCT: f64 = "auto_index.max_storage_pct", 20.0, Scopes::ALL,
         f(0.0, 1000.0), "Extra storage per table";
     /// `auto_index.min_storage_budget_mb`: the storage budget's floor, so a
-    /// table's budget is `max(max_storage_pct of its size, this)` (decision
-    /// E2; the 64 MB default awaits Kiran and may change).
+    /// table's budget is `max(max_storage_pct of its size, this)` (the
+    /// 64 MB default may change).
     MIN_STORAGE_BUDGET_MB: f64 = "auto_index.min_storage_budget_mb", 64.0, Scopes::ALL,
         f(0.0, 1_048_576.0), "Smallest storage budget per table, MB";
     /// `auto_index.min_improvement_pct`.
@@ -123,7 +122,7 @@ keys! {
     OBSERVE_DAYS: u32 = "auto_index.observe_days", 7, Scopes::ALL,
         HardBounds::range(1, 365), "Watch period after a build";
     /// `auto_index.usage_sample_reads`: an index is judged on its table's
-    /// reads, never on days (decision O1). It is judged once the table has
+    /// reads, never on days. It is judged once the table has
     /// had this many reads since it was built or last judged, and an
     /// `IGNORED` index is watched for this many reads before it is dropped.
     USAGE_SAMPLE_READS: u64 = "auto_index.usage_sample_reads", 100_000, Scopes::ALL,
@@ -131,12 +130,12 @@ keys! {
         "Reads per usage judgement, and reads watched while IGNORED";
     /// `auto_index.min_usage_ratio`: an index serving fewer than this share
     /// of those reads, whose saved time is less than its write cost, is
-    /// removed (decision O1). A fraction: 0.05 is 5%.
+    /// removed. A fraction: 0.05 is 5%.
     MIN_USAGE_RATIO: f64 = "auto_index.min_usage_ratio", 0.05, Scopes::ALL,
         f(0.0, 1.0), "Share of the reads an index must serve to be kept";
     /// `auto_index.retire_user_indexes`: whether user and migrated indexes
     /// are removed by the same rule (`on`), only recommended for removal
-    /// (`recommend`) or left alone (`off`) (decision O1).
+    /// (`recommend`) or left alone (`off`).
     RETIRE_USER_INDEXES: Text = "auto_index.retire_user_indexes", Cow::Borrowed("on"), Scopes::ALL,
         HardBounds::one_of(MODES), "on, recommend or off for user and migrated indexes";
     /// `auto_index.eval_interval_minutes`.
@@ -242,8 +241,8 @@ keys! {
     /// `auto_index.scan_max_returned_ratio`.
     SCAN_MAX_RETURNED_RATIO: f64 = "auto_index.scan_max_returned_ratio", 0.01, SCAN_SCOPES,
         f(0.0, 1.0), "Fast trigger: rows returned per row examined, at most";
-    /// `auto_index.scan_min_sessions`. At most 8: chapter 12 keeps 8
-    /// session hashes per bucket.
+    /// `auto_index.scan_min_sessions`. At most 8: the workload store keeps
+    /// 8 session hashes per bucket.
     SCAN_MIN_SESSIONS: u32 = "auto_index.scan_min_sessions", 2, SCAN_SCOPES,
         HardBounds::range(1, 8), "Fast trigger: distinct sessions among those runs";
     /// `auto_index.scan_recommend_above_gb`.
@@ -267,8 +266,8 @@ mod tests {
             assert_eq!(got.owner(), 13);
             assert!(got.key().starts_with("auto_index."));
         }
-        // The chapter's table with min_storage_budget_mb (E2) and decision
-        // O1's three usage keys, without the day-based ones O1 removed:
+        // The full key table with min_storage_budget_mb and the three
+        // usage keys, without the removed day-based ones:
         // 52 here, and max_builds_per_cluster declared on its own
         // (operator-only).
         assert_eq!(ALL.len(), 52);
@@ -280,7 +279,7 @@ mod tests {
 
     #[test]
     fn no_key_decides_by_days_of_disuse() {
-        // Decision O1: removal is judged by reads, never by days.
+        // Removal is judged by reads, never by days.
         for gone in [
             "auto_index.unused_drop_days",
             "auto_index.drop_unused_days",

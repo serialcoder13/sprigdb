@@ -1,4 +1,4 @@
-//! `Exports` (chapter 44, "Exports"; chapter 37, "APIs for Studio").
+//! `Exports`.
 //!
 //! ```text
 //! POST /v1/exports:ticket {database, sql, format, name}   (bearer: a session token)
@@ -15,8 +15,8 @@
 //! ```
 //!
 //! The browser's download manager handles any size, and no ticket appears
-//! in a URL. Since Studio round 2 tickets are signed like access tokens, so
-//! the form post may reach any gateway (decision ST11's alternative).
+//! in a URL. Tickets are signed like access tokens, so the form post may
+//! reach any gateway.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

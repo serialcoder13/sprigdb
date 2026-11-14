@@ -1,6 +1,6 @@
-//! The `standby` loop (chapter 25, "Standbys"; decision RC12; r2final):
-//! each tenant homed in this DC keeps `failover.standby_dcs` standby DCs,
-//! each a copy kept current by a chapter 10 `move_shard` job with
+//! The `standby` loop: each tenant homed in this DC keeps
+//! `failover.standby_dcs` standby DCs, each a copy kept current by a
+//! mover `move_shard` job with
 //! `Continuous` cutover in the standby DC's tier.
 //!
 //! ```text
@@ -17,7 +17,7 @@
 //!         maps of the tenant name none of its own clusters (no replica-cluster
 //!         standby, no quarantined copy of an earlier home; a move's
 //!         forwarding record is fine), preferring another `region` tag, then
-//!         the lowest measured RTT from home (chapter 24's matrix), then id
+//!         the lowest measured RTT from home (the latency matrix), then id
 //!     C = Y's active cluster with the lowest id that residency allows
 //!     submit move_shard(home cluster -> C, Continuous) in Y's tier
 //!     write Y's maps: the home maps with role standby on C
@@ -34,14 +34,13 @@
 //! lag_ms` while it streams, unbounded otherwise, so the RPO check stays
 //! honest while a standby is still copying.
 //!
-//! **Where it differs from the book.** One job per tenant, not per unit:
-//! R0's tenants are one placement unit (catalog and databases on one
-//! cluster); tenants with table groups get no job standby yet (their
-//! groups' maps would need one job per shard). Single-etcd mode only: the
-//! loop writes the standby DC's tier through the one etcd, as moves
-//! between DCs do; a two-tier deployment keeps replica-cluster standbys
-//! (decision W3) until the job is submitted through the standby DC's own
-//! leader. Every standby holds a worker slot while it streams.
+//! **Limits.** One job per tenant, not per unit: tenants without table
+//! groups are one placement unit (catalog and databases on one cluster);
+//! tenants with table groups get no job standby yet (their groups' maps
+//! would need one job per shard). Single-etcd mode only: the loop writes
+//! the standby DC's tier through the one etcd, as moves between DCs do; a
+//! two-tier deployment keeps replica-cluster standbys until the job is
+//! submitted through the standby DC's own leader. Every standby holds a worker slot while it streams.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -129,13 +128,13 @@ pub struct StandbyLoop {
     global: Arc<dyn MetaStore>,
     clock: Arc<dyn Clock>,
     live: Option<LiveSettings>,
-    /// Tenants' own catalog rows (decision RF3): a tenant's
+    /// Tenants' own catalog rows: a tenant's
     /// `failover.standby_dcs` wins over its home DC's.
     scopes: Option<Arc<crate::tenant_scopes::TenantScopes>>,
-    /// Automatic moves about to start (chapter 24): no standby goes to
+    /// Automatic moves about to start: no standby goes to
     /// their target meanwhile.
     intents: Option<Arc<crate::dc_migrate::DecisionState>>,
-    /// Chapter 52: `failover.standby_mode = approve` holds creations and
+    /// `failover.standby_mode = approve` holds creations and
     /// removals for approval.
     approvals: Option<Arc<crate::approvals::ControllerApprovals>>,
 }
@@ -171,7 +170,7 @@ impl StandbyLoop {
         }
     }
 
-    /// Chapter 52: hold standby creations and removals under
+    /// Hold standby creations and removals under
     /// `failover.standby_mode = approve`.
     #[must_use]
     pub fn with_approvals(mut self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
@@ -179,7 +178,7 @@ impl StandbyLoop {
         self
     }
 
-    /// Chapter 52's gate: whether to create (`dc` `None`) or drop the
+    /// The approval gate: whether to create (`dc` `None`) or drop the
     /// standby in `dc` now. Without an approvals hub: always.
     async fn standby_gate(
         &self,
@@ -238,7 +237,7 @@ impl StandbyLoop {
     }
 
     /// Resolves `failover.standby_dcs` with each tenant's own catalog rows
-    /// too (decision RF3).
+    /// too.
     #[must_use]
     pub fn with_tenant_scopes(mut self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
         self.scopes = Some(s);
@@ -284,11 +283,11 @@ impl StandbyLoop {
         usize::try_from(n).unwrap_or(0)
     }
 
-    /// RL3 (r2harden): the global failover decision runs when the tenant's
+    /// The global failover decision runs when the tenant's
     /// home DC is lost, so it can't read the tenant's catalog. The
     /// directory entry carries the tenant's own `failover.mode` and
     /// `failover.rpo_seconds` (`failover {mode, rpo_seconds}`, which the
-    /// decision reads, chapter 25) whenever the tenant's rows (its own, or
+    /// decision reads) whenever the tenant's rows (its own, or
     /// an ancestor's) make them differ from the home DC's etcd scopes; the
     /// copy is removed when they no longer do, so DC and global changes
     /// apply at once. Checked every pass (10 s).
@@ -370,7 +369,7 @@ impl StandbyLoop {
         if sbs.remove(&e.home_dc).is_some() {
             self.forget(tenant, &e.home_dc).await?;
         }
-        // RL3 (r2harden): the tenant's own failover.mode and rpo_seconds,
+        // The tenant's own failover.mode and rpo_seconds,
         // copied where the global decision can read them without the
         // home DC.
         if let Err(err) = self.copy_failover_settings(tenant, &e).await {
@@ -694,8 +693,8 @@ async fn forget_in(global: &Arc<dyn MetaStore>, tenant: TenantId, y: &DcId) -> R
 
 /// Drops `tenant`'s job standby in `y`, if the directory records one:
 /// cancels its job (the copy is dropped), deletes its standby maps and
-/// forgets it. Chapter 24's automatic move calls it before moving the
-/// tenant into `y` (decision RF11).
+/// forgets it. The automatic DC move calls it before moving the tenant
+/// into `y`.
 ///
 /// # Errors
 /// The stores' errors.

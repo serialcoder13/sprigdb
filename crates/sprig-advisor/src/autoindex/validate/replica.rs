@@ -1,6 +1,4 @@
-//! Replica-build validation (chapter 13 build step 7; "Validation
-//! harness", replica build), as the month-1 spike measured it
-//! (`decisions/spike-replica-index.md`).
+//! Replica-build validation.
 //!
 //! ```text
 //! 1. checks: the node replicates (IO and SQL threads running, lag under
@@ -25,8 +23,8 @@
 //! Every statement that changes the node runs on a session with
 //! `sql_log_bin = 0`, so nothing reaches the binary log, downstream
 //! replicas or the mover, and the node's GTID position keeps following
-//! the primary. The account needs `BINLOG ADMIN` and `READ_ONLY ADMIN`
-//! (chapter 09), plus `SELECT`, `INSERT` and `DELETE` on
+//! the primary. The account needs `BINLOG ADMIN` and `READ_ONLY ADMIN`,
+//! plus `SELECT`, `INSERT` and `DELETE` on
 //! `mysql.table_stats`, `column_stats` and `index_stats` to put the
 //! statistics back.
 
@@ -52,7 +50,7 @@ pub struct ReplicaValidator {
     marker: Arc<dyn NodeMarker>,
     probe_timeout: Duration,
     /// The primary: an index already on the node but not here is a cut-off
-    /// validation's leftover, dropped before building (bugfix-61).
+    /// validation's leftover, dropped before building.
     writer: Option<NodeEndpoint>,
 }
 
@@ -80,8 +78,7 @@ impl ReplicaValidator {
     /// Compares with the primary `writer` before building: the node's
     /// `sprig_auto_*` indexes and field columns the primary lacks are a
     /// cut-off validation's leftovers, and are dropped (binary log off)
-    /// instead of aborting with `index_exists` (bugfix-61,
-    /// [`super::orphans`]).
+    /// instead of aborting with `index_exists` ([`super::orphans`]).
     #[must_use]
     pub fn with_writer(mut self, writer: NodeEndpoint) -> Self {
         self.writer = Some(writer);
@@ -207,7 +204,7 @@ impl Validator for ReplicaValidator {
         let mut r = report(plan, Method::Replica, &self.node.node);
         let name = plan.index_name();
         let t = &plan.target;
-        // bugfix-61: while this runs, nothing in this process takes the
+        // While this runs, nothing in this process takes the
         // node's validation index for a leftover.
         let _running = super::orphans::running(&self.node.node, t);
 
@@ -324,7 +321,7 @@ impl Validator for ReplicaValidator {
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(ddl) => {
-                // A field-column candidate's columns first (R6 round 6),
+                // A field-column candidate's columns first,
                 // binlog off like the index; the ones this validation adds
                 // go again in the clean-up.
                 let fields = add_fields(ddl, &mut watch.mon, t, &plan.candidate.def).await;
@@ -412,7 +409,7 @@ impl Validator for ReplicaValidator {
     }
 }
 
-/// Adds `def`'s field columns the table lacks (R6 round 6) on `ddl`;
+/// Adds `def`'s field columns the table lacks on `ddl`;
 /// returns the ones added.
 pub(crate) async fn add_fields(
     ddl: &mut NodeSql,

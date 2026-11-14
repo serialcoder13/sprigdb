@@ -1,8 +1,7 @@
-//! Data-center records: `sprigctl dc register|list|show` (chapter 23,
-//! "Bootstrapping the first DC and adding later ones"; writing guide 5.10).
+//! Data-center records: `sprigctl dc register|list|show`.
 //!
 //! `register` writes `dcs/<dc_id>` as `joining`, guarded by `Missing`; the
-//! global leader's `dc_registry` loop (R2, step 13) marks it `active` once
+//! global leader's `dc_registry` loop marks it `active` once
 //! its controllers hold the DC lease and latency rows exist both ways. The
 //! first DC is written `active` by bootstrap ([`sprig_meta::bootstrap`]).
 //!
@@ -26,7 +25,7 @@ use sprig_meta::{
 pub enum DcKind {
     /// Holds data and serves clients.
     Full,
-    /// Only votes and observes (chapter 25).
+    /// Only votes and observes (in DC failover).
     Witness,
 }
 

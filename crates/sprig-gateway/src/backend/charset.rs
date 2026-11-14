@@ -1,4 +1,4 @@
-//! Character sets and collations at login (chapter 06, "Login collation").
+//! Character sets and collations at login.
 //!
 //! MariaDB 11.8 sets a direct client's session from the collation id in its
 //! handshake: `character_set_client`, `character_set_connection` and

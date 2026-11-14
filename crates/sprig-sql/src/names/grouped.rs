@@ -1,8 +1,7 @@
-//! `SHOW` lists of a database whose tables the advisor grouped (chapter 07,
-//! "SHOW statements"; R1).
+//! `SHOW` lists of a database whose tables the advisor grouped.
 //!
 //! The advisor moves a grouped table out of its database's first shard
-//! into its group's schemas (chapter 16, "Regroup"), so MariaDB's own
+//! into its group's schemas (a regroup), so MariaDB's own
 //! `SHOW TABLES`, `SHOW TABLE STATUS` and `SHOW TRIGGERS`, which read one
 //! schema, would leave it out. For such a database they become a `SELECT`
 //! over the `information_schema` table they are built on, in the `SHOW`'s

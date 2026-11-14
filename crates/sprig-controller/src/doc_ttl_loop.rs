@@ -1,5 +1,5 @@
-//! The `doc_ttl` loop (chapter 31, "Index kinds, origins and TTL"; wireup,
-//! 13 Nov 2026), on the DC leader, every ten seconds:
+//! The `doc_ttl` loop (document TTL indexes), on the DC leader, every ten
+//! seconds:
 //!
 //! ```text
 //! no live `doc_ttl` job in the DC → submit one; a job whose worker died is

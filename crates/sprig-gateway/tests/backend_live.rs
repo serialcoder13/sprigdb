@@ -1,5 +1,5 @@
 //! Backend pools, state replay, pins, read-your-writes, writer selection
-//! and failure paths against the Compose stack (chapter 06). Each test is
+//! and failure paths against the Compose stack. Each test is
 //! skipped unless its variables are set:
 //!
 //! ```sh
@@ -572,8 +572,8 @@ async fn read_your_writes_on_primary_and_replicas() {
 /// `timestamp` in place of `last_gtid` after the commit, so the gateway
 /// reads the GTID itself. Without that the session's causal position
 /// didn't move and another session's next read went to a replica that
-/// hadn't applied the commit (R3: the read-your-writes bug found by the
-/// differential suite under Sprig 2PC).
+/// hadn't applied the commit (a read-your-writes bug the differential
+/// suite found under Sprig 2PC).
 #[tokio::test]
 async fn read_your_writes_after_a_commit_under_a_fixed_timestamp() {
     let u = need!(
@@ -645,7 +645,7 @@ async fn read_your_writes_after_a_commit_under_a_fixed_timestamp() {
 }
 
 /// With `autocommit = 0` a plain read opens a transaction, so it runs on
-/// the writer and pins there (chapter 06, "Pins"); before the fix it went
+/// the writer and pins there; before the fix it went
 /// to a replica, opened the transaction there, and the gateway discarded
 /// that connection and pinned the session as untracked for good.
 #[tokio::test]
@@ -737,9 +737,9 @@ async fn read_your_writes_on_galera() {
     for i in 1..=30 {
         ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
         if i % 2 == 0 {
-            // Give the position poll time to see the other nodes apply it
-            // (decision D13); otherwise the read may leave the writer with
-            // the check alone (decision D14).
+            // Give the position poll time to see the other nodes apply it;
+            // otherwise the read may leave the writer with the sync check
+            // alone.
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
         let r = ok(
@@ -772,11 +772,11 @@ async fn read_your_writes_on_galera() {
     b.close().await;
 }
 
-/// Decisions D13 and D14 under load: four sessions, 1,000 write-then-read
+/// Galera read routing under load: four sessions, 1,000 write-then-read
 /// rounds each, in four shapes (autocommit insert, update, explicit
 /// transaction, delete and insert), with and without a pause before the
 /// read, once per `reads.galera_unconfirmed` mode. No read misses its
-/// write; with `check` (D14) most reads leave the writer.
+/// write; with `check` most reads leave the writer.
 #[tokio::test]
 async fn read_your_writes_on_galera_stress() {
     let u = need!(skip::MARIADB_GALERA, "read_your_writes_on_galera_stress");
@@ -1435,7 +1435,7 @@ async fn wait_synced(u: &Url) {
     }
 }
 
-/// Decisions D13 and D14 (finding O1): a Galera node that is behind never
+/// A Galera node that is behind never
 /// stalls a read that must see a write. Apply is blocked on one node while
 /// health checks are too slow to notice (as between two checks in
 /// production), so only the polled positions and the bounded check protect
@@ -1500,7 +1500,7 @@ async fn a_lagging_galera_node_never_stalls_reads() {
                 // Let the position poll see the other nodes catch up.
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
-            // A fresh session each time, as in O1.
+            // A fresh session each time.
             let mut b = rig.session(Persona::MariaDb);
             let started = tokio::time::Instant::now();
             let r = run(&mut b, &format!("SELECT MAX(v) FROM {db}.t")).await;
@@ -1527,8 +1527,8 @@ async fn a_lagging_galera_node_never_stalls_reads() {
             |r| r.backends.nodes().status(&lagging).behind,
         )
         .await;
-        // Reads that must see a write (decision D14: possibly with no node
-        // but the writer showing it) never try the node behind, so no
+        // Reads that must see a write (possibly with no node but the writer
+        // showing it) never try the node behind, so no
         // check times out.
         for i in 41..=60 {
             ok(&mut a, &format!("INSERT INTO {db}.t (v) VALUES ({i})")).await;
@@ -1928,7 +1928,7 @@ async fn clients_cannot_change_the_gateways_session_tracking() {
     }
 }
 
-/// Chapter 12's probes (build step 5): `Handler_read_*` deltas on the
+/// Workload probes: `Handler_read_*` deltas on the
 /// statement's own connection, less the reading's own cost, give the rows
 /// a scan, a range read and a point lookup examined; pinned sessions are
 /// never probed, so their diagnostics survive.

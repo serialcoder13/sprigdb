@@ -1,10 +1,9 @@
-//! What a statement touches, for the gateway's privilege check (chapter
-//! 29, "Evaluation": SQL is checked coarsely by the gateway and exactly by
-//! MariaDB).
+//! What a statement touches, for the gateway's privilege check (SQL
+//! is checked coarsely by the gateway and exactly by MariaDB).
 //!
-//! [`requirements`] parses one data statement with sqlparser-rs (from the
-//! same parse view as chapter 07's AST path) and lists each relation it
-//! names with the actions that could make the statement legal there:
+//! [`requirements`] parses one data statement with sqlparser-rs (from the same
+//! parse view as the name rewrite's AST path) and lists each relation it names
+//! with the actions that could make the statement legal there:
 //!
 //! | Statement | Target | Every other relation |
 //! |---|---|---|
@@ -163,7 +162,7 @@ fn take(v: &mut Vec<ObjectName>, n: &ObjectName) {
 /// Data statements are remembered by their shape (the tokens with every
 /// literal's value left out): the relations and actions a statement needs
 /// never depend on its literals, and parsing the same shape again was a
-/// tenth of a MongoDB point read's gateway CPU (R5 round 4).
+/// tenth of a MongoDB point read's gateway CPU.
 #[must_use]
 pub fn requirements(sql: &[u8], opts: &LexOptions) -> Option<Vec<Need>> {
     let text = std::str::from_utf8(sql).ok()?;
@@ -346,7 +345,7 @@ fn db_of(n: &DdlName) -> Option<String> {
     n.db.clone()
 }
 
-/// What a classified DDL statement needs (chapter 29's action table:
+/// What a classified DDL statement needs (the action table:
 /// creating objects needs `CREATE` on the database, altering and dropping
 /// them the action on the object, routines `CREATE ROUTINE` and `ALTER
 /// ROUTINE`, triggers `TRIGGER` on the table).
@@ -481,7 +480,7 @@ pub fn ddl_requirements(t: &DdlTarget) -> Vec<Need> {
     }
 }
 
-/// The parse view of a statement's tokens (chapter 07's AST path): the
+/// The parse view of a statement's tokens (the name rewrite's AST path): the
 /// same characters on the same lines, comments and executable-comment
 /// markers blanked, string contents as `x`, `ANSI_QUOTES` identifiers
 /// backquoted. `None` for text the view can't keep faithful.

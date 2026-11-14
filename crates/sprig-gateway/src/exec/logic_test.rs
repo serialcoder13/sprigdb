@@ -1,5 +1,4 @@
-//! `Logic.TestRun` in a tenant session (chapter 41, "Test runs"; R7
-//! follow-ups): `sprig_logic::testrun` has the request, the checks and
+//! `Logic.TestRun` in a tenant session: `sprig_logic::testrun` has the request, the checks and
 //! the report; this runs it on this session.
 //!
 //! ```text
@@ -242,7 +241,7 @@ impl PassSession {
         let svc = Arc::clone(ts.services());
         let tenant = ts.tenant;
         let user = ts.principal.user.clone();
-        // Chapter 29: a draft is code the caller could deploy (`CREATE
+        // A draft is code the caller could deploy (`CREATE
         // ROUTINE` or `ALTER ROUTINE`); a deployed version, code the
         // caller may run (`EXECUTE`) or administers.
         let (may_create, may_execute) = {

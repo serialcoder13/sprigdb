@@ -1,5 +1,4 @@
-//! Full-text search in a tenant session (chapter 39, "DDL", "Translating
-//! queries"; R5 round 5), on 3306 and 3307:
+//! Full-text search in a tenant session, on 3306 and 3307:
 //!
 //! - **DDL**: `CREATE | ALTER | DROP SEARCH INDEX`, `SHOW SEARCH INDEXES`,
 //!   `CREATE | DROP SEARCH ANALYZER`, and MySQL's `CREATE FULLTEXT INDEX`
@@ -11,14 +10,14 @@
 //!   score ... END` where it is a value), and the statement runs as any
 //!   other, so privileges, row-level security and the router apply to the
 //!   rows returned. A table with no search index keeps MariaDB's own
-//!   `FULLTEXT` behaviour (decision S7).
+//!   `FULLTEXT` behaviour.
 //! - **`sprig_search('index', 'query', options)`**: replaced by a derived
 //!   table over the indexed object, `SELECT <key>, score, highlights,
 //!   _shard FROM <object> WHERE <key> IN (...)`, read with the user's
 //!   privileges.
 //! - **`EXPLAIN`** of a statement with either: MariaDB's plan of the
 //!   rewritten statement, then one `SEARCH` row per search with its
-//!   `SearchScan` (`crate::search::explain`, decision S25).
+//!   `SearchScan` (`crate::search::explain`).
 
 // Rewriting walks many short-lived names (q, t, k, s) and long statement
 // arms, as the rest of `exec` does.
@@ -329,7 +328,7 @@ impl PassSession {
         let Ok(sql) = std::str::from_utf8(text) else {
             return Ok(None);
         };
-        // `FULLTEXT` keys inside `CREATE TABLE` (R5 round 6): the table
+        // `FULLTEXT` keys inside `CREATE TABLE`: the table
         // without them, then each as a converted search index.
         match sprig_search::ddl::create_table_fulltext(sql) {
             Ok(None) => {}
@@ -649,7 +648,7 @@ impl PassSession {
         def.flavor = flavor;
         def.tenant_name = tenant_name;
         def.definer_user_id = user_id;
-        // A collection (chapter 31) or a table.
+        // A collection or a table.
         let coll = cat
             .ext
             .get::<crate::mongo::catalog::DocState>(crate::mongo::catalog::MODULE)
@@ -664,7 +663,7 @@ impl PassSession {
                 }
             }
         } else if def.model == Model::Kv {
-            // A key-value namespace (chapter 33; R5 round 6): its keys
+            // A key-value namespace: its keys
             // table, `k` the key and `v` a string key's value.
             let q = format!(
                 "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
@@ -919,7 +918,7 @@ impl PassSession {
             Err(e) => return Ok(Some(self.fail(out, &e).await?)),
         };
         let wire = out.wire();
-        // Decision S25: `EXPLAIN` of a statement with searches describes
+        // `EXPLAIN` of a statement with searches describes
         // them after MariaDB's plan.
         let mut scans = crate::search::explain::is_explain(sql).then(Vec::new);
         let rewritten = match self.rewrite_search(cx, wire, sql, &scan, &mut scans).await {
@@ -942,7 +941,7 @@ impl PassSession {
     }
 
     /// `COM_STMT_PREPARE` of a text whose `MATCH ... AGAINST` runs on a
-    /// search index (R5 round 6): the text to prepare on the backend for its
+    /// search index: the text to prepare on the backend for its
     /// metadata, with each such call replaced by an expression of the same
     /// placeholders (`(CONCAT(?) IS NOT NULL)` as a condition, `(0e0 *
     /// (CONCAT(?) IS NULL))` as a value); `None` when no `MATCH` is on a
@@ -1080,7 +1079,7 @@ impl PassSession {
             }
             let Some((def, tref)) = chosen else {
                 if !any_index {
-                    // MariaDB's FULLTEXT (decision S7).
+                    // MariaDB's FULLTEXT.
                     return Ok(None);
                 }
                 return Err(SprigError::new(
@@ -1117,7 +1116,7 @@ impl PassSession {
                 return Err(self.denied("SELECT", &db, &def.object));
             }
             // A converted MySQL FULLTEXT index answers as InnoDB's does:
-            // with every committed row (decision S9).
+            // with every committed row.
             let consistency = if def.flavor == Flavor::FulltextCompat {
                 Consistency::Latest
             } else {
@@ -1292,9 +1291,9 @@ impl PassSession {
         ))
     }
 
-    /// One search's `EXPLAIN` description (decision S25); the hit count
+    /// One search's `EXPLAIN` description; the hit count
     /// and time only when no row policy on the object binds the session
-    /// (the copy's count includes rows hidden from it, decision S24).
+    /// (the copy's count includes rows hidden from it).
     #[allow(clippy::too_many_arguments)]
     async fn explain_scan(
         &self,
@@ -1545,7 +1544,7 @@ pub(super) fn param_literal(p: &sprig_proto_mysql::command::BoundParam) -> Strin
 }
 
 /// An `EXPLAIN` result with one row per search appended to its first
-/// resultset (decision S25).
+/// resultset.
 struct ExplainSink<'a> {
     inner: &'a mut dyn ResultSink,
     scans: Vec<crate::search::explain::Scan>,

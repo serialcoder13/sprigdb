@@ -1,5 +1,4 @@
-//! Queues in a tenant session (chapter 50, "SQL, logic, MongoDB and
-//! HTTP"; build steps 9 and 10): `CALL sprig.mq_publish(...)`, `mq_get`,
+//! Queues in a tenant session: `CALL sprig.mq_publish(...)`, `mq_get`,
 //! `mq_ack` and `mq_nack`, run by [`sprig_queues::sql`] over the
 //! gateway's queue engine.
 //!
@@ -37,7 +36,7 @@ use super::PassSession;
 use super::tenant::Step;
 use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire};
 
-/// A chapter 50 error as a SQL one: the number, the name, the text.
+/// A queue engine error as a SQL one: the number, the name, the text.
 pub(super) fn sql_error(e: &MqError) -> SprigError {
     let state = if e.code == MqCode::OwnerMoved {
         *b"40001"
@@ -185,8 +184,7 @@ impl PassSession {
     }
 
     /// The session's commit hook for acknowledgements inside a
-    /// transaction (chapter 50, "Acknowledging inside a database
-    /// transaction", step 5): after every request, if this session holds
+    /// transaction: after every request, if this session holds
     /// deliveries for its transaction and the transaction has ended, the
     /// owners learn it now: not committed for a `ROLLBACK`; for anything
     /// else (`COMMIT`, an implicit commit) they read the row at once,
@@ -207,7 +205,7 @@ impl PassSession {
         engine.txn_ended(session, if ok { word } else { None });
     }
 
-    /// Chapter 50's step of [`PassSession::tenant_text`]: `None` when the
+    /// The queues step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't a `sprig.mq_*` call.
     pub(super) async fn tenant_queues(
         &mut self,
@@ -336,7 +334,7 @@ impl PassSession {
                 let mandatory = num(4, 0) != 0;
                 let mut m = mq::message(&exchange, &key, body, text(3).as_deref())
                     .map_err(|e| sql_error(&e))?;
-                // Chapter 42: an inherited exchange or queue (a targeted
+                // An inherited exchange or queue (a targeted
                 // publish into a member's instance, or the headers stamped
                 // on one into this tenant's own).
                 if let Some(routed) =
@@ -391,7 +389,7 @@ impl PassSession {
                     .sql_vhost(principal, &vhost(3), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
-                // R9 (r9tests): an optional lease tag, so `mq_release` can
+                // An optional lease tag, so `mq_release` can
                 // give the messages back (a queue sink's dead task's).
                 let tag = text(4);
                 let ds = v
@@ -433,7 +431,7 @@ impl PassSession {
                     rows,
                 ))
             }
-            // R9 (r9tests): a lease tag's messages back to the queue now.
+            // A lease tag's messages back to the queue now.
             MqCall::Release => {
                 let v = engine
                     .sql_vhost(principal, &vhost(2), session)
@@ -444,13 +442,13 @@ impl PassSession {
                     .map_err(|e| sql_error(&e))?;
                 Ok(Reply::Ok(0))
             }
-            // R9 (r9cluster), for Studio's queue pages (ST50).
+            // Queue information, for Studio's queue pages.
             MqCall::Info => {
                 let v = engine
                     .sql_vhost(principal, &vhost(1), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
-                // ST66: no queue (NULL, or no argument) answers every
+                // No queue (NULL, or no argument) answers every
                 // queue the user may read, one row each.
                 if text(0).is_none() {
                     let all = v.info_all().await.map_err(|e| sql_error(&e))?;
@@ -630,7 +628,7 @@ impl PassSession {
                 let in_txn = self.mq_in_transaction();
                 let deleted = match self.mq_run(cx, &mq::ack_sql(&db, &t), true).await {
                     Ok(c) => c.affected.unwrap_or(0),
-                    // R9 (r9tests): a user granted only the queue (not
+                    // A user granted only the queue (not
                     // DELETE on its database's tables), such as an
                     // inherited queue sink's sprig_inherited, may consume
                     // it (the engine checked the queue's rights at the

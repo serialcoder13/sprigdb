@@ -435,6 +435,57 @@ fn global_registry_collects_registered_keys() {
     );
 }
 
+static NOT_YET: Setting<u32> = Setting {
+    key: "gateway.test_not_yet_built",
+    default: 1,
+    scopes: Scopes::PROCESS,
+    hard: HardBounds::range(0, 10),
+    apply: Apply::Live,
+    operator_only: true,
+    owner: 3,
+    doc: "A key registered ahead of its code, for the marks test",
+};
+
+/// bugfix-89's round (smallfix): a key registered ahead of its code stays
+/// registered (a stored value and `SET` are still checked) but listings
+/// leave it out; a key read only at start is shown as `restart`.
+#[test]
+fn marked_keys_are_hidden_or_restart_only() {
+    let reg = Registry::new([
+        &NOT_YET as &dyn AnySetting,
+        &POOL_SIZE,
+        &MAX_PER_TABLE,
+        &MFA_REQUIRED,
+    ])
+    .unwrap()
+    .with_marks(&[(NOT_YET.key, Mark::Unbuilt), (POOL_SIZE.key, Mark::Restart)]);
+    assert!(reg.get(NOT_YET.key).is_some());
+    assert!(reg.is_unbuilt(NOT_YET.key));
+    let listed: Vec<&str> = reg.iter().map(|d| d.key()).collect();
+    assert_eq!(listed, [MFA_REQUIRED.key, MAX_PER_TABLE.key, POOL_SIZE.key]);
+    assert_eq!(reg.iter_all().count(), 4);
+    assert_eq!(reg.apply_name(&POOL_SIZE), "restart");
+    assert_eq!(reg.apply_name(&MAX_PER_TABLE), "live");
+    assert_eq!(reg.apply_name(&MFA_REQUIRED), "new_sessions");
+    // The production table names registered keys only, each once.
+    let mut seen = std::collections::BTreeSet::new();
+    for (k, _, why) in crate::registry::MARKED {
+        assert!(seen.insert(*k), "{k} marked twice");
+        assert!(!why.is_empty(), "{k}");
+    }
+    assert_eq!(
+        crate::registry::mark_of("redis.sharded_pubsub_hubs"),
+        Some(Mark::Restart)
+    );
+    // A value can still be stored for it.
+    let mut s = MemSettings::new(&reg);
+    let dc = DcId::new("mum1").unwrap();
+    let ctx = SettingCtx::process(&dc);
+    s.set_value(Level::Global, &ctx, NOT_YET.key, &Value::Int(3))
+        .unwrap();
+    assert_eq!(s.resolve(NOT_YET.key, &ctx).unwrap().value, Value::Int(3));
+}
+
 #[test]
 fn default_is_clamped_by_tightened_bounds() {
     let reg = registry();

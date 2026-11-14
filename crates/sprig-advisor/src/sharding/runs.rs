@@ -1,6 +1,6 @@
-//! `advisor_runs` (chapter 16, "Data structures"; build step 7): one row
-//! per advisor run in the tenant's catalog, its own migration module
-//! (`advisor_runs`), migrated on first use like chapter 15's `sharding`.
+//! `advisor_runs`: one row per advisor run in the tenant's catalog, its own
+//! migration module (`advisor_runs`), migrated on first use like the
+//! `sharding` module.
 
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
@@ -10,7 +10,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 /// The module name.
 pub const MODULE: &str = "advisor_runs";
 
-/// `advisor_runs`, as chapter 16 gives it.
+/// `advisor_runs`.
 pub const DDL_ADVISOR_RUNS: &str = "CREATE TABLE IF NOT EXISTS advisor_runs (
   run_id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   cause            ENUM('first_split','min_shards','periodic','manual','new_object') NOT NULL,
@@ -44,7 +44,7 @@ pub const DDL_ADVISOR_RUNS: &str = "CREATE TABLE IF NOT EXISTS advisor_runs (
 pub static MIGRATIONS: &[Migration] = &[Migration {
     format: 1,
     phase: Phase::Expand,
-    name: "advisor_runs (chapter 16)",
+    name: "advisor_runs",
     statements: &[DDL_ADVISOR_RUNS],
 }];
 

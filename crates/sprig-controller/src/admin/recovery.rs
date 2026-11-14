@@ -1,5 +1,4 @@
-//! An operator's recovery jobs (chapter 25, "Recovery after an outage"
-//! steps 2-3; r2close): `POST /admin/v1/clusters/{id}:extract` and
+//! An operator's recovery jobs (recovery after an outage): `POST /admin/v1/clusters/{id}:extract` and
 //! `POST /admin/v1/clusters/{id}:rebuild`, behind `sprigctl cluster
 //! extract|rebuild`. Both submit a job (cause `operator`) on the DC
 //! leader; the `cluster_failover` loop follows it in the cluster's record.

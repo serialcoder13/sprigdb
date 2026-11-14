@@ -1,10 +1,10 @@
-//! R3's online re-key (chapter 16, "Online re-key (R3)"; chapter 20), live:
+//! Online re-key, live:
 //! a table group keyed by `store_id` is re-keyed to `customer_id` while
 //! writers keep inserting, updating, moving and deleting rows.
 //!
-//! One tenant (id 8,930,699,001: the top of agent r3c's range, port 49306 × 100,000 +
-//! 4,000,000,000) on the Compose single node 13301, in a private DC tier
-//! `r3crekey` of agent r3c's own etcd (49379), so no other worker claims
+//! One tenant (id 8,930,699,001: in a private deployment's range, port
+//! 49306 × 100,000 + 4,000,000,000) on the Compose single node 13301, in a
+//! private DC tier `r3crekey` of a private etcd (49379), so no other worker claims
 //! its jobs:
 //!
 //! 1. group 7 (`orders`, `order_items`, `events`, all keyed by `store_id`)

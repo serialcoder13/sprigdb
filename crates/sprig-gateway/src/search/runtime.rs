@@ -47,7 +47,7 @@ pub(crate) async fn dc_clusters(svc: &SearchService) -> Result<Vec<ClusterId>> {
 }
 
 /// A session of `def`'s definer, exempt from row-level security while it
-/// lives (decisions S6 and RL17; audited as `rls.internal_exempt`).
+/// lives (audited as `rls.internal_exempt`).
 pub(crate) struct DefinerSession {
     sql: SqlSession,
     _exempt: crate::tenant::rls::ExemptGuard,
@@ -80,7 +80,7 @@ impl DefinerSession {
             None,
             64 << 20,
         )?;
-        // Chapter 29 (decision S6, RL17): the copy holds every row; queries
+        // The copy holds every row; queries
         // re-read hits through the querying user's session and policies.
         let exempt = crate::tenant::rls::exempt_internal(
             sql.session_id(),

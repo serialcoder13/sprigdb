@@ -1,4 +1,4 @@
-//! The pieces chapter 07's name virtualization asks the gateway for: the
+//! The pieces name virtualization asks the gateway for: the
 //! tenant's [`NameMap`] built from a catalog snapshot, the tenant's
 //! sessions for `SHOW PROCESSLIST`, and account names for output.
 
@@ -37,9 +37,8 @@ pub fn name_map(cat: &TenantCatalog) -> MemoryNameMap {
     map
 }
 
-/// The tenant's sessions on this gateway (chapter 04: the DC's gateways,
-/// once registration exists). Until chapter 29's `PROCESS` privilege, a
-/// user sees only its own sessions, as MySQL shows a user without it.
+/// The tenant's sessions on this gateway. A user sees only its own
+/// sessions, as MySQL shows a user without `PROCESS`.
 pub struct TenantSessions<'a> {
     /// The gateway's sessions.
     pub table: &'a Arc<SessionTable>,

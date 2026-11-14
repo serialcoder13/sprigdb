@@ -13,6 +13,8 @@ export interface GridProps {
   onEdit?(row: number, col: number, value: Cell): void;
   edited?(row: number, col: number): boolean;
   rowClass?(row: number): string;
+  /** The row that has the focus changed (a click or the keyboard). */
+  onActive?(row: number): void;
   height?: number;
   /** The result's row number of row 0 (a cursor's sliding window). */
   firstRow?: number;
@@ -37,10 +39,14 @@ export function Grid(p: GridProps) {
     overscan: 12,
   });
   const cols = p.columns.length;
+  const activate = (r: number, c: number) => {
+    setActive([r, c]);
+    p.onActive?.(r);
+  };
   const focusCell = (r: number, c: number) => {
     const rr = Math.max(0, Math.min(p.rowCount - 1, r));
     const cc = Math.max(0, Math.min(cols - 1, c));
-    setActive([rr, cc]);
+    activate(rr, cc);
     v.scrollToIndex(rr);
     requestAnimationFrame(() => {
       scroller.current?.querySelector<HTMLElement>(`[data-cell="${rr}:${cc}"]`)?.focus();
@@ -141,7 +147,7 @@ export function Grid(p: GridProps) {
                       data-cell={`${r}:${c}`}
                       className={cls}
                       title={val ?? 'NULL'}
-                      onClick={() => setActive([r, c])}
+                      onClick={() => activate(r, c)}
                       onDoubleClick={() => startEdit(r, c)}
                     >
                       {isEditing ? (

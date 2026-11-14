@@ -1,5 +1,4 @@
-//! `SHOW CREATE TRIGGER`'s statement as MySQL 8.4 prints it (chapter 28,
-//! "Output on port 3306"; R4, decision X36).
+//! `SHOW CREATE TRIGGER`'s statement as MySQL 8.4 prints it.
 //!
 //! MariaDB keeps the statement as written: `trigger t before insert on
 //! db.x for each row ...`. MySQL rebuilds the head from the trigger's
@@ -182,7 +181,7 @@ pub fn mysql_trigger_statement(text: &str) -> Option<String> {
 mod tests {
     use super::mysql_trigger_statement as m;
 
-    /// The forms checked against MySQL 8.4.11 (R4, decision X36).
+    /// The forms checked against MySQL 8.4.11.
     #[test]
     fn heads_as_mysql_prints_them() {
         assert_eq!(

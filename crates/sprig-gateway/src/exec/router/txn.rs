@@ -1,4 +1,4 @@
-//! Chapter 18's coordinator in the gateway ("The gateway's side"): a
+//! The transaction coordinator's gateway side: a
 //! [`TxnBackend`] whose branches are [`BackendSession`]s, and the admin
 //! the coordinator finishes prepared branches with.
 //!
@@ -74,7 +74,7 @@ pub(super) fn session_on(
     bs
 }
 
-/// Per-user backend accounts on `cluster` (chapter 29), before a session
+/// Per-user backend accounts on `cluster`, before a session
 /// first uses it.
 pub(super) async fn ensure_accounts(
     svc: &TenantServices,
@@ -184,7 +184,7 @@ impl ClusterAdmin for GwAdmin {
     async fn xa_recover(&self, c: &ClusterId) -> DbResult<Vec<Xid>> {
         self.of(c).await?.xa_recover(c).await
     }
-    // Sprig 2PC (R3): held branches' redo rows, through `sprig_ctl`.
+    // Sprig 2PC: held branches' redo rows, through `sprig_ctl`.
     async fn ensure_redo(&self, c: &ClusterId, schema: &str) -> DbResult<()> {
         self.of(c).await?.ensure_redo(c, schema).await
     }
@@ -254,7 +254,7 @@ impl ClusterAdmin for GwAdmin {
     }
 }
 
-/// Chapter 19's lookup statements on the gateway's own connections
+/// Lookup-index statements on the gateway's own connections
 /// (`sprig_txn::lookup::DistTxn`'s Pre, Main and Post): parameters are
 /// written into the text as literals (strings as `_utf8mb4 X'…'`, so the
 /// column's collation compares them), rows come back as `mysql_async`

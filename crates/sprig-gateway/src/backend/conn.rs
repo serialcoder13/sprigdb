@@ -1,8 +1,8 @@
-//! Backend connection setup (chapter 06, "New connections"; build step
-//! 1): connect with TLS, initialize session tracking and timeouts, apply
-//! the persona baseline, read the 64-bit thread id and the pool's
-//! [`Baseline`], all in one round trip after login. Also the per-connection
-//! prepared-statement cache and the captures that run before a release.
+//! Backend connection setup: connect with TLS, initialize session tracking
+//! and timeouts, apply the persona baseline, read the 64-bit thread id and
+//! the pool's [`Baseline`], all in one round trip after login. Also the
+//! per-connection prepared-statement cache and the captures that run before a
+//! release.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,8 +59,8 @@ impl std::fmt::Debug for ConnectSpec {
 }
 
 impl ConnectSpec {
-    /// The gateway-owned variables (chapter 06, "New connections"):
-    /// session tracking and timeouts, and `wsrep_sync_wait = 0` on Galera.
+    /// The gateway-owned variables: session tracking and timeouts, and
+    /// `wsrep_sync_wait = 0` on Galera.
     #[must_use]
     pub fn gateway_sql(&self) -> String {
         let wsrep = if self.galera {
@@ -76,7 +76,7 @@ impl ConnectSpec {
         )
     }
 
-    /// The two initialization statements (chapter 06): the gateway-owned
+    /// The two initialization statements: the gateway-owned
     /// variables, then the persona baseline.
     #[must_use]
     pub fn init_sql(&self) -> String {
@@ -99,8 +99,7 @@ pub struct Restored {
 }
 
 /// Counts a node's backend prepared statements against this gateway's
-/// share of `max_prepared_stmt_count` (chapter 06, "Prepared statements
-/// per node"; build step 9).
+/// share of `max_prepared_stmt_count`.
 #[derive(Debug, Default)]
 pub struct PreparedBudget {
     used: AtomicU64,
@@ -164,7 +163,7 @@ pub struct BackendStmt {
     /// Parameter definitions, as the backend sent them (for `PREPARE_OK`).
     pub param_defs: Vec<ColumnDef>,
     /// Whether an execute has sent parameter types to this statement; a
-    /// re-prepared statement needs them again (chapter 05).
+    /// re-prepared statement needs them again.
     pub types_sent: bool,
 }
 
@@ -253,7 +252,7 @@ pub struct Warning {
     pub message: String,
 }
 
-/// A pooled backend connection (chapter 06, "Pools and connections").
+/// A pooled backend connection.
 pub struct BackendConn {
     /// The protocol client.
     pub client: MysqlClient,
@@ -272,8 +271,7 @@ pub struct BackendConn {
     /// `@@global.max_prepared_stmt_count` at connect.
     pub max_prepared: u64,
     /// What one [`HANDLER_READS_SQL`] adds to the counters it reads,
-    /// measured on this connection's first probe (chapter 12, "Sampling
-    /// rows examined").
+    /// measured on this connection's first probe.
     pub probe_cost: Option<u64>,
     init_sql: Arc<str>,
     gateway_sql: Arc<str>,
@@ -301,9 +299,9 @@ fn text(v: Option<&Bytes>) -> String {
         .unwrap_or_default()
 }
 
-/// The `Handler_read_*` counters of the connection's own thread, summed
-/// (chapter 12, "Sampling rows examined"): one row, one value. Reading
-/// them bumps some of them by a constant, measured per connection.
+/// The `Handler_read_*` counters of the connection's own thread, summed: one
+/// row, one value. Reading them bumps some of them by a constant, measured
+/// per connection.
 pub const HANDLER_READS_SQL: &str = "SELECT SUM(VARIABLE_VALUE) FROM information_schema.SESSION_STATUS \
      WHERE VARIABLE_NAME IN ('HANDLER_READ_FIRST', 'HANDLER_READ_KEY', 'HANDLER_READ_LAST', \
      'HANDLER_READ_NEXT', 'HANDLER_READ_PREV', 'HANDLER_READ_RND', 'HANDLER_READ_RND_NEXT')";
@@ -322,8 +320,8 @@ pub async fn connect(
     cfg.tls_config = Some(Arc::clone(&spec.tls));
     cfg.found_rows = spec.found_rows;
     // The relay answers a `LOCAL INFILE` request only for the file the
-    // client named, and declines any other (chapter 05), so backends may
-    // always offer it.
+    // client named, and declines any other, so backends may always offer
+    // it.
     cfg.local_files = true;
     cfg.compress = spec.compress;
     cfg.extra_caps = spec.mariadb_caps;
@@ -453,7 +451,7 @@ impl BackendConn {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        // Each variable and its collation (gaps row 57, R4 round 6).
+        // Each variable and its collation.
         let cols: Vec<String> = names
             .iter()
             .map(|n| {
@@ -575,8 +573,8 @@ impl BackendConn {
             .unwrap_or(0))
     }
 
-    /// After a client statement that set gateway-owned variables (chapter
-    /// 06, "Replay rules"): reads the values it gave `names`, puts the
+    /// After a client statement that set gateway-owned variables: reads
+    /// the values it gave `names`, puts the
     /// gateway's own values back (initialization's, or the server default
     /// for the ones initialization leaves alone), and reads every allowed
     /// variable, since tracking may have been off for part of the

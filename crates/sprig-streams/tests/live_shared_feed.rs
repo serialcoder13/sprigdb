@@ -70,7 +70,9 @@ fn pool(gw: &str, tenant: &str, max: usize) -> Pool {
         .ip_or_hostname(host)
         .tcp_port(port.parse().unwrap())
         .user(Some(format!("{tenant}.app")))
-        .pass(Some(var("SPRIG_SF_PASSWORD").unwrap_or_else(|| "sprig-dev-app".into())))
+        .pass(Some(
+            var("SPRIG_SF_PASSWORD").unwrap_or_else(|| "sprig-dev-app".into()),
+        ))
         .db_name(Some(DB))
         .ssl_opts(Some(
             mysql_async::SslOpts::default()
@@ -181,6 +183,24 @@ async fn wait_counts(pools: &[Pool], want: &BTreeMap<(usize, String), u64>, limi
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// Drops one probe-only stream per tenant and makes a new one, with
+/// records, while the others run (instances removed and added live).
+async fn change_streams(pools: &[Pool], per: usize) {
+    for p in pools {
+        let mut c = conn(p).await;
+        c.query_drop(format!("DROP STREAM s{}", per - 1))
+            .await
+            .unwrap();
+        create_stream(&mut c, "sx").await;
+        for k in 0..5 {
+            c.query_drop(format!("INSERT INTO sx (key, value) VALUES ('x{k}', 'x')"))
+                .await
+                .unwrap();
+        }
+    }
+    println!("dropped s{} and made sx in every tenant", per - 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -302,7 +322,7 @@ async fn hundreds_of_stream_instances_share_one_binlog_dump() {
                     let (ti, s) = slots[i % slots.len()];
                     i += publishers;
                     let id = next_id.fetch_add(1, Ordering::SeqCst);
-                    let commit = id % 7 != 0;
+                    let commit = !id.is_multiple_of(7);
                     let r: Result<(), mysql_async::Error> = async {
                         let mut c = pools[ti].get_conn().await?;
                         c.query_drop("START TRANSACTION").await?;
@@ -360,26 +380,17 @@ async fn hundreds_of_stream_instances_share_one_binlog_dump() {
         }
         if !changed && n >= total * 3 / 5 {
             changed = true;
-            // One probe-only stream per tenant is dropped and a new one
-            // made, with records, while the others run.
-            for p in &pools {
-                let mut c = conn(p).await;
-                c.query_drop(format!("DROP STREAM s{}", per - 1))
-                    .await
-                    .unwrap();
-                create_stream(&mut c, "sx").await;
-                for k in 0..5 {
-                    c.query_drop(format!("INSERT INTO sx (key, value) VALUES ('x{k}', 'x')"))
-                        .await
-                        .unwrap();
-                }
-            }
-            println!("dropped s{} and made sx in every tenant", per - 1);
+            change_streams(&pools, per).await;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     for t in tasks {
         t.await.unwrap();
+    }
+    if !changed {
+        // The writers ended first (a fast run): change them now, while
+        // every other sequencer still runs.
+        change_streams(&pools, per).await;
     }
     let wrote = t2.elapsed().as_secs_f64();
     println!(
@@ -432,7 +443,11 @@ async fn hundreds_of_stream_instances_share_one_binlog_dump() {
                 let n = j["n"].as_u64().unwrap();
                 assert_eq!(k, &id.to_string());
                 assert!(ids.insert(id), "{}.{name}: id {id} twice", tenants[ti]);
-                assert_ne!(id % 7, 0, "{}.{name}: rolled-back id {id}", tenants[ti]);
+                assert!(
+                    !id.is_multiple_of(7),
+                    "{}.{name}: rolled-back id {id}",
+                    tenants[ti]
+                );
                 if n <= last_n {
                     inversions += 1;
                 }
@@ -443,8 +458,7 @@ async fn hundreds_of_stream_instances_share_one_binlog_dump() {
             exp.sort_unstable();
             let exp_ids: BTreeSet<u64> = exp.iter().map(|x| x.1).collect();
             assert_eq!(
-                ids,
-                exp_ids,
+                ids, exp_ids,
                 "{}.{name}: records differ from the committed transactions",
                 tenants[ti]
             );

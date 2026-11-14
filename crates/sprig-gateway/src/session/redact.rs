@@ -1,6 +1,6 @@
 //! Secrets out of a session's `Info` text (`SHOW PROCESSLIST`,
 //! `information_schema.PROCESSLIST`, Studio's and the Admin API's session
-//! lists; `decisions/bugfix-interim.md` bugfix-24).
+//! lists).
 //!
 //! The text a client sent is shown while its statement runs, so a
 //! password or a connection's credentials written as a literal would be
@@ -11,8 +11,7 @@
 //!   'hash'`, `... REPLACE 'current'`, MariaDB's `IDENTIFIED VIA p USING 'x'`;
 //! - `PASSWORD 'x'`, `PASSWORD = 'x'`, `PASSWORD('x')` (and `OLD_PASSWORD`,
 //!   `MASTER_PASSWORD = 'x'`, any word ending in `PASSWORD`);
-//! - every value in `CREDENTIALS (k = 'v', ...)` (chapter 51's
-//!   `CREATE CONNECTION` and `ALTER CONNECTION ... SET CREDENTIALS`).
+//! - every value in `CREDENTIALS (k = 'v', ...)` (`CREATE CONNECTION` and `ALTER CONNECTION ... SET CREDENTIALS`).
 //!
 //! A string cut off by the 1,024-character limit counts as a literal to
 //! the end. Text without `IDENTIFIED`, `PASSWORD` or `CREDENTIALS` is

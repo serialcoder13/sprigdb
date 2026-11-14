@@ -1,6 +1,5 @@
-//! Policy expressions (chapter 29, "What a policy may reference"):
-//! validation when a policy is created, and rendering for one table
-//! reference with the session's values bound.
+//! Policy expressions: validation when a policy is created, and rendering for
+//! one table reference with the session's values bound.
 //!
 //! ```text
 //! validate(text):
@@ -48,7 +47,7 @@ pub fn invalid(why: impl std::fmt::Display) -> SprigError {
     )
 }
 
-/// The session functions a policy may call (chapter 29's table).
+/// The session functions a policy may call.
 pub const SESSION_FUNCTIONS: &[&str] = &[
     "CURRENT_USER",
     "SPRIG_USER_ID",
@@ -900,7 +899,7 @@ pub struct LiteralBinder<'a> {
     /// Tenants the user administers, if known.
     pub managed: Option<&'a [u64]>,
     /// The subtree is read from `__sprig_sys.__sprig_subtree_v` instead of
-    /// [`Self::subtree`] (above `rls.inline_subtree_max`; RL58).
+    /// [`Self::subtree`] (above `rls.inline_subtree_max`).
     pub subtree_table: bool,
     /// Likewise for [`Self::managed`] (an administrator's managed tenants
     /// are its subtree).
@@ -1118,7 +1117,7 @@ mod tests {
             "(`t`.org IN (42, 43)) AND `t`.u = 'alice@%'"
         );
         assert!(r("SPRIG_TENANT_MANAGED(org)").is_err());
-        // RL58: above rls.inline_subtree_max, the subtree table.
+        // Above rls.inline_subtree_max, the subtree table.
         let t = LiteralBinder {
             subtree: None,
             subtree_table: true,

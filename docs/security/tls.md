@@ -129,7 +129,7 @@ A listener can ask TLS clients for a certificate, signed by a CA you name. Accou
 
 Both take the data-centre and global scopes. The listener's `tls` mode must not be `off`, and the CA file must be set and readable; otherwise the listener change is rejected, the listener keeps running with its previous settings, and the change is reported as not applied, with a reason such as "listener.mysql.client_cert needs a CA: set tls.bundles.default.client_ca_path". A certificate that doesn't chain to the CA fails the TLS handshake, in `optional` mode too.
 
-To let accounts on the MySQL listener log in with certificates from your client CA:
+To let accounts on the MySQL listener log in with certificates from your client CA (the other listeners work the same way, with their own `listener.<name>.client_cert`):
 
 ```sh
 sprigctl settings set --scope global tls.bundles.default.client_ca_path /etc/sprigdb/tls/client-ca.pem --reason "client certificates"
@@ -144,7 +144,7 @@ CREATE USER 'billing'@'%' IDENTIFIED BY 's3cret-Passw0rd'
 ALTER USER 'app'@'%' REQUIRE X509;
 ```
 
-The client connects with its certificate and key, for example `mysql -h db.example.com -u acme.billing -p --ssl-mode=VERIFY_IDENTITY --ssl-ca=ca.pem --ssl-cert=billing.pem --ssl-key=billing-key.pem`. The password is still checked: a certificate is required in addition to it, never instead of it.
+The client connects with its certificate and key, for example `mysql -h db.example.com -u acme.billing -p --ssl-mode=VERIFY_IDENTITY --ssl-ca=ca.pem --ssl-cert=billing.pem --ssl-key=billing-key.pem`. The password is still checked: a certificate is required in addition to it, not instead of it. The one exception is AMQP's `EXTERNAL` login, below.
 
 `REQUIRE SUBJECT` and `REQUIRE ISSUER` compare the verified certificate's names exactly, in the one-line form MySQL and OpenSSL use: each attribute in certificate order, as `/C=GB/O=Acme/CN=billing`. To see a certificate's names in that form, run `openssl x509 -in billing.pem -noout -subject -issuer -nameopt compat`. A login that doesn't meet the account's requirement fails with 1045, like a wrong password.
 
@@ -152,19 +152,31 @@ The `optional` mode is usually the right one: accounts without a certificate req
 
 ### Where certificate requirements are checked
 
-| Listener | `REQUIRE X509` | `REQUIRE SUBJECT`, `REQUIRE ISSUER` |
+Every listener checks `REQUIRE X509`, `REQUIRE SUBJECT` and `REQUIRE ISSUER` against the certificate the connection presented:
+
+| Listener | Logins checked | A login that doesn't meet the requirement gets |
 |---|---|---|
-| MySQL, MariaDB, MongoDB, Redis | Checked against the connection's verified certificate | Checked |
-| Kafka | Checked | Such accounts can't log in |
-| Bolt, AMQP, HTTP password logins | Such accounts can't log in | Such accounts can't log in |
+| `mysql`, `mariadb` | MySQL-protocol logins | 1045 |
+| `mongo` | SCRAM logins | 18 `AuthenticationFailed` |
+| `redis` | `AUTH` | `WRONGPASS` |
+| `kafka` | SASL logins | `SASL_AUTHENTICATION_FAILED` |
+| `bolt` | `basic` logins | `Neo.ClientError.Security.Unauthorized` |
+| `amqp`, `amqps` | `PLAIN`, `AMQPLAIN` and `EXTERNAL` logins | 403 `ACCESS_REFUSED` |
+| `http`, `https` | Basic, API keys, and the password login at `POST /v1/auth/login` | 401 |
 
-The certificate only adds a check to the account's usual login (password, SCRAM or `AUTH`); no protocol logs in with a certificate alone. MongoDB's `MONGODB-X509`, AMQP's `EXTERNAL` and Kafka mutual TLS without SASL aren't supported.
+`REQUIRE X509` needs a certificate the listener verified; `REQUIRE SUBJECT` and `REQUIRE ISSUER` also compare its names. The refusal looks like a wrong password, so it doesn't tell a client which part failed.
 
-A login handed to another data centre because of the tenant's [residency](residency.md) carries whether a certificate was verified, but not its names, so accounts with `REQUIRE SUBJECT` or `REQUIRE ISSUER` log in only through gateways in the tenant's allowed data centres.
+The certificate adds a check to the account's usual login (password, SCRAM, `AUTH` or API key). The one login by certificate alone is AMQP's SASL `EXTERNAL`, for accounts that require a certificate; see [AMQP](../connect/amqp.md#log-in-with-a-client-certificate-external). MongoDB's `MONGODB-X509` and Kafka mutual TLS without SASL aren't supported.
+
+A login handed to another data centre because of the tenant's [residency](residency.md) carries whether a certificate was verified and its subject and issuer, so `REQUIRE SUBJECT` and `REQUIRE ISSUER` are checked in the deciding data centre as well. A handoff from a gateway of an earlier release carries no names, and accounts with `REQUIRE SUBJECT` or `REQUIRE ISSUER` are refused through it, so upgrade every data centre's gateways before relying on them.
+
+`SHOW CREATE USER` prints an account's requirement as MySQL does, such as `REQUIRE SUBJECT '/C=GB/O=Acme/CN=billing' ISSUER '/C=GB/O=Acme/CN=Acme client CA'`. See [Tenants and accounts](../sql/tenants-and-accounts.md#show-create-user).
 
 ### Changing client certificate settings
 
-`listener.<name>.client_cert` applies like any listener change: new connections get the new mode, and open connections keep the one they were accepted with. Making client certificates `required` doesn't close open connections. The CA file is read when the listener settings are applied; after replacing the file, change a listener setting (or restart the gateway) to load it.
+`listener.<name>.client_cert` applies like any listener change: new connections get the new mode, and open connections keep the one they were accepted with. Making client certificates `required` doesn't close open connections.
+
+Gateways poll the CA file every second, as they poll the server certificate, and compare its contents. When a change is seen on two polls in a row, the new CAs are loaded and used for new handshakes, within a few seconds and without a restart; connections already open keep running. A file that doesn't load (unreadable, malformed, or with no certificate in it) is rejected, logged as `gateway.client_ca_rejected`, and the old CAs stay in use; a successful reload is logged as `gateway.client_ca_reloaded`. To rotate a client CA without refusing anyone, put both the old and the new CA in the file until every client has a certificate from the new one.
 
 ## Tenant endpoints by server name
 
@@ -260,8 +272,7 @@ With `studio.operator_mtls = required`, set `listener.https.client_cert` to `opt
 ## Not supported yet
 
 - Certificate bundles other than `default`, so per-listener certificates and per-listener client CAs.
-- Logins by certificate alone: MongoDB `MONGODB-X509`, AMQP `EXTERNAL`, and Kafka mutual TLS without SASL.
-- Certificate requirements (`REQUIRE X509`, `SUBJECT`, `ISSUER`) on Bolt, AMQP and HTTP password logins, and `REQUIRE SUBJECT` or `ISSUER` on Kafka.
+- Logins by certificate alone other than AMQP `EXTERNAL`: MongoDB `MONGODB-X509`, and Kafka mutual TLS without SASL.
 - `REQUIRE CIPHER` (error 1235).
 
 ## Related

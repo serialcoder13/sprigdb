@@ -93,7 +93,7 @@ Verifiers live in the tenant's catalog, which no tenant account can read. Changi
 | Redis (6379) | `AUTH user password` |
 | Bolt (7687) | The `basic` scheme |
 | Kafka (9092) | SASL SCRAM-SHA-512, SCRAM-SHA-256, and `PLAIN` over TLS only |
-| AMQP (5672, 5671) | SASL `PLAIN` and `AMQPLAIN`. `EXTERNAL` (client-certificate login) isn't offered |
+| AMQP (5672, 5671) | SASL `PLAIN` and `AMQPLAIN`; `EXTERNAL` (a client-certificate login) for accounts that require a certificate, on connections that presented a verified one |
 
 ### caching_sha2_password needs TLS for a full login
 
@@ -181,13 +181,21 @@ Password hashing runs on a bounded pool of CPU slots. A login that can't get a s
 | `REQUIRE X509` | TLS with a client certificate the listener verified |
 | `REQUIRE SUBJECT '...'`, `REQUIRE ISSUER '...'` | A verified client certificate whose subject (and issuer) is exactly the name given, such as `/C=GB/O=Acme/CN=billing` |
 
-The certificate is checked in addition to the password, never instead of it. A refused login gets error 1045.
+The certificate is checked in addition to the password, not instead of it; the one exception is AMQP's SASL `EXTERNAL`, which logs an account with a certificate requirement in by its certificate alone (see [AMQP](../connect/amqp.md#log-in-with-a-client-certificate-external)). A refused login gets error 1045 on MySQL, or the protocol's own wrong-password answer elsewhere.
 
 ```sql
 ALTER USER 'billing'@'%' REQUIRE SUBJECT '/C=GB/O=Acme/CN=billing' AND ISSUER '/C=GB/O=Acme/CN=Acme client CA';
 ```
 
-Certificate requirements need a listener that asks for client certificates (`listener.<name>.client_cert`). They are checked on the MySQL, MariaDB, MongoDB and Redis listeners; on Kafka only `REQUIRE X509` can be met; and accounts with a certificate requirement can't log in over Bolt, AMQP or HTTP. See [Client certificates](tls.md#client-certificates).
+Certificate requirements need a listener that asks for client certificates (`listener.<name>.client_cert`). Every protocol checks them: MySQL, MariaDB, MongoDB, Redis, Kafka, Bolt, AMQP, and HTTP Basic, API keys and the password login of `POST /v1/auth/login`. A login handed to another data centre for the tenant's [residency](residency.md) carries the certificate's subject and issuer, so it is checked there too. See [Client certificates](tls.md#client-certificates).
+
+To see what an account requires, run `SHOW CREATE USER`, which prints the `REQUIRE` clause (never the password hash):
+
+```sql
+SHOW CREATE USER 'billing'@'%';
+```
+
+See [Tenants and accounts](../sql/tenants-and-accounts.md#show-create-user) for its output on each port.
 
 ## Sessions after account changes
 

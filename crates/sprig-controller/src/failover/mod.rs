@@ -1,6 +1,5 @@
-//! DC failover and recovery (chapter 25, "DC leases, sub-leases and
-//! self-fencing", "The global failover decision", "Promotion and epochs",
-//! "Recovery after an outage"; build steps 7-11).
+//! DC failover and recovery: DC leases and self-fencing, the global
+//! failover decision, promotion and epochs, and recovery after an outage.
 //!
 //! The pieces, by who runs them:
 //!
@@ -20,7 +19,7 @@
 //! [`cluster`] is the DC leader's `cluster_failover` loop that drives it.
 //! Settings are [`settings`].
 //!
-//! In the controller role ([`role`], R2 wiring): every controller keeps
+//! In the controller role ([`role`]): every controller keeps
 //! the DC lease and serves the internal routes; the DC leader publishes
 //! the observe targets and runs the return of its DC; the global leader
 //! runs the decision. [`nodes`] is the MariaDB side (standby replication,

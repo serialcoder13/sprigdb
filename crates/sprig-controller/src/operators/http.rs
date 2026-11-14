@@ -1,4 +1,4 @@
-//! The `Operators` service's REST routes (chapter 14, "Operators"),
+//! The `Operators` service's REST routes,
 //! merged into the Admin API behind the [`super::guard`] layer.
 //!
 //! | Call | Route |
@@ -169,7 +169,7 @@ async fn token_method(
     respond(r.await)
 }
 
-/// The client's address the guard established (ST47).
+/// The client's address the guard established.
 fn client_addr(headers: &HeaderMap) -> Option<String> {
     headers
         .get(CLIENT_HEADER)

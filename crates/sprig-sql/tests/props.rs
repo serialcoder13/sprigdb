@@ -1,6 +1,6 @@
-//! Property tests (chapter 07, "Testing"): rewriting changes only name
-//! bytes; random database names round-trip; re-parsing the rewritten text
-//! gives the original AST with only schema parts changed.
+//! Property tests: rewriting changes only name bytes; random database names
+//! round-trip; re-parsing the rewritten text gives the original AST with only
+//! schema parts changed.
 
 #![allow(clippy::unwrap_used)]
 
@@ -179,7 +179,7 @@ proptest! {
         prop_assert_eq!(&targets[0], &targets[1]);
     }
 
-    /// Chapter 07: re-parsing the rewritten text gives the same AST with
+    /// Re-parsing the rewritten text gives the same AST with
     /// only schema parts changed.
     #[test]
     fn reparse_changes_only_schemas(shape in 0usize..5, d in "[a-z]{1,8}", t in "[a-z]{1,8}") {

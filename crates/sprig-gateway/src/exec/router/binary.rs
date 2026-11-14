@@ -1,4 +1,4 @@
-//! Prepared statements across shards (chapter 17, "Prepared statements"):
+//! Prepared statements across shards:
 //! the client's binary parameters as the planner's literals, and rows the
 //! gateway combined (text values) as binary protocol values.
 

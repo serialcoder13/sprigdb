@@ -1,4 +1,4 @@
-//! The Admin API's `Recommendations` service (chapter 52, "Admin API"):
+//! The Admin API's `Recommendations` service:
 //! list, get, act, bulk, policy and email subscriptions.
 
 use std::sync::Arc;
@@ -528,9 +528,9 @@ impl RecommendationsService {
     }
 }
 
-/// `POST /admin/v1/recommendations:gate`: a gateway asks chapter 52's
+/// `POST /admin/v1/recommendations:gate`: a gateway asks the approval
 /// gate for a decision it makes itself (`vector.ann`: an automatic ANN
-/// graph, chapter 34), or reports the action it was let through.
+/// graph), or reports the action it was let through.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // one request, read once
@@ -622,7 +622,7 @@ impl RecommendationsService {
         let db_id = self.db_id(t, &db).await?;
         // A gateway asks once an index is due, at most once a minute: read
         // the tenant's rows as of now, so an `approve` set a moment ago
-        // isn't answered with the old `on` (approvals round 3).
+        // isn't answered with the old `on`.
         self.ctl.refresh_tenant(t).await;
         let policy = self
             .ctl

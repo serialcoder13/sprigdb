@@ -3,8 +3,8 @@
 //! Every query is filtered by schema and table and passes them as
 //! parameters. A node that denies the `mysql.*` statistics tables (1142,
 //! 1044) still yields column types, existing indexes and `SHOW INDEX`
-//! cardinalities, with [`TableStats::eits`] false (chapter 13, "Failure
-//! handling": selectivities then come from `SHOW INDEX` and defaults).
+//! cardinalities, with [`TableStats::eits`] false (selectivities then come
+//! from `SHOW INDEX` and defaults).
 
 use std::collections::BTreeMap;
 
@@ -23,7 +23,7 @@ use crate::sql::{col, errno, map_err};
 #[derive(Debug, Clone, Copy)]
 pub struct StatsReader {
     /// Replace text histogram bounds by `WEIGHT_STRING()` under each
-    /// column's collation, so comparisons follow it (chapter 13).
+    /// column's collation, so comparisons follow it.
     pub weigh_text: bool,
 }
 

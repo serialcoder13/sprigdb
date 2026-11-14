@@ -1,13 +1,12 @@
-//! The pass-through executor (decision D3; chapter 05 build steps 7-9,
-//! chapter 06 "Acquire, sync and release"): every request of a session
-//! goes, as MySQL text or binary protocol, to the login's cluster through
-//! the session's [`BackendSession`], and the response streams back through
-//! the [relay engine](relay). The router (chapter 17) replaces it in R1
-//! behind the same [`Executor`] trait.
+//! The pass-through executor: every request of a session goes, as MySQL
+//! text or binary protocol, to the login's cluster through the session's
+//! [`BackendSession`], and the response streams back through the
+//! [relay engine](relay). For tenants with sharded tables the
+//! [router](router) works behind the same [`Executor`] trait.
 //!
 //! | Request | Backend |
 //! |---|---|
-//! | `Query` | Split into statements ([`split`]); each is classified, routed (reads may go to a replica, chapter 06) and relayed; all but the last get `MORE_RESULTS_EXISTS`; an ERR stops the rest. More than one statement without multi-statements fails with 1064 |
+//! | `Query` | Split into statements ([`split`]); each is classified, routed (reads may go to a replica) and relayed; all but the last get `MORE_RESULTS_EXISTS`; an ERR stops the rest. More than one statement without multi-statements fails with 1064 |
 //! | `Prepare` | Prepared on the routed connection's statement cache; `PREPARE_OK`'s metadata from it |
 //! | `Execute` | The connection's own statement for the text (re-prepared lazily on another connection or node), types re-bound when it is fresh, long data folded in ([`stmt`]); a cursor pins the connection |
 //! | `Fetch` | `COM_STMT_FETCH` on the pinned connection; the last row unpins |
@@ -28,10 +27,10 @@
 mod capture;
 mod compat_sink;
 mod dc;
-// bugfix-34: a dropped database's sinks and logic modules go with it.
+// A dropped database's sinks and logic modules go with it.
 mod dropdb;
 mod fence;
-// RL14 (r2harden): a mover's fence never reaches clients as 1146 or 1049.
+// A mover's fence never reaches clients as 1146 or 1049.
 mod fence_retry;
 mod follow;
 pub mod relay;
@@ -39,68 +38,71 @@ pub(crate) mod router;
 pub mod settings;
 pub mod split;
 pub mod stmt;
-// Chapter 41: logic declarations (R7).
+// Logic declarations.
 mod logic;
-// Chapter 41: validations, triggers, schedules, computed fields (R7 orders 3, 5).
+// Validations, triggers, schedules, computed fields.
 mod logic_bound;
-// Chapter 41: DROP of logic modules and their dependents (R7 follow-ups).
+// DROP of logic modules and their dependents.
 mod logic_drop;
-// Chapter 41: `EXPLAIN FUNCTION | PROCEDURE` (placement of stored versions).
+// `EXPLAIN FUNCTION | PROCEDURE` (placement of stored versions).
 mod logic_explain;
-// Chapter 41: staged rollouts at call time (R7 follow-ups).
+// Staged rollouts of logic modules at call time.
 mod logic_rollout;
-// Chapter 41: `Logic.TestRun` (R7 follow-ups).
+// `Logic.TestRun`.
 mod logic_test;
-// Chapter 29: row-level security (R4).
+// Row-level security.
 mod rls;
 mod tenant;
-// Chapter 32: typed tables and record hierarchies.
+// Hierarchical data inheritance.
 pub(crate) mod inherit;
-// Chapter 42 (Kiran's decisions of 11 Nov 2026): tree id sequences, the
+// Tree id sequences, the
 // reference index, children receiving their parent's tables.
 pub(crate) mod inherit_tree;
-// Chapter 42 with chapter 32 (step 6b): children receive the types of the
+// Children receive the types of the
 // type trees they inherit.
 mod inherit_types;
-// Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`).
+// Inherited messaging objects (`FOR EACH TENANT`).
 mod inherit_msg;
-// R9 (r9more): FOR EACH TENANT connections and sinks.
+// FOR EACH TENANT connections and sinks.
 mod inherit_sinks;
 pub(crate) mod types;
-// Chapter 45: event streams (R9).
+// Event streams.
 mod streams;
-// Chapter 50: `sprig.mq_*` calls (R9).
+// `sprig.mq_*` calls.
 mod queues;
-// Chapter 51: sinks and connections (R9).
+// Sinks and connections.
 pub mod sinks;
-// Chapter 43 (R8): CREATE GRAPH and DROP GRAPH.
+// CREATE GRAPH and DROP GRAPH.
 mod graph_ddl;
-// Chapter 41 (R9, r9triggers): triggers on streams and queues, and
-// chapter 45's `sprig.commit_offset`.
+// Triggers on streams and queues, and `sprig.commit_offset`.
 pub(crate) mod msg_trigger;
 mod offsets;
-// Chapter 29 (RLS round 5): row images checked against a subscriber's
+// Row images checked against a subscriber's
 // privileges and row-level security (gRPC, SSE and WebSocket change
 // streams, Redis keyspace notifications).
 pub(crate) mod rls_images;
-// Chapter 29 (RLS round 5): change topics' filter views, for views and
+// Change topics' filter views, for views and
 // stored code over them.
 mod change_views;
-// RLS round 5 (RL52): `queue.change_exchange`.
+// `queue.change_exchange`.
 pub(crate) mod change_exchange;
-// Chapter 28 (R4): ONLY_FULL_GROUP_BY on 3306.
+// ONLY_FULL_GROUP_BY on 3306.
 mod groupby;
-// Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
+// Nearest neighbours with a growing radius on 3306.
 mod geo_knn;
-// Chapter 28 (R4 round 4): LATERAL's gateway apply on 3306.
+// LATERAL's gateway apply on 3306.
 mod lateral;
-// Chapter 28 (R4 round 4): functional key parts typed from the catalog.
+// Functional key parts typed from the catalog.
 mod fxindex;
-// Chapter 28 (R4 round 6): MySQL's DDL answers that need a lookup.
+// MySQL's DDL answers that need a lookup.
 mod mysql_ddl;
-// Per-session status counters (gaps rows 46 and 61; chapter 28).
+// `SET GLOBAL` server-wide assignments as tenant defaults.
+mod set_global;
+// A `DEFINER` naming another account.
+mod definer;
+// Per-session status counters.
 pub(crate) mod status;
-// Chapter 39 (R5 round 5): search DDL, MATCH ... AGAINST, sprig_search().
+// Search DDL, MATCH ... AGAINST, sprig_search().
 pub(crate) mod search;
 
 use std::sync::Arc;
@@ -153,9 +155,9 @@ impl PassThrough {
         }
     }
 
-    /// The same executor with tenant sessions (M0.3): catalog logins get
-    /// names virtualized, DDL through the catalog and settings in SQL (see
-    /// `exec::tenant`). Accounts-file logins keep M0.2's pass-through.
+    /// The same executor with tenant sessions: catalog logins get names
+    /// virtualized, DDL through the catalog and settings in SQL (see
+    /// `exec::tenant`). Accounts-file logins keep the plain pass-through.
     #[must_use]
     pub fn with_tenants(mut self, tenants: Arc<TenantServices>) -> Self {
         self.tenants = Some(tenants);
@@ -192,6 +194,7 @@ impl Executor for PassThrough {
             packet_limit: None,
             placement_memo: follow::PlacementMemo::default(),
             status: status::SessionStatus::default(),
+            globals_applied: false,
         })
     }
 }
@@ -204,26 +207,29 @@ pub struct PassSession {
     settings: ExecSettingsSource,
     bs: Option<BackendSession>,
     stmts: Stmts,
-    /// A catalog login's tenant state (M0.3); `None` for accounts-file
-    /// logins, whose names pass through unchanged (decision D2).
+    /// A catalog login's tenant state; `None` for accounts-file logins,
+    /// whose names pass through unchanged.
     tenant: Option<Box<TenantSession>>,
     /// Columns the name rewrite's substitutions renamed (`DATABASE()`
     /// became `'shop'`): the next forwarded statement gives them back.
     subst: Vec<split::Renamed>,
-    /// Workload capture (chapter 12), for tenant sessions.
+    /// Workload capture, for tenant sessions.
     wl: Option<crate::workload::SessionCapture>,
     /// The current `COM_QUERY` holds several statements: none is probed.
     wl_multi: bool,
-    /// Chapter 17's router: the session's connections to other clusters
-    /// and chapter 18's coordinator, for tenants with sharded tables.
+    /// The router: the session's connections to other clusters and the
+    /// transaction coordinator, for tenants with sharded tables.
     router: router::RouterState,
-    /// The session's packet limit (chapter 05, "Packet limit"), answered
+    /// The session's packet limit, answered
     /// for `max_allowed_packet` in mixed selects and `SHOW VARIABLES`.
     packet_limit: Option<u64>,
-    /// The session's own status counters, for `SHOW STATUS` (gaps row 46).
+    /// The session's own status counters, for `SHOW STATUS`.
     status: status::SessionStatus,
-    /// Placement checks kept per map generation (perf1, S148).
+    /// Placement checks kept per map generation.
     placement_memo: follow::PlacementMemo,
+    /// The tenant's `compat.global.*` defaults were given to the session:
+    /// at its first request, and again after a reset.
+    globals_applied: bool,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -260,7 +266,7 @@ const MARIADB_PASS_CAPS: Caps =
 
 /// A 3306 session's backend connections ask for extended metadata too:
 /// it marks JSON values, which the relay turns into MySQL's type 245
-/// (chapter 28; the block itself never reaches a MySQL client).
+/// (the block itself never reaches a MySQL client).
 fn mariadb_caps(persona: Persona, client: Caps) -> Caps {
     match persona {
         Persona::MariaDb => client & MARIADB_PASS_CAPS,
@@ -369,7 +375,7 @@ impl PassSession {
         } else {
             s |= StatusFlags::AUTOCOMMIT;
         }
-        // A transaction chapter 18's coordinator holds (its branches are
+        // A transaction the router's coordinator holds (its branches are
         // other connections).
         if self.router.in_txn() {
             s |= StatusFlags::IN_TRANS;
@@ -472,7 +478,7 @@ impl PassSession {
     async fn prepare(&mut self, cx: &mut ExecCtx<'_>, sql: Bytes) -> Result<ExecSummary> {
         let (sql, renames) = self.session_rewrites(sql, cx.session.id.0);
         let info = StmtInfo::classify(&sql);
-        // H9 (bugfix3): sharded tables are prepared in one shard's schema.
+        // Sharded tables are prepared in one shard's schema.
         let prepared = match self.prepare_meta(cx, &info, &sql).await {
             Some(r) => r?,
             None => self.bs(cx).prepare(&info, &sql).await?,
@@ -504,7 +510,7 @@ impl PassSession {
         })
     }
 
-    /// Prepares statement `stmt`'s client text again (chapter 29, RL15):
+    /// Prepares statement `stmt`'s client text again:
     /// its row-level security predicates were bound under another role
     /// set or policy version. `false` (the client gets 1615) when the text
     /// can't be prepared the same way: another default database now, or
@@ -555,14 +561,14 @@ impl PassSession {
     ) -> Result<ExecSummary> {
         let persona = self.persona;
         let backend_caps = self.backend_caps(cx);
-        // One statement per execute: probes allowed (chapter 12).
+        // One statement per execute: probes allowed.
         self.wl_multi = false;
         let s = self.stmts.get_mut(stmt)?;
         if let Some(text) = s.deferred.clone() {
-            // Chapter 39 (R5 round 6): the bound values as literals.
+            // A search text: the bound values as literals.
             let search_text = s.deferred_params;
             let text = if s.graph_params {
-                // R8 round 7 (G63): GRAPH_TABLE with `?`.
+                // GRAPH_TABLE with `?`.
                 let values = s.params_for_backend(params, persona)?;
                 let sql_l: Vec<String> = values.iter().map(search::param_literal).collect();
                 let cy_l = values
@@ -643,14 +649,14 @@ impl PassSession {
             types = ?values.iter().map(|p| p.param_type).collect::<Vec<_>>(),
             "execute parameters"
         );
-        // Chapter 29: privileges are checked again at each execute, as on
+        // Privileges are checked again at each execute, as on
         // MySQL, when they changed since the prepare.
         if let Some(rc) = &recheck
             && let Some(ts) = self.tenant.as_deref_mut()
         {
             ts.refresh().await?;
             match crate::tenant::authz::recheck(ts, persona, rc) {
-                // Chapter 29 (RL15, round 2): a text whose row-level
+                // A text whose row-level
                 // security predicates changed is prepared again, under the
                 // same id, and the execute goes on.
                 Err(e) if e.protocol().mysql_errno == 1615 => {
@@ -662,7 +668,7 @@ impl PassSession {
                 r => r?,
             }
         }
-        // Chapter 17: a sharded tenant's statement is routed (see
+        // A sharded tenant's statement is routed (see
         // `router::PassSession::routed_execute`).
         let mut sql = sql;
         let mut slot = None;
@@ -764,7 +770,7 @@ impl PassSession {
             backend_caps,
         } = tail;
         let _ = self.bs(cx);
-        // Workload capture (chapter 12): fingerprinted from the logical
+        // Workload capture: fingerprinted from the logical
         // text the client prepared; cursors are left out (their rows come
         // with later fetches).
         let pending = match &logical {
@@ -783,7 +789,7 @@ impl PassSession {
             // Pin before routing, so FETCH finds the same connection.
             bs.open_cursor();
         }
-        // Chapter 18 (decision Q17): a write on a branch that records its
+        // A write on a branch that records its
         // redo is recorded with its values written in.
         if bs.recording() {
             let cs = bs
@@ -1066,7 +1072,7 @@ impl PassSession {
                 PacketKind::ColumnDef => {
                     let mut c = ColumnDef::decode(&pk.payload, backend_caps)?;
                     if let Some(map) = &map {
-                        // Tenant sessions see logical names (chapter 07).
+                        // Tenant sessions see logical names.
                         sprig_sql::names::map_column_def(
                             &mut c,
                             &sprig_sql::names::OutputCtx::new(&**map),
@@ -1115,7 +1121,7 @@ impl PassSession {
 #[async_trait]
 impl SessionExec for PassSession {
     fn idle_timeout(&self) -> Option<Duration> {
-        // The client's own value (a gateway-owned variable, chapter 06):
+        // The client's own value (a gateway-owned variable):
         // backend connections keep the gateway's.
         let v = self.bs.as_ref()?.vars().gateway_vars.get("wait_timeout")?;
         let secs: u64 = v.trim().parse().ok()?;
@@ -1129,21 +1135,27 @@ impl SessionExec for PassSession {
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
         self.packet_limit = u64::try_from(cx.proto.max_packet).ok();
-        // Chapter 24: `SET @sprig_dc` is the gateway's, never MariaDB's.
+        // `SET @sprig_dc` is the gateway's, never MariaDB's.
         if let Some(r) = self.sprig_dc_set(cx, &req, out).await {
             return r;
         }
-        // Chapter 50: acknowledgements held for this transaction learn how
+        // Queue acknowledgements held for this transaction learn how
         // it ended (the commit hook, after the request).
         let txn_word = queues::txn_word(&req);
-        // Holds, promotions (RL13), the DC's write gate (chapter 25), and
-        // a mover's fence met on the way (RL14): `fence_retry`.
+        // The tenant's `SET GLOBAL` defaults, before the session's first
+        // statement.
+        if !self.globals_applied && self.tenant.is_some() {
+            self.globals_applied = true;
+            Box::pin(self.apply_tenant_globals(cx)).await;
+        }
+        // Holds, promotions, the DC's write gate, and a mover's fence met on
+        // the way: `fence_retry`.
         let r = match Box::pin(self.run_followed(cx, req, out)).await {
             Ok(r) => r,
             Err(e) => return Err(self.map_error(e)),
         };
         self.mq_after_request(u64::from(cx.session.id.0), txn_word, r.is_ok());
-        // Chapter 42 (R9): cross-tenant publishes of the transaction go
+        // Cross-tenant publishes of the transaction go
         // out once it has ended.
         crate::inherited::outbox::after_request(
             u64::from(cx.session.id.0),
@@ -1170,6 +1182,8 @@ impl SessionExec for PassSession {
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.reset();
         }
+        // A reset session starts from the tenant's defaults again.
+        self.globals_applied = false;
         if let Some(wl) = self.wl.as_mut() {
             wl.reset();
         }
@@ -1181,7 +1195,7 @@ impl SessionExec for PassSession {
     }
 
     async fn abandoned(&mut self, _cx: &mut ExecCtx<'_>, why: Abandon) {
-        // ST31 (bugfix5): the router's statements on other connections too.
+        // The router's statements on other connections too.
         self.router.abandon_in_flight(DRAIN_TIMEOUT).await;
         let Some(bs) = self.bs.as_mut() else {
             return;
@@ -1204,15 +1218,15 @@ impl SessionExec for PassSession {
     }
 
     fn set_internal(&mut self, on: bool) {
-        // Chapter 31: the document engine's own statements (see the
-        // trait); the same flag chapter 32's plans set.
+        // The document engine's own statements (see the trait); the same
+        // flag typed-table plans set.
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.types.internal = on;
         }
     }
 
     fn row_policy_binds(&self, object: u64) -> Option<bool> {
-        // Decision S24: the session's compiled policies at its catalog.
+        // The session's compiled policies at its catalog.
         let ts = self.tenant.as_deref()?;
         let cat = ts.catalog()?;
         let p = crate::tenant::authz::privileges(ts, cat);
@@ -1223,7 +1237,7 @@ impl SessionExec for PassSession {
     }
 
     fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
-        // RL34: the change stream's view of the tenant's documents.
+        // The change stream's view of the tenant's documents.
         let ts = self.tenant.as_deref()?;
         let cat = ts.catalog()?;
         let p = crate::tenant::authz::privileges(ts, cat);
@@ -1235,14 +1249,14 @@ impl SessionExec for PassSession {
     }
 
     fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
-        // Chapter 29: SPRIG_CLAIM() reads the caller's verified token.
+        // SPRIG_CLAIM() reads the caller's verified token.
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.rls.claims = claims;
         }
     }
 
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
-        // M5: `$currentOp` with `allUsers` needs `PROCESS`.
+        // `$currentOp` with `allUsers` needs `PROCESS`.
         let ts = self.tenant.as_deref()?;
         let cat = ts.catalog()?;
         let p = crate::tenant::authz::privileges(ts, cat);
@@ -1288,7 +1302,7 @@ impl SessionExec for PassSession {
 }
 
 impl PassSession {
-    /// The variables the persona answers (chapter 28): its version
+    /// The variables the persona answers: its version
     /// string, `version_comment`, and on 3306 `gtid_mode`.
     fn persona_vars(&self) -> sprig_sql::compat::vars::PersonaVars {
         let vars = self.bs.as_ref().map(BackendSession::vars);
@@ -1311,7 +1325,7 @@ impl PassSession {
     }
 
     /// A tenant session's `@@max_connections`: the tenant's own limit
-    /// (`limits.tenant_connections`), not the backend's (gaps row 43).
+    /// (`limits.tenant_connections`), not the backend's.
     /// MySQL Connector/J's suite raises it with `SET GLOBAL` when it reads
     /// less than 200 free.
     fn tenant_max_connections(&self) -> Option<u64> {
@@ -1340,7 +1354,7 @@ impl PassSession {
             let mut rows = self.persona_vars().show_rows();
             rows.extend(self.owned_var_rows());
             let st = relay::ConnStatus::from_rows(rows);
-            // 3306: `collation_*` in MySQL's names (gaps row 60).
+            // 3306: `collation_*` in MySQL's names.
             Some(if self.persona == Persona::MySql84 {
                 st.with_mysql_collations()
             } else {
@@ -1377,8 +1391,7 @@ impl PassSession {
     }
 
     /// 3306: `performance_schema` and `sys` as derived tables over the
-    /// session and the tenant's sessions (chapter 28 step 13, R4 round 4;
-    /// `compat::perfschema`). `None` when nothing changes.
+    /// session and the tenant's sessions (`compat::perfschema`). `None` when nothing changes.
     pub(super) fn ps_rewrite(&self, cx: &ExecCtx<'_>, sql: &[u8]) -> Option<Result<Vec<u8>>> {
         if self.persona != Persona::MySql84 {
             return None;
@@ -1388,7 +1401,7 @@ impl PassSession {
             return None;
         }
         let (lex, _) = self.lex_opts();
-        // R4 round 5: `TRUNCATE` of the digest summary starts the
+        // `TRUNCATE` of the digest summary starts the
         // tenant's digests again; the backend answers a no-op.
         if sprig_sql::compat::perfschema::is_truncate_digests(sql, current.as_deref()) {
             if let (Some(wl), Some(ts)) = (self.wl.as_ref(), self.tenant.as_deref()) {
@@ -1420,8 +1433,8 @@ impl PassSession {
             .map(|r| r.map_err(|e| SprigError::standard(e.code, e.sqlstate, e.message)))
     }
 
-    /// The tenant's statement digests on this gateway (chapter 12's
-    /// recorder, R4 round 5) in the databases the user may see; statements
+    /// The tenant's statement digests on this gateway (the workload
+    /// recorder's) in the databases the user may see; statements
     /// run with no current database are listed for every user.
     fn ps_digests(&self) -> Vec<sprig_sql::compat::perfschema::PsDigest> {
         let (Some(wl), Some(ts)) = (self.wl.as_ref(), self.tenant.as_deref()) else {
@@ -1474,13 +1487,17 @@ impl PassSession {
 
     /// The gateway's rewrites of a statement's text for this session: the
     /// client's own values of gateway-owned variables, the persona's
-    /// variables (`@@version`, `VERSION()`, chapter 28) and
+    /// variables (`@@version`, `VERSION()`) and
     /// `CONNECTION_ID()`. The renames give the columns back their names.
     fn session_rewrites(&self, sql: Bytes, conn_id: u32) -> (Bytes, Vec<split::Renamed>) {
         let mut renames = Vec::new();
         let (lex, _) = self.lex_opts();
         let mut vars = self.persona_vars();
-        // CURRENT_ROLE(): the gateway's active roles (chapter 29, R4).
+        // `@@global.<v>` of the tenant's own defaults.
+        if sql.windows(7).any(|w| w.eq_ignore_ascii_case(b"@global")) {
+            vars = vars.with_tenant_globals(self.tenant_globals());
+        }
+        // CURRENT_ROLE(): the gateway's active roles.
         if sql
             .windows(12)
             .any(|w| w.eq_ignore_ascii_case(b"current_role"))
@@ -1545,7 +1562,7 @@ impl PassSession {
             }
             Request::Execute { stmt, raw, params } => {
                 // 3306: MySQL's `'table.key'` in 1062 for prepared
-                // statements too (chapter 28, R4; MySQL Connector/J's suite).
+                // statements too (MySQL Connector/J's suite checks it).
                 let dup_table = if self.persona == Persona::MySql84 {
                     let lex = self.lex_opts().0;
                     self.stmts
@@ -1556,7 +1573,7 @@ impl PassSession {
                 } else {
                     None
                 };
-                // 3306: MySQL's integer result types (chapter 28, R4).
+                // 3306: MySQL's integer result types.
                 let logical = (self.persona == Persona::MySql84 && dup_table.is_none())
                     .then(|| {
                         self.stmts
@@ -1625,8 +1642,7 @@ impl PassSession {
         if let Some(m) = ts.aliases().apply(e.message.as_bytes()) {
             e.message = String::from_utf8_lossy(&m).into_owned();
         }
-        // Chapter 41: a validation's CHECK failure is 39863 with its
-        // message (R7 order 3).
+        // A validation's CHECK failure is 39863 with its message.
         logic_bound::map_validation(ts, e)
     }
 

@@ -1,4 +1,4 @@
-//! Whose DDL jobs are abandoned (bugfix-38).
+//! Whose DDL jobs are abandoned.
 //!
 //! Every DDL job's intent row names the engine running it,
 //! `gateway:<dc>@<process token>.<n>` for a gateway's
@@ -41,9 +41,9 @@ pub fn label(dc: &DcId) -> String {
     sprig_catalog::ddl::gateway_label(dc)
 }
 
-/// `engine` as this gateway's (bugfix-38): its jobs name the gateway's
-/// process, another gateway's abandoned jobs are found through `dc_store`,
-/// and its own are resolved by its janitor through `locator`.
+/// `engine` as this gateway's: its jobs name the gateway's process, another
+/// gateway's abandoned jobs are found through `dc_store`, and its own are
+/// resolved by its janitor through `locator`.
 #[must_use]
 pub fn owned(
     engine: DdlEngine<MariaBackend>,
@@ -60,8 +60,8 @@ pub fn owned(
 }
 
 /// [`OwnerCheck`](sprig_catalog::ddl::OwnerCheck) over the gateways'
-/// process keys; shared with the controller's catalog reconciler since
-/// bugfix-45 (`sprig_catalog::ddl::ProcessOwners`).
+/// process keys; shared with the controller's catalog reconciler
+/// (`sprig_catalog::ddl::ProcessOwners`).
 pub use sprig_catalog::ddl::ProcessOwners as GatewayOwners;
 
 /// The DDL engine's janitor reaches a tenant's cluster as `sprig_ctl`, as

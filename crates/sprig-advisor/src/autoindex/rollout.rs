@@ -1,6 +1,6 @@
-//! Rollout (chapter 13 build step 10, "Rollout"): an accepted index is
-//! built shard by shard, online, inside the build window, one build per
-//! cluster slot, with lock-safe retries and aborts.
+//! Rollout: an accepted index is built shard by shard, online, inside the
+//! build window, one build per cluster slot, with lock-safe retries and
+//! aborts.
 //!
 //! ```text
 //! advance(x):                                  # driver::advance, one step per call
@@ -8,13 +8,13 @@
 //!   for the first shard not built:
 //!     gates: the build window is open; a slot under max_builds_per_cluster is
 //!            free (in-process holders + sprig builds in the writer's
-//!            PROCESSLIST + build jobs); the shard isn't moving (chapter 10's
+//!            PROCESSLIST + build jobs); the shard isn't moving (the mover's
 //!            hook); the cluster is healthy                     else → wait
 //!     method := choose_method(topology, ddl_method, table size, mover?)
 //!     Online       (single, primary + replicas): online::build
 //!     GaleraRsu    rolling RSU, one node at a time:            galera::build_rsu
 //!     GaleraToi    total order, tables under toi_max_bytes:    galera::build_toi
-//!     CopySwap     the M0.6 mover (CopySwapHook), when there is one
+//!     CopySwap     the mover (CopySwapHook), when there is one
 //!     Recommend    nothing safe: stop at a recommendation
 //!     outcome:
 //!       built          → shard built; next shard after rollout_pause
@@ -37,7 +37,7 @@
 //! - **the metadata-lock queue**: while the build itself still waits for
 //!   its first metadata lock and client statements queue behind it for
 //!   longer than `queue_kill_after`, the build is killed and retried later
-//!   (the chapter's short lock wait, tightened: clients never wait more
+//!   (a short lock wait, tightened: clients never wait more
 //!   than about a second behind a build that hasn't started);
 //! - **replicas**: replication stopped, or lag above
 //!   `auto_index.abort_replica_lag_seconds`;
@@ -46,8 +46,9 @@
 //! A build abandoned by its caller (a deposed leader's reconcile dropped)
 //! is killed too ([`node::KillGuard`]), so no orphaned `ALTER` keeps a slot.
 //!
-//! **Galera.** The chapter builds by copy-and-swap through the mover, which
-//! is M0.6. Until then [`GaleraPolicy`] chooses (see [`choose_method`]),
+//! **Galera.** Galera indexes are meant to be built by copy-and-swap
+//! through the mover. Until one is plugged in [`GaleraPolicy`] chooses (see
+//! [`choose_method`]),
 //! by default [`GaleraSwitch::ToiOnly`]: total order (TOI) for tables up
 //! to `toi_max_bytes` (64 MiB), whose build holds the cluster's writes for
 //! about the build time (measured: 0.3 s for a 21 MB table), and only a
@@ -56,11 +57,11 @@
 //! [`RsuValidator`](super::validate::galera::RsuValidator), is implemented
 //! behind [`GaleraSwitch::RollingRsu`] but measured unsafe without a way to
 //! drain the node first (see the switch). [`GaleraSwitch::Mover`] hands the
-//! build to a [`CopySwapHook`], which is what M0.6 plugs in.
+//! build to a [`CopySwapHook`], which is what the mover plugs in.
 //!
-//! **Never during a move or cutover**: [`ShardLocks`] is chapter 10's hook.
-//! [`NoMover`] says no shard ever moves (true until M0.6); the controller
-//! checks the tenant's copy jobs.
+//! **Never during a move or cutover**: [`ShardLocks`] is the mover's hook.
+//! [`NoMover`] says no shard ever moves (true without a mover); the
+//! controller checks the tenant's copy jobs.
 
 pub mod driver;
 pub mod galera;
@@ -104,7 +105,7 @@ pub enum Nodes {
     Galera {
         /// Every node.
         nodes: Vec<NodeEndpoint>,
-        /// The node clients write the shard through now (chapter 09's
+        /// The node clients write the shard through now (the cluster's
         /// writer choice); built last by a rolling build.
         writer: NodeId,
     },
@@ -141,7 +142,7 @@ impl Nodes {
     }
 }
 
-/// A cluster as the rollout sees it: its nodes, chapter 09's verdicts, and
+/// A cluster as the rollout sees it: its nodes, the health verdicts, and
 /// whether the cluster is healthy now.
 #[derive(Debug, Clone)]
 pub struct ClusterView {
@@ -149,12 +150,12 @@ pub struct ClusterView {
     pub cluster: ClusterId,
     /// Its nodes.
     pub nodes: Nodes,
-    /// Chapter 09's `ddl_method(AddIndex, traits)` for the table.
+    /// The cluster's `ddl_method(AddIndex, traits)` for the table.
     pub ddl_method: DdlMethod,
     /// `features.instant_ignored_toggle`: retirement passes through
     /// `IGNORED`.
     pub instant_ignored_toggle: bool,
-    /// `None` when healthy; else why not (chapter 09's health).
+    /// `None` when healthy; else why not.
     pub unhealthy: Option<String>,
 }
 
@@ -169,8 +170,8 @@ pub struct ShardTable {
     pub table: String,
 }
 
-/// What to do on Galera until the mover exists (chapter 13 says
-/// copy-and-swap; that is M0.6).
+/// What to do on Galera until the mover exists (the intended method is
+/// copy-and-swap).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GaleraSwitch {
@@ -183,14 +184,14 @@ pub enum GaleraSwitch {
     /// while it waits, the `ALTER` waits for that lock, and only
     /// `lock_wait_timeout` breaks the cycle (writes stalled 15-18 s for a
     /// 21 MB table). Safe only once [`NodeMarker`](super::validate::NodeMarker)
-    /// really moves writes and reads off the node (chapter 09's writer
-    /// weight 0 honoured by gateways), which R0 doesn't have.
+    /// really moves writes and reads off the node (writer weight 0
+    /// honoured by gateways), which isn't there yet.
     RollingRsu,
-    /// TOI up to `toi_max_bytes`; recommend above it. The M0.4 default:
+    /// TOI up to `toi_max_bytes`; recommend above it. The default:
     /// the cluster's writes wait for the build (measured 0.3 s for 21 MB),
     /// which the size limit bounds.
     ToiOnly,
-    /// Copy-and-swap through a [`CopySwapHook`] (M0.6); recommend when
+    /// Copy-and-swap through a [`CopySwapHook`]; recommend when
     /// there is no hook.
     Mover,
     /// Never build on Galera; recommend.
@@ -232,7 +233,7 @@ pub enum BuildMethod {
     GaleraToi,
     /// Galera, rolling RSU, node by node.
     GaleraRsu,
-    /// The mover's copy-and-swap (M0.6).
+    /// The mover's copy-and-swap.
     CopySwap,
     /// No safe method: stop at a recommendation.
     Recommend(String),
@@ -254,7 +255,7 @@ impl BuildMethod {
 
 /// Chooses the method for one table.
 ///
-/// - Not Galera: chapter 09's method; `Online` builds online, anything else
+/// - Not Galera: the cluster's method; `Online` builds online, anything else
 ///   needs the mover (or is recommended without one).
 /// - Galera, by [`GaleraPolicy::switch`]: see [`GaleraSwitch`]. Rolling RSU
 ///   needs `min_cluster_size` nodes.
@@ -300,15 +301,15 @@ pub fn choose_method(
     }
 }
 
-/// Settings of rollout (resolved `auto_index.*` keys plus the M0.4
-/// constants the book doesn't name yet).
+/// Settings of rollout (resolved `auto_index.*` keys plus constants that
+/// have no setting key yet).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RolloutSettings {
     /// `auto_index.ddl_lock_wait_seconds` (5).
     pub ddl_lock_wait: Duration,
-    /// Lock-wait retries inside one build attempt (the chapter's 5).
+    /// Lock-wait retries inside one build attempt (5).
     pub lock_retries: u32,
-    /// Between those retries (the chapter's 30 s).
+    /// Between those retries (30 s).
     pub lock_retry_pause: Duration,
     /// Kill a build still waiting for its first metadata lock when client
     /// statements have queued behind it this long.
@@ -328,7 +329,7 @@ pub struct RolloutSettings {
     pub user_ddl_cooldown: Duration,
     /// After an abort for lag or degradation.
     pub retry_after: Duration,
-    /// Failures before `failed` (the chapter's 3).
+    /// Failures before `failed` (3).
     pub max_failures: u32,
     /// `auto_index.max_builds_per_cluster` (1).
     pub max_builds_per_cluster: u32,
@@ -376,7 +377,7 @@ pub enum AbortReason {
     /// The cluster degraded: replication stopped, a node left, the writer
     /// turned read-only.
     Degraded,
-    /// The shard is moving (chapter 10).
+    /// The shard is moving.
     Moving,
 }
 
@@ -536,7 +537,7 @@ impl BuildSlots for LocalSlots {
     }
 }
 
-/// Whether a shard may be built now (chapter 10's shard lock).
+/// Whether a shard may be built now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShardLock {
     /// Nothing moves it.
@@ -545,7 +546,7 @@ pub enum ShardLock {
     Moving(String),
 }
 
-/// Chapter 10's hook: builds never run during a move or cutover.
+/// The mover's hook: builds never run during a move or cutover.
 #[async_trait::async_trait]
 pub trait ShardLocks: Send + Sync {
     /// The lock state of `shard` of `tenant`.
@@ -555,7 +556,7 @@ pub trait ShardLocks: Send + Sync {
     async fn state(&self, tenant: TenantId, shard: &str) -> Result<ShardLock>;
 }
 
-/// No mover yet (M0.6): nothing ever moves.
+/// No mover yet: nothing ever moves.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoMover;
 
@@ -566,7 +567,7 @@ impl ShardLocks for NoMover {
     }
 }
 
-/// A copy-and-swap build request (chapter 10's `copy_swap_ddl`).
+/// A copy-and-swap build request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopySwapRequest {
     /// The tenant.
@@ -590,7 +591,7 @@ pub enum CopySwapStatus {
     Failed(String),
 }
 
-/// The M0.6 mover's copy-and-swap, as the rollout uses it. Submitting the
+/// The mover's copy-and-swap, as the rollout uses it. Submitting the
 /// same request again returns the existing job's status.
 #[async_trait::async_trait]
 pub trait CopySwapHook: Send + Sync {
@@ -714,6 +715,6 @@ pub fn unix_ms(t: SystemTime) -> u64 {
 /// The `ADD INDEX` clause of `def`: `ADD INDEX IF NOT EXISTS x (...)`.
 #[must_use]
 pub fn add_index_clause(def: &IndexDef) -> String {
-    // `SPATIAL INDEX` and `VECTOR INDEX` too (R6 round 3).
+    // `SPATIAL INDEX` and `VECTOR INDEX` too.
     format!("ADD {}", def.add_clause())
 }

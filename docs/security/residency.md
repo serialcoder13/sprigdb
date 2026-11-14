@@ -157,7 +157,7 @@ Gateways outside a pinned tenant's allowed data centres never load its credentia
 - by default, the gateway **hands the login off** to a gateway in the nearest allowed data centre over the internal peer port (7403, mutual TLS). The allowed data centre checks the password with its own login service, lockout counters and audit, and returns only the result. The client must log in over TLS, because the password has to be checked in full there (the fast path isn't available). Each handoff costs one round trip between data centres and is audited as `auth.handoff`;
 - with `--deny-remote-access true`, the gateway refuses the login with `ER_SPRIG_REMOTE_ACCESS_DENIED` (39302) instead.
 
-Handoffs cover the MySQL, MariaDB and HTTP logins. After a login, statements go to the tenant's clusters in its home data centre as for any tenant.
+Handoffs cover the MySQL, MariaDB and HTTP logins. A handoff carries whether the client presented a verified certificate, with its subject and issuer, so accounts with `REQUIRE X509`, `REQUIRE SUBJECT` or `REQUIRE ISSUER` are checked in the allowed data centre as on a direct login (see [Client certificates](tls.md#client-certificates)). A gateway of an earlier release hands off no subject or issuer, so `REQUIRE SUBJECT` and `REQUIRE ISSUER` accounts are refused through it until it is upgraded. After a login, statements go to the tenant's clusters in its home data centre as for any tenant.
 
 ## What happens on failover
 

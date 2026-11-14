@@ -1,5 +1,5 @@
-//! Stream behaviour on scratch servers: heartbeat timing (chapter 10's open
-//! question: `@master_heartbeat_period` is in nanoseconds), optional
+//! Stream behaviour on scratch servers: heartbeat timing
+//! (`@master_heartbeat_period` is in nanoseconds), optional
 //! `COM_REGISTER_SLAVE`, silence detection, and a throughput measurement.
 
 #![allow(
@@ -174,8 +174,8 @@ async fn throughput() {
     }
 }
 
-/// A non-blocking dump from the current position (what chapter 09's dump
-/// probe reads) sends the format description and the start position's
+/// A non-blocking dump from the current position (what the capability
+/// probe's dump check reads) sends the format description and the start position's
 /// `GTID_LIST`, then ends with [`Event::DumpEnd`] instead of waiting.
 /// Read-only, so it runs on the shared single node.
 #[tokio::test]

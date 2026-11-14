@@ -69,6 +69,9 @@ pub struct ConnInfo {
     pub sni: Option<String>,
     /// A verified client certificate.
     pub client_cert: bool,
+    /// Its subject and issuer in MySQL's form (`/O=Acme/CN=alice`), for
+    /// `REQUIRE SUBJECT` and `ISSUER` (authfix2).
+    pub client_dn: Option<(String, String)>,
 }
 
 /// A refused login: the message for the SaslAuthenticate response.

@@ -1,16 +1,16 @@
-//! The Redis front end (chapter 40, R6): the gateway answers RESP2 and
+//! The Redis front end: the gateway answers RESP2 and
 //! RESP3 on the `redis` listener, with `sprig-redis` doing the commands
-//! over chapter 33's key-value tables.
+//! over the key-value engine's tables.
 //!
-//! - **Logins** (chapter 14): `AUTH user pass` and `HELLO ... AUTH` run
+//! - **Logins**: `AUTH user pass` and `HELLO ... AUTH` run
 //!   the same login as HTTP Basic and AMQP PLAIN (`ClearText`, the fast
 //!   cache first). The tenant comes from the TLS server name, a dotted
 //!   user name (`acme.alice`), or `listener.redis.tenant`. One-argument
 //!   `AUTH` logs in as `redis.default_user`.
 //! - **SQL**: a login opens the principal's own executor session, so name
-//!   virtualization, chapter 29's privileges, the router and workload
+//!   virtualization, privileges, the router and workload
 //!   capture apply to every statement a command runs; the statements run
-//!   in internal mode so the `__sprig_` element tables pass chapter 07's
+//!   in internal mode so the `__sprig_` element tables pass the
 //!   reserved-name check.
 
 pub mod hub;
@@ -156,7 +156,7 @@ key!(
 
 key!(
     /// `redis.guarded_batches`: the hottest writes as one compound
-    /// statement (chapter 40, "Guarded batches"; R6 round 3).
+    /// statement.
     GUARDED_BATCHES: bool = "redis.guarded_batches", true, HardBounds::NONE,
     "Run SET, INCR, HSET, pushes, pops and ZADD as one guarded batch"
 );
@@ -205,7 +205,7 @@ fn read_config(live: &LiveSettings, dc: &DcId) -> sprig_redis::Config {
     }
 }
 
-/// Keyspace notifications' check (chapter 29, RL46): `SELECT` on the key
+/// Keyspace notifications' check: `SELECT` on the key
 /// table and its row-level security over the row `{k: key}`, in the
 /// subscriber's session (`exec::rls_images`).
 #[derive(Debug)]
@@ -260,7 +260,7 @@ impl sprig_redis::keyspace::KeyFilter for KeyImages {
 
 /// What the front end is built from.
 pub struct RedisDeps {
-    /// Logins (chapter 14).
+    /// Logins.
     pub login: Arc<LoginService>,
     /// The shared executor.
     pub executor: SharedExecutor,
@@ -276,7 +276,7 @@ pub struct RedisDeps {
 
 impl RedisFrontend {
     /// Starts keyspace notifications from the change feed for the tenants
-    /// of `svc` (chapter 40; RLS round 5, RL51).
+    /// of `svc`.
     #[must_use]
     pub fn with_feed(self, svc: Arc<crate::tenant::TenantServices>) -> Self {
         keyspace_feed::FeedNotifier::install(&self.env, svc);
@@ -304,10 +304,10 @@ impl RedisFrontend {
             read_config(&d.live, &d.dc),
             &d.gateway_id,
         ));
-        // FCALL of logic-layer functions (chapter 41, R7).
+        // FCALL of logic-layer functions.
         env.set_logic(Arc::new(logic::GatewayLogic));
         // Keyspace notifications reach only subscribers who may read the
-        // key (chapter 29, RL46).
+        // key.
         env.set_key_filter(Arc::new(KeyImages));
         Self {
             d: Arc::new(d),
@@ -362,7 +362,7 @@ impl Frontend for RedisFrontend {
     }
 }
 
-/// Chapter 14's login for one connection.
+/// The login for one connection.
 struct GatewayAuth {
     d: Arc<RedisDeps>,
     peer: SocketAddr,
@@ -588,7 +588,7 @@ pub(crate) struct SqlSession {
     session: Session,
     exec: Box<dyn SessionExec>,
     proto: ProtoState,
-    /// RL51: writes carry `/*sprig ... o=k*/` (`SqlRunner::notified`).
+    /// Writes carry `/*sprig ... o=k*/` (`SqlRunner::notified`).
     notified: bool,
 }
 
@@ -635,7 +635,7 @@ impl SqlSession {
     }
 
     async fn run(&mut self, sql: &str) -> std::result::Result<Collect, SqlError> {
-        // RL51: a Redis command's write is marked in the binlog, so the
+        // A Redis command's write is marked in the binlog, so the
         // keyspace notifications from the feed pass over it.
         let marked;
         let sql = if self.notified && is_write(sql) {
@@ -693,14 +693,14 @@ impl SqlRunner for SqlSession {
     }
 
     fn client_dc(&mut self, raw: Option<&str>) {
-        // Chapter 24: the session's statements count as traffic from this
+        // The session's statements count as traffic from this
         // DC (an unknown or missing id as none), as MySQL's `sprig_dc`.
         self.session.client_dc = crate::dc::hint("redis", raw).known();
     }
 }
 
-/// `sql` with chapter 38's comment `o=k` where the change feed reads it
-/// (RL51): before a plain write; after the verb of each write inside a
+/// `sql` with the comment `o=k` where the change feed reads it: before a
+/// plain write; after the verb of each write inside a
 /// guarded batch, whose inner statements MariaDB annotates one by one
 /// without the comments before them.
 fn mark(sql: &str) -> String {

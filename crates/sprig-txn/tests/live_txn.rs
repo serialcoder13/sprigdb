@@ -1,5 +1,4 @@
-//! Live tests of distributed transactions on the dev clusters (chapter 18,
-//! "Testing"; the R1 done-when items).
+//! Live tests of distributed transactions on the dev clusters.
 //!
 //! ```sh
 //! SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301 \
@@ -130,7 +129,7 @@ async fn q(url: &str, sql: &str) -> Vec<mysql_async::Row> {
     r
 }
 
-/// Chapter 09's XA probe, reduced: `XA START` works (1235 on Galera).
+/// The capability probe's XA check, reduced: `XA START` works (1235 on Galera).
 async fn probe_xa(url: &str) -> bool {
     let mut c = mysql_async::Conn::new(Opts::from_url(url).unwrap())
         .await
@@ -715,7 +714,7 @@ async fn last_resource_commit_with_one_galera_participant() {
     teardown(&cs).await;
 }
 
-/// Chapter 19's lookup sessions on a distributed transaction: Pre on the
+/// Lookup sessions on a distributed transaction: Pre on the
 /// Galera cluster commits first, Main on the single node and the primary
 /// commits atomically through the coordinator, Post runs after.
 #[tokio::test(flavor = "multi_thread")]
@@ -790,7 +789,7 @@ async fn lookup_sessions_commit_main_through_the_coordinator() {
     teardown(&cs).await;
 }
 
-/// Operators and the mover on in-doubt transactions (R1 close-out): after
+/// Operators and the mover on in-doubt transactions: after
 /// a coordinator is killed past the commit point, `indoubt::list` and
 /// `show` report the prepared branch with its `commit` decision, and the
 /// mover's `drain_prepared` commits it at once (no `min_age` wait). After

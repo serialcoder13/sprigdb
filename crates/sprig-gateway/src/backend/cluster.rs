@@ -1,6 +1,5 @@
 //! [`ClusterView`]: what the gateway needs from a cluster record and its
-//! capability profile (chapter 06, "Interfaces"), and where views come
-//! from ([`ClusterSource`]).
+//! capability profile, and where views come from ([`ClusterSource`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -54,8 +53,8 @@ pub struct ClusterView {
     /// How reads see the session's writes, from the profile (or the
     /// topology's usual method before a profile is published).
     pub ryw: RywMethod,
-    /// Primary + replicas: the writer the controller publishes (chapter
-    /// 25's writer lease), as last read.
+    /// Primary + replicas: the writer the controller publishes (its writer
+    /// lease), as last read.
     pub published: Published,
     /// The record's `sprig_ctl` secret reference, which also locates the
     /// `sprig_gw` monitoring account's credential the checks log in with
@@ -65,8 +64,8 @@ pub struct ClusterView {
 }
 
 /// The writer of a primary + replicas cluster as the controller publishes
-/// it (chapter 25): `leases/writer/<cluster>`, else the `cluster_failover`
-/// record's writer, else the record's registered writer (its first node).
+/// it: `leases/writer/<cluster>`, else the `cluster_failover` record's
+/// writer, else the record's registered writer (its first node).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
     /// What was read.
@@ -345,7 +344,7 @@ impl RegistryClusters {
     }
 
     /// Views that also carry each primary + replicas cluster's published
-    /// writer, read from `dc` (chapter 25).
+    /// writer, read from `dc`.
     #[must_use]
     pub fn with_leases(
         registry: ClusterRegistry,

@@ -1,29 +1,26 @@
-//! The automatic-indexing tables of the tenant catalog (chapter 13, "Data
-//! structures and storage"; Appendix C; build step 1), as the `autoindex`
+//! The automatic-indexing tables of the tenant catalog, as the `autoindex`
 //! migration module, with typed rows and access.
 //!
 //! The module registers with `sprig-catalog`'s migrator ([`AUTOINDEX_MODULE`]),
 //! so every tenant catalog gets these tables with its own: `sprig-advisor`
-//! depends on `sprig-catalog`, never the reverse (chapter 08, "Tables owned
-//! by other chapters"). The tables are not versioned: chapter 08 lists
-//! "indexing" among the modules read on demand, never bumping a catalog
-//! version, so writes here run in plain transactions, not through
-//! `Versioner::change`.
+//! depends on `sprig-catalog`, never the reverse. The tables are not
+//! versioned: indexing is among the catalog modules read on demand, never
+//! bumping a catalog version, so writes here run in plain transactions,
+//! not through `Versioner::change`.
 //!
 //! Format 1 creates:
 //!
-//! - `auto_indexes`, `auto_index_candidates` and `auto_index_validations`
-//!   as Appendix C defines them, except `auto_index_validations.cluster_id`,
-//!   which is `VARCHAR(48)` because cluster ids are text (`mum1-c7`,
-//!   chapter 03) where the appendix has `INT UNSIGNED`;
-//! - `index_origins`, which chapter 13 requires ("SQL index origins are
-//!   kept in the catalog") but no chapter defines: one row per index whose
+//! - `auto_indexes`, `auto_index_candidates` and `auto_index_validations`,
+//!   with `auto_index_validations.cluster_id` a `VARCHAR(48)` because
+//!   cluster ids are text (`mum1-c7`);
+//! - `index_origins`, which keeps SQL index origins in the catalog: one row
+//!   per index whose
 //!   origin can't be derived from its name (`user` and `migrated`); the
 //!   primary key is `system` and `sprig_auto_*` names are `auto`
 //!   ([`origin_of`]);
 //! - the counter `sprig.next_autoindex_run_id` for evaluation runs.
 //!
-//! Decisions belong in chapter 11's `decisions` table, which doesn't exist
+//! Decisions belong in the catalog's `decisions` table, which doesn't exist
 //! yet; [`DecisionLog`] is the hook, and [`LogDecisions`] logs them.
 //!
 //! **Times.** `DATETIME` columns hold UTC and travel as microseconds since
@@ -53,7 +50,7 @@ use crate::sql::{
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "autoindex";
 
-/// `auto_indexes` (chapter 13, Appendix C).
+/// `auto_indexes`.
 pub const DDL_AUTO_INDEXES: &str = "CREATE TABLE IF NOT EXISTS auto_indexes (
   index_id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   object_id        BIGINT UNSIGNED NOT NULL,
@@ -86,7 +83,7 @@ pub const DDL_AUTO_INDEXES: &str = "CREATE TABLE IF NOT EXISTS auto_indexes (
   KEY by_state (state, state_changed_at)
 ) ENGINE=InnoDB";
 
-/// `auto_index_candidates` (chapter 13, Appendix C).
+/// `auto_index_candidates`.
 pub const DDL_CANDIDATES: &str = "CREATE TABLE IF NOT EXISTS auto_index_candidates (
   candidate_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   run_id         BIGINT UNSIGNED NOT NULL,
@@ -110,8 +107,7 @@ pub const DDL_CANDIDATES: &str = "CREATE TABLE IF NOT EXISTS auto_index_candidat
   KEY by_run (run_id)
 ) ENGINE=InnoDB";
 
-/// `auto_index_validations` (chapter 13, Appendix C), with `cluster_id`
-/// as text (module docs).
+/// `auto_index_validations`, with `cluster_id` as text (module docs).
 pub const DDL_VALIDATIONS: &str = "CREATE TABLE IF NOT EXISTS auto_index_validations (
   validation_id     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   candidate_id      BIGINT UNSIGNED NOT NULL,
@@ -138,7 +134,7 @@ pub const DDL_VALIDATIONS: &str = "CREATE TABLE IF NOT EXISTS auto_index_validat
 ) ENGINE=InnoDB";
 
 /// `index_origins`: the origin of indexes whose name doesn't tell it
-/// (module docs). Not in Appendix C yet.
+/// (module docs).
 pub const DDL_INDEX_ORIGINS: &str = "CREATE TABLE IF NOT EXISTS index_origins (
   object_id   BIGINT UNSIGNED NOT NULL,
   index_name  VARCHAR(64)     NOT NULL,
@@ -148,7 +144,7 @@ pub const DDL_INDEX_ORIGINS: &str = "CREATE TABLE IF NOT EXISTS index_origins (
   PRIMARY KEY (object_id, index_name)
 ) ENGINE=InnoDB";
 
-/// `index_usage` (decision O1): user and migrated indexes whose removal
+/// `index_usage`: user and migrated indexes whose removal
 /// automatic indexing manages, with the state of their usage judgement and
 /// their exact definition, so a removed one can be restored. Automatic
 /// indexes keep the same state in `auto_indexes.observed`.
@@ -190,13 +186,13 @@ pub static AUTOINDEX_MIGRATIONS: &[Migration] = &[
     Migration {
         format: 2,
         phase: Phase::Expand,
-        name: "index_usage (decision O1)",
+        name: "index_usage",
         statements: &[DDL_INDEX_USAGE],
     },
 ];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and
-/// chapter 08's `BootstrapHooks.modules`.
+/// the catalog's `BootstrapHooks.modules`.
 pub const AUTOINDEX_MODULE: Module = Module {
     name: MODULE,
     migrations: AUTOINDEX_MIGRATIONS,
@@ -249,15 +245,15 @@ sql_enum! {
     Model {
         /// SQL tables.
         Sql = "sql",
-        /// Collections (R5).
+        /// Collections.
         Document = "document",
-        /// Key-value namespaces, Redis included (R6).
+        /// Key-value namespaces, Redis included.
         Kv = "kv",
-        /// Vector indexes (R6).
+        /// Vector indexes.
         Vector = "vector",
-        /// Geospatial (R6).
+        /// Geospatial.
         Geo = "geo",
-        /// Global lookup indexes (R1).
+        /// Global lookup indexes.
         Lookup = "lookup",
     }
 }
@@ -329,7 +325,7 @@ impl From<IndexKind> for StoredKind {
 }
 
 sql_enum! {
-    /// `auto_indexes.state` (chapter 13, "State machines").
+    /// `auto_indexes.state`.
     IndexState {
         /// Built on a validation node and replayed.
         Validating = "validating",
@@ -381,7 +377,7 @@ impl IndexState {
         )
     }
 
-    /// Whether `self → to` is an edge of chapter 13's state machine.
+    /// Whether `self → to` is an edge of the automatic index state machine.
     /// `frozen` is reachable from any state and returns to the prior one
     /// (checked by [`AutoIndexStore::unfreeze`]); `dropped` is reachable from
     /// any live state when the table is dropped or the reconciler finds the
@@ -479,7 +475,7 @@ sql_enum! {
         /// Observation: writes got slower and the benefit didn't cover it.
         WriteCost = "write_cost",
         /// Rarely used and costing more than it saves, over
-        /// `usage_sample_reads` reads (decision O1).
+        /// `usage_sample_reads` reads.
         Unused = "unused",
         /// A user index equals or extends it.
         Superseded = "superseded",
@@ -1257,8 +1253,7 @@ impl AutoIndexStore {
     /// there under `rollout`, `watch` and `usage`. Returns whether the row
     /// exists.
     ///
-    /// Added by the rollout and observer (chapter 13 steps 10 and 11);
-    /// additive.
+    /// Added by the rollout and observer; additive.
     ///
     /// # Errors
     /// 39070 or a backend error.
@@ -1869,7 +1864,7 @@ fn validation_row(mut row: Row) -> Result<ValidationRow> {
     })
 }
 
-/// A decision of automatic indexing, as a row of chapter 11's
+/// A decision of automatic indexing, as a row of the catalog's
 /// `decisions` table would hold it (`component = 'advisor'`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexDecision {
@@ -1898,7 +1893,7 @@ pub struct IndexDecision {
     pub at: SystemTime,
 }
 
-/// Where decisions go: chapter 11's `decisions` table once it exists.
+/// Where decisions go: the catalog's `decisions` table once it exists.
 #[async_trait::async_trait]
 pub trait DecisionLog: Send + Sync {
     /// Records `d`; returns its `decision_id` when the log assigns one.

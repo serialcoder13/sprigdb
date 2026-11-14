@@ -1,5 +1,4 @@
-//! Logic functions from MongoDB and Redis through a live gateway
-//! (chapter 41, "Calling code"; chapter 40 step 19; R7 close-out):
+//! Logic functions from MongoDB and Redis through a live gateway:
 //! `db.runCommand({sprigCall: ...})` through the Rust `mongodb` driver and
 //! `FCALL` / `FCALL_RO` through the `redis` crate, of functions compiled
 //! into MariaDB by the JavaScript front end and of engine-tier JavaScript
@@ -130,7 +129,7 @@ async fn setup(c: &mut mysql_async::Conn) {
         "CREATE FUNCTION hidden(x INT) LANGUAGE javascript AS $$ return { x }; $$",
     )
     .await;
-    // A validation on orders (R7 order 3): it holds for writes that
+    // A validation on orders: it holds for writes that
     // logic functions make, whichever protocol called them.
     deploy(c, &format!("CREATE VALIDATION qty_positive ON orders FOR INSERT, UPDATE LANGUAGE kirun AS '{QTY_RULE}'")).await;
     // SQL still reaches all of them.

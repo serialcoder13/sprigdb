@@ -1,5 +1,4 @@
-//! The cost model, its gates, selection under budgets and replacement
-//! (chapter 13, "Cost model" and "Selection under budgets"; build step 5).
+//! The cost model, its gates, selection under budgets and replacement.
 //!
 //! ```text
 //! u_T     := median over T's SELECT fingerprints of t_f / max(x_f, 1)   # ms per row
@@ -24,7 +23,7 @@
 //! replacing an active automatic index only when the newcomer is worth more
 //! than twice as much per byte.
 //!
-//! **Choices** (also in the report):
+//! **Choices:**
 //!
 //! - Usage per fingerprint comes from [`usage`]: the same reading of the
 //!   shape the generator uses, so an index serving a fingerprint it wasn't
@@ -35,7 +34,7 @@
 //!   table: at most one retirement (for budget or replacement) per table
 //!   per evaluation, so a settings change never causes a burst of churn.
 //! - Pool members left when selection stops are `deferred` with reason
-//!   `marginal_below_min_net` (worked example 2's F3).
+//!   `marginal_below_min_net`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,7 +83,7 @@ pub struct CostParams {
 }
 
 impl Default for CostParams {
-    /// Chapter 13's defaults, with a replica to validate on.
+    /// The defaults, with a replica to validate on.
     fn default() -> Self {
         Self {
             window_hours: 24.0,
@@ -293,7 +292,7 @@ impl<'a> TableContext<'a> {
         self.stats.rows() * (key + self.stats.pk_length() + ENTRY_OVERHEAD_BYTES) / FILL_FACTOR
     }
 
-    /// `S` of a field-column index (R6 round 6): the columns don't exist
+    /// `S` of a field-column index: the columns don't exist
     /// yet, so each part counts the value's average length, at most its
     /// prefix.
     #[must_use]
@@ -361,8 +360,8 @@ impl Gate {
     }
 }
 
-/// The cost model's estimate of one candidate: chapter 13's `B`, `Wc`,
-/// `S` and `Tb`, and the gates it fails.
+/// The cost model's estimate of one candidate: `B`, `Wc`, `S` and `Tb`
+/// (module docs), and the gates it fails.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Estimate {
     /// `B`: ms saved per hour.
@@ -375,7 +374,7 @@ pub struct Estimate {
     pub build_seconds: f64,
     /// Per fingerprint served.
     pub per_fp: Vec<FpEstimate>,
-    /// Gates failed, in the chapter's order; empty: it may go on.
+    /// Gates failed, in the order of the module docs; empty: it may go on.
     pub failed: Vec<Gate>,
 }
 
@@ -399,7 +398,7 @@ impl Estimate {
     }
 }
 
-/// Chapter 13's cost model interface.
+/// The cost model interface.
 pub trait CostModel: Send + Sync {
     /// `B`, `Wc`, `S`, `Tb` and the gates of `c` on `t`.
     fn estimate(&self, c: &Candidate, t: &TableContext<'_>) -> Estimate;
@@ -423,8 +422,8 @@ impl CostModel for Model {
                     t.predict(&c.def.parts, *fp)
                         .unwrap_or((input.mean_ms, input.examined_per_run))
                 } else {
-                    // Spatial and vector indexes (R6 round 3) and key-value
-                    // element tables (round 5): the run reads
+                    // Spatial and vector indexes and key-value
+                    // element tables: the run reads
                     // about the entries the generator expects instead of the
                     // rows it examines now; time scales with that share.
                     let entries = c.evidence.entries_per_run.unwrap_or(input.examined_per_run);
@@ -442,7 +441,7 @@ impl CostModel for Model {
                 entries,
             });
         }
-        // A field column's index changes with `v` (R6 round 6).
+        // A field column's index changes with `v`.
         let write = t.writes.touching(
             super::kv::maintained_columns(&c.def)
                 .iter()
@@ -525,8 +524,7 @@ pub struct Budget {
     pub max_storage_pct: f64,
     /// `auto_index.min_storage_budget_mb` (64), in bytes: the storage
     /// budget is never below this, so a small table can get the indexes it
-    /// needs (decision E2, `decisions/m0.4-interim.md`; the default awaits
-    /// Kiran).
+    /// needs (the default may change).
     pub min_storage_bytes: f64,
 }
 
@@ -587,9 +585,9 @@ fn as_info(c: &Candidate) -> IndexInfo {
     }
 }
 
-/// Chapter 13's `select(T)`.
+/// `select(T)`: selection under the table's budget (module docs).
 #[must_use]
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the chapter's loop, in one place
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the whole loop, in one place
 pub fn select(
     mut pool: Vec<Pooled>,
     t: &TableContext<'_>,

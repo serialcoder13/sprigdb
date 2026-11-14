@@ -1,6 +1,5 @@
 //! Typed DDL targets: what a DDL statement does to the catalog, as the
-//! rewrite read it (chapter 08, "Bootstrap, DDL and migrations"; the
-//! gateway side of build step 10).
+//! rewrite read it (the gateway side of catalog DDL).
 //!
 //! Both name finders fill [`StatementInfo::ddl`](super::StatementInfo::ddl)
 //! for every statement the catalog's DDL engine handles:
@@ -19,7 +18,7 @@
 //! Names are **logical**, as the client wrote them with quoting removed
 //! (not lowercased: the catalog applies `names.lower_case_table_names`
 //! itself). An unqualified name carries the session's current database
-//! as chapter 07 resolves it, including a `USE` earlier in the same text,
+//! as the name layer resolves it, including a `USE` earlier in the same text,
 //! and [`DdlName::explicit_db`] says whether the statement qualified it.
 //!
 //! Only top-level statements get a target. DDL the gateway can't route
@@ -31,7 +30,7 @@
 //!
 //! [`DdlTarget::to_catalog`] converts a target to `sprig-catalog`'s
 //! [`DdlStatement`]. `sprig-sql` (layer 2, execution) may depend on
-//! `sprig-catalog` (layer 2, data) under chapter 03's layering, so the
+//! `sprig-catalog` (layer 2, data) under the crate layering, so the
 //! conversion lives here and the gateway calls it.
 
 use std::fmt;
@@ -236,7 +235,7 @@ pub enum DdlTarget {
         or_replace: bool,
         /// `TEMPORARY` (tables and MariaDB sequences): session-local, not
         /// catalog DDL. The gateway forwards it without the engine, and the
-        /// session pins its backend connection (chapter 06).
+        /// session pins its backend connection.
         temporary: bool,
         /// A trigger's table (`ON t`).
         parent: Option<DdlName>,

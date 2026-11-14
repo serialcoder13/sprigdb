@@ -1,4 +1,4 @@
-//! The `sinks` loop (chapter 51, "Task placement"; R9), on the DC leader,
+//! The `sinks` loop (task placement), on the DC leader,
 //! every second:
 //!
 //! ```text
@@ -9,7 +9,7 @@
 //!   definition changed, the sink paused or failed) is replaced here
 //! ```
 //!
-//! Fan-in sinks (R9, r9last; chapter 51, "Fan-in sinks"): an index entry
+//! Fan-in sinks: an index entry
 //! with `fan_in` gets its task count from its member instances, counted
 //! in the DC's `inherit-instances/` index at most every 10 s (at once for
 //! a new definition version): one task per `per_task` instance
@@ -18,8 +18,8 @@
 //! ones are submitted only once none of them is live, so two tasks never
 //! read one member at a time.
 //!
-//! Dispatch's lease decides which worker runs a task (the chapter's
-//! rendezvous claiming is replaced by the job runtime, as for stream
+//! Dispatch's lease decides which worker runs a task (rendezvous
+//! claiming is replaced by the job runtime, as for stream
 //! sequencers); the task epoch in `sink_tasks` fences a worker that lost
 //! it. A task whose job ended less than 5 s ago waits, so a sink that
 //! stops at once (failed, paused by a user) isn't resubmitted every second.
@@ -179,7 +179,7 @@ impl Reconciler for SinksLoop {
                         kind: JOB_KIND.into(),
                         // Long-running and mostly waiting, like triggers
                         // on streams: the consumer pool, not the 8 slots
-                        // of other jobs (R9, r9queue).
+                        // of other jobs.
                         class: JobClass::Consumer,
                         tenant_id: None,
                         clusters: Vec::new(),

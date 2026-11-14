@@ -1,10 +1,9 @@
 //! `sprig-binlog`: the MariaDB binlog client and event parser.
 //!
-//! Layer: 1 foundations. Design: [chapter 10](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/10-mover.md) (The mover) of the SprigDB low-level design,
-//! with the consumer side in chapter 38 (The change feed).
+//! Layer: 1 foundations. The mover and the change feed consume it.
 //!
-//! This is build step 1 of chapter 10, with step 2's parser additions
-//! (compressed and fragmented events, XA groups, two-phase `ALTER` flags):
+//! The client and parser, including compressed and fragmented events, XA
+//! groups and two-phase `ALTER` flags:
 //!
 //! - [`BinlogStream`]: connects to a node as a GTID-aware replica
 //!   (`@mariadb_slave_capability = 4`, `@slave_connect_state`,
@@ -13,7 +12,7 @@
 //!   encrypted binlog (`encrypt_binlog = ON`), and the stream skips the
 //!   `START_ENCRYPTION` event it sends ahead of the events; a non-blocking dump
 //!   ([`StreamOptions::non_blocking`]) ends with [`Event::DumpEnd`] at the
-//!   end of the binlog (chapter 09's dump probe reads this way);
+//!   end of the binlog (the capability probe's dump check reads this way);
 //! - [`BinlogFile`]: the same events from binlog files;
 //! - [`Decoder`]: the shared parser: framing, CRC32 checksums, format
 //!   description, `GTID` and `GTID_LIST`, `TABLE_MAP`, rows events v1 and
@@ -23,7 +22,7 @@
 //! - [`Value`]: every MariaDB column type decoded from a row image,
 //!   including compressed columns;
 //! - [`annotate`]: the SprigDB statement comment the change feed reads
-//!   from `ANNOTATE_ROWS` events (chapter 38, build step 1).
+//!   from `ANNOTATE_ROWS` events.
 //!
 //! - [`BinlogTls`]: TLS to the source (verify against the cluster's CA by
 //!   default, or encrypt without verifying for development servers).

@@ -80,7 +80,7 @@ impl PlanRun {
     }
 
     /// Rows read through `name` that needed a primary-key lookup: the
-    /// cost the covering retry removes (worked example 3).
+    /// cost the covering retry removes.
     #[must_use]
     pub fn lookups_via(&self, name: &str) -> f64 {
         self.tables
@@ -112,7 +112,7 @@ pub fn parse_plan(json: &str) -> Result<PlanRun, PlanParseError> {
         Ok(v) => v,
         // MariaDB prints a condition's text unescaped, so a JSON path with
         // a quoted key (`'$."email"'`, the document engine's paths) breaks
-        // its own JSON (S132): mend those lines and try once more.
+        // its own JSON: mend those lines and try once more.
         Err(e) => {
             serde_json::from_str(&mend_quotes(json)).map_err(|_| PlanParseError(e.to_string()))?
         }
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn mends_bare_quotes_in_conditions() {
-        // MariaDB 11.8's own output for a document-engine filter (S132).
+        // MariaDB 11.8's own output for a document-engine filter.
         let json = r#"{
   "query_block": {
     "select_id": 1,

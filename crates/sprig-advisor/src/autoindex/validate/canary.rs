@@ -1,4 +1,4 @@
-//! Estimate-and-canary validation (chapter 13 build step 9), for single
+//! Estimate-and-canary validation, for single
 //! nodes and external clusters with no usable replica, and whenever
 //! parameter samples are off.
 //!
@@ -8,17 +8,18 @@
 //! 2. EXPLAIN FORMAT=JSON each target's sampled statements on the node: the
 //!    plan must read at least explain_rows_tolerance × the rows the model
 //!    assumed (else the benefit is overstated)
-//! 3. canary: build the index for real on the canary shard (R0: the
+//! 3. canary: build the index for real on the canary shard (today the
 //!    tenant's only shard), online, with the binary log on
 //! 4. replay the samples A/B on the canary right away (IGNORE INDEX gives
 //!    the before plan); a rejection drops the index at once
 //! 5. otherwise the index stays, observing for auto_index.canary_hours;
 //!    the observer then calls `judge` with the target fingerprints' p95
-//!    before and since (and, from R1, the unbuilt shards as a control)
+//!    before and since (and, with several shards, the unbuilt shards as a
+//!    control)
 //! ```
 //!
-//! Step 4 is this module's addition *(choice)*: the chapter's canary only
-//! observes, which takes a day and lets a harmful index serve traffic in
+//! Step 4 is this module's addition *(choice)*: a canary that only
+//! observes takes a day and lets a harmful index serve traffic in
 //! the meantime. Replaying right after the build catches the plain cases
 //! (an index the optimizer ignores, a statement it makes slower) in
 //! seconds. It runs on the canary shard's writer, read-only and bounded by
@@ -298,7 +299,7 @@ impl Validator for CanaryValidator {
         let started = Instant::now();
         let (res, killed) = match lock {
             Ok(()) => {
-                // A field-column candidate's columns first (R6 round 6): on
+                // A field-column candidate's columns first: on
                 // the writer, replicated, and left in place if the canary
                 // is dropped (invisible, without storage).
                 let fields = match super::node::add_fields_sql(t, &plan.candidate.def) {
@@ -392,7 +393,8 @@ pub struct CanaryObservation {
     pub observed_p95_ms: f64,
     /// Runs on the canary since the build.
     pub runs: u64,
-    /// R1: the same fingerprint's p95 on unbuilt shards, before and since,
+    /// With several shards: the same fingerprint's p95 on unbuilt shards,
+    /// before and since,
     /// to take out drift common to all shards.
     pub control: Option<(f64, f64)>,
 }

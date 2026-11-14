@@ -1,29 +1,26 @@
-//! Tenant bootstrap and deletion (chapter 08, "Bootstrap, DDL and
-//! migrations", build step 9; chapter 23, "The tenant tree").
+//! Tenant bootstrap and deletion in the tenant tree.
 //!
 //! ```text
 //! sprigctl tenant create acme --dc mum1 [--under platform] [--residency ...] [--admin admin]
 //! global controller: validate name, parent and residency; allocate the id; create
-//!   tenant-names/acme and tenants/<id> (state creating, versions 0) in one txn (23)
+//!   tenant-names/acme and tenants/<id> (state creating, versions 0) in one txn
 //! home DC controller, job tenant_bootstrap (idempotent, progress in sprig.bootstrap):
-//!   pick a cluster (chapter 11, least busy without a hint); create shardmaps/<id>/0;
+//!   pick a cluster (least busy without a hint); create shardmaps/<id>/0;
 //!   CREATE DATABASE t<id>_sprig; run all migrations; insert internal keys;
 //!   copy the ancestry and ancestors' settings (tree_settings reconcile);
-//!   create the admin user (14) with backend grants (29); state creating → active
+//!   create the admin user with backend grants; state creating → active
 //! ```
 //!
 //! [`TenantService`] serves the Admin API's tenant calls and runs the
 //! bootstrap; the [`TenantLifecycle`] loop (`tenant_bootstrap`, DC leader)
 //! finishes what a crash or a lost request left behind: a tenant still
 //! `creating` is bootstrapped again, and one past
-//! `catalog.bootstrap_timeout_minutes` becomes `failed` with an alert
-//! (chapter 08: "bootstrap past `catalog.bootstrap_timeout_minutes`
-//! becomes failed"); a tenant `deleting` is cleaned up. Every step is idempotent:
+//! `catalog.bootstrap_timeout_minutes` becomes `failed` with an alert; a
+//! tenant `deleting` is cleaned up. Every step is idempotent:
 //!
 //! 1. **Placement.** The shard map `shardmaps/<id>/0` records the choice,
 //!    written once with a `Missing` guard and the DC leader's token, so two
-//!    runs agree. Interim placement until chapter 11's (M0.6): the
-//!    `--cluster` asked for, else the active cluster of the DC holding the
+//!    runs agree. Placement: the `--cluster` asked for, else the active cluster of the DC holding the
 //!    fewest catalogs, ties to the lower cluster number. The choice, its
 //!    reason and the counts considered are logged as a `tenant.place`
 //!    decision and kept in `sprig.bootstrap`.
@@ -40,16 +37,16 @@
 //!    `sprig.ancestry`, `sprig.ancestor_versions` and the ancestors' rows,
 //!    in one versioned change (`change()` doesn't check the tenant's state,
 //!    so it works while `creating`).
-//! 4. **Hooks** ([`BootstrapHooks`]): chapter 14's admin user and verifier
-//!    tables and chapter 29's backend accounts and grants belong to other
-//!    milestones; they plug in here.
+//! 4. **Hooks** ([`BootstrapHooks`]): the admin user, the verifier tables,
+//!    and the backend accounts and grants belong to other modules; they
+//!    plug in here.
 //! 5. **Active.** The entry goes `creating` → `active` in a transaction
 //!    guarded by its mod revision.
 //!
-//! Chapter 08 creates no logical database at bootstrap; the first one comes
+//! Bootstrap creates no logical database; the first one comes
 //! from the tenant's own `CREATE DATABASE`.
 //!
-//! **Deletion** (chapter 23's `delete_tenant`): only a leaf that is
+//! **Deletion** (`delete_tenant`): only a leaf that is
 //! `active` or `failed`; the entry becomes `deleting` and the parent's
 //! child count drops in one transaction. Cleanup ([`cleanup`]'s steps)
 //! then ends the tenant's mover jobs, runs the hooks' `dropping`, waits
@@ -59,7 +56,7 @@
 //! carries another tenant's mark), deletes its finished job records and
 //! its keys in the DC tier, and finally the entry and its name.
 //!
-//! **Ids are never reused** (chapter 23). Besides the directory's counter,
+//! **Ids are never reused.** Besides the directory's counter,
 //! a new tenant's id is raised past every schema shaped like a tenant's
 //! (`t<id>_sprig`, `t<id>_d...`) already on the DC's active clusters, so a
 //! counter that was lost (a deployment rebuilt over clusters that kept an
@@ -70,9 +67,8 @@
 //! inside the range raise it, and a used-up range fails creation with
 //! 39080. Deployments sharing MariaDB servers take separate ranges.
 //!
-//! Where this differs from the book: chapter 08 runs bootstrap as a job
-//! (`tenant_bootstrap`) through the scheduler; here the Admin API call runs
-//! it inline and the loop of the same name is the crash backstop, so
+//! Bootstrap doesn't go through the scheduler as a job: the Admin API call
+//! runs it inline and the `tenant_bootstrap` loop is the crash backstop, so
 //! `sprigctl tenant create` returns once the tenant is active. The
 //! bootstrap deadline is measured from when this leader first saw the
 //! tenant `creating` (the entry's `created_at` is for people only).
@@ -106,17 +102,17 @@ use crate::settings::{TENANT_ID_MAX, TENANT_ID_MIN, TENANT_MAX_DEPTH};
 use crate::tree::{Directory, DirectoryEntry, IdRange, NewTenant, StoredEntry, TenantState};
 use crate::tree_settings::{SyncOutcome, TreeSync};
 
-/// Other chapters' parts of bootstrap and deletion.
+/// Other modules' parts of bootstrap and deletion.
 #[async_trait::async_trait]
 pub trait BootstrapHooks: Send + Sync + 'static {
-    /// Catalog modules migrated with the core module (chapter 14's
-    /// verifier tables, chapter 29's privileges, ...).
+    /// Catalog modules migrated with the core module (the verifier
+    /// tables, the privileges, ...).
     fn modules(&self) -> Vec<Module> {
         Vec::new()
     }
 
-    /// After the catalog and the ancestry: chapter 14's admin user,
-    /// chapter 29's backend accounts and grants. Must be idempotent.
+    /// After the catalog and the ancestry: the admin user, the backend
+    /// accounts and grants. Must be idempotent.
     ///
     /// # Errors
     /// The hook's error; bootstrap retries.
@@ -129,7 +125,7 @@ pub trait BootstrapHooks: Send + Sync + 'static {
     }
 
     /// Before a deleted tenant's catalog is dropped (`None` if it never
-    /// got one): chapter 29 removes backend accounts. Must be idempotent.
+    /// got one): backend accounts are removed here. Must be idempotent.
     ///
     /// # Errors
     /// The hook's error; cleanup retries.
@@ -142,7 +138,7 @@ pub trait BootstrapHooks: Send + Sync + 'static {
     }
 }
 
-/// No hooks: what M0.3 has.
+/// No hooks.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoHooks;
 
@@ -222,8 +218,8 @@ where
 }
 
 /// Drops a deleted tenant's remaining databases through the DDL path (the
-/// catalog reconciler's pass over a `deleting` tenant, chapter 08), so
-/// cleanup needn't wait for the reconciler's next interval (bugfix-27).
+/// catalog reconciler's pass over a `deleting` tenant), so cleanup
+/// needn't wait for the reconciler's next interval.
 #[async_trait::async_trait]
 pub trait DeletedDatabases: Send + Sync + 'static {
     /// Resolves the tenant's stuck DDL jobs and drops every database the
@@ -237,8 +233,8 @@ pub trait DeletedDatabases: Send + Sync + 'static {
 /// How long a deleted tenant's databases may resist the DDL path before
 /// cleanup marks them dropped in the catalog it is about to drop anyway
 /// (their schemas still go in step 3, by id): a stuck job, an instance
-/// database the DDL path refuses, a cluster that keeps failing
-/// (bugfix-27). The reconciler resolves stuck jobs after
+/// database the DDL path refuses, a cluster that keeps failing. The
+/// reconciler resolves stuck jobs after
 /// `catalog.stuck_state_minutes` (15), so this is longer.
 pub const DELETED_DATABASES_GRACE: Duration = Duration::from_secs(20 * 60);
 
@@ -250,19 +246,19 @@ pub enum Cleanup {
     /// Waiting for this many mover jobs of the tenant to end (cancelled,
     /// or told to drop their retained copies now).
     WaitingForJobs(usize),
-    /// Waiting for this many databases of the tenant to be dropped
-    /// (bugfix-27): the loop looks again soon, dropping them again.
+    /// Waiting for this many databases of the tenant to be dropped:
+    /// the loop looks again soon, dropping them again.
     WaitingForDatabases(u64),
 }
 
 /// How soon the tenant loop looks again at a deletion waiting for its
 /// mover jobs. Short: a worker finishes a job within seconds of its
 /// retention being ended, and a blocked key would wait 30 s (longer than
-/// `deploy/compose/gateway-dev.sh down` used to wait; decision TD9).
+/// `deploy/compose/gateway-dev.sh down` used to wait).
 pub const CLEANUP_JOBS_RECHECK: Duration = Duration::from_secs(2);
 
 /// How soon the tenant loop drops a deleted tenant's remaining databases
-/// again (bugfix-27; before, a blocked key waited 30 s and the databases
+/// again (before, a blocked key waited 30 s and the databases
 /// went only at the catalog reconciler's next pass, up to 5 minutes).
 pub const CLEANUP_DATABASES_RECHECK: Duration = Duration::from_secs(5);
 
@@ -288,7 +284,7 @@ where
 {
     /// The service of DC `dc_store`'s tier: catalogs found with `locator`,
     /// ancestry copied by `tree` (whose directory is used), `hooks` for
-    /// other chapters, `live` for `tenant.max_depth` and the bootstrap
+    /// other modules, `live` for `tenant.max_depth` and the bootstrap
     /// deadline (defaults without it).
     ///
     /// # Errors
@@ -323,7 +319,7 @@ where
         })
     }
 
-    /// Step 2 (bugfix-27): the deleted tenant's databases go here, through
+    /// Step 2: the deleted tenant's databases go here, through
     /// the DDL path (the catalog reconciler's pass for a `deleting`
     /// tenant: stuck jobs resolved, every listed database dropped, inherited
     /// instance databases included), not only when the reconciler's next
@@ -424,7 +420,7 @@ where
         Duration::from_secs(m.saturating_mul(60))
     }
 
-    /// Creates `req.name` in the directory (chapter 23) and bootstraps it
+    /// Creates `req.name` in the directory and bootstraps it
     /// here. A tenant of that name still `creating` under the same parent
     /// is bootstrapped again (a re-run after a crash); one already `active`
     /// is returned with `created: false`.
@@ -476,13 +472,13 @@ where
                 }
                 None => None,
             };
-            // Chapter 24 (r2last): without a --cluster hint the tenant is
+            // Without a --cluster hint the tenant is
             // homed in the least busy DC its parent's residency allows.
             let home = match &req.cluster {
                 Some(_) => self.dc.clone(),
                 None => self.least_busy_home(parent_raw.as_ref(), now_ms).await?,
             };
-            // Chapter 26: a child's residency lies within its parent's;
+            // A child's residency lies within its parent's;
             // its home must be one of the parent's allowed DCs.
             let inherited = match (&parent, &parent_raw) {
                 (Some(p), Some(raw)) => {
@@ -522,8 +518,8 @@ where
         })
     }
 
-    /// The home of a new tenant without a `--cluster` hint (chapter 24,
-    /// "Least-busy placement"): the least busy active DC the parent's
+    /// The home of a new tenant without a `--cluster` hint (least-busy
+    /// placement): the least busy active DC the parent's
     /// residency allows, by the `dc-load` records; this DC when none has a
     /// fresh record yet (a new deployment) and it is allowed.
     ///
@@ -1087,7 +1083,7 @@ where
             jobs = settled.finished.len(), "deleted tenant's records removed");
         // 6. The entry and its name.
         self.directory.remove(&e).await?;
-        // 7. Decision bugfix-32: a gateway that hadn't seen the deletion
+        // 7. A gateway that hadn't seen the deletion
         //    yet may have made one of the tenant's backend accounts again
         //    after step 3 (a session's statement, a new login). Look again
         //    a little later, by exact names, accounts only.
@@ -1194,7 +1190,7 @@ where
 }
 
 /// When a deleted tenant's backend accounts are looked for again after
-/// its cleanup (decision bugfix-32).
+/// its cleanup.
 const LATE_ACCOUNT_SWEEPS: [Duration; 2] = [Duration::from_secs(10), Duration::from_secs(60)];
 
 /// Drops deleted tenant `id`'s backend accounts and name rows that a

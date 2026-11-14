@@ -90,7 +90,7 @@ jobs:
           tool: nextest
       - run: cargo build --workspace --locked
       # No SPRIG_TEST_* variables: integration tests skip themselves.
-      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - run: cargo nextest run --workspace --locked --no-fail-fast --no-tests=pass
       - run: cargo test --workspace --locked --doc
 
   studio:

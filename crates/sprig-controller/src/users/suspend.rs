@@ -1,6 +1,5 @@
-//! Tenant suspension through the Admin API (chapter 14, "Suspension";
-//! chapter 23's directory flag; chapter 29's `ALTER TENANT c SUSPEND |
-//! RESUME`): `POST /admin/v1/tenants/{name}:suspend {"reason": ...}` and
+//! Tenant suspension through the Admin API (the directory flag that SQL's
+//! `ALTER TENANT c SUSPEND | RESUME` also sets): `POST /admin/v1/tenants/{name}:suspend {"reason": ...}` and
 //! `:resume`, which `sprigctl tenant suspend` and `resume` call.
 //!
 //! ```text
@@ -10,8 +9,8 @@
 //!   for t and every tenant below it: an empty auth change (a new auth
 //!     version), so every gateway holding the tenant reloads it, sees the
 //!     suspension and closes the tenant's sessions at their next safe point
-//!     with 39306 where auth.close_sessions_on_revoke is on (chapter 14,
-//!     "Caching and revocation"; sprig_gateway::tenant)
+//!     with 39306 where auth.close_sessions_on_revoke is on
+//!     (sprig_gateway::tenant)
 //!   audit admin.tenant_suspended in the tenant's stream
 //! resume(t): the flag cleared; audit admin.tenant_resumed
 //! ```

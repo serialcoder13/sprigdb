@@ -1,7 +1,6 @@
-//! Row-level security on key-value namespaces and vectors, live (chapter
-//! 29, R6; decision RL35): a key policy on a Redis database's key table
-//! binds Redis commands on strings and structures (their element tables
-//! follow the key policy), and a policy on a vector-indexed table filters
+//! Row-level security on key-value namespaces and vectors, live: a key
+//! policy on a Redis database's key table binds Redis commands on strings
+//! and structures (their element tables follow the key policy), and a policy on a vector-indexed table filters
 //! before the ranking, so `LIMIT k` returns `k` visible rows.
 //!
 //! ```sh
@@ -227,7 +226,7 @@ async fn keys_of(c: &mut mysql_async::Conn, sql: &str) -> Result<BTreeSet<String
         .map_err(|e| e.to_string())
 }
 
-/// RL55, straight to MariaDB: the element tables are refused to alice's
+/// Straight to MariaDB: the element tables are refused to alice's
 /// account; their views show her elements only.
 async fn direct_elements(ck: &mut Checks) {
     let Some((mut b, ctx, schemas)) =
@@ -307,7 +306,7 @@ async fn direct_elements(ck: &mut Checks) {
     );
 }
 
-/// RL55, straight to MariaDB, with the value-field policy too: the
+/// Straight to MariaDB, with the value-field policy too: the
 /// element view applies it through the key row.
 async fn direct_elements_value_policy(ck: &mut Checks) {
     let Some((mut b, ctx, schemas)) =
@@ -519,7 +518,7 @@ async fn row_level_security_on_kv_and_vectors() {
         || format!("{n:?}"),
     );
 
-    // RL55: change streams over the Redis database: a structure's
+    // Change streams over the Redis database: a structure's
     // element rows never stream (internal tables), and its key row's
     // changes reach alice only for her keys.
     if let Ok(http) = std::env::var("SPRIG_TEST_RLS_HTTP") {
@@ -555,14 +554,14 @@ async fn row_level_security_on_kv_and_vectors() {
         eprintln!("change stream check skipped (SPRIG_TEST_RLS_HTTP)");
     }
 
-    // RL55: element policy views. Straight to MariaDB as alice's backend
+    // Element policy views. Straight to MariaDB as alice's backend
     // account, the element tables are refused and their views show only
     // the elements of keys her policies show.
     direct_elements(&mut ck).await;
 
-    // RL55: a policy reading more than the key (the key's type) reaches
-    // the elements through their key rows; before, it hid every element
-    // from the users it bound (RL35), alice's own included.
+    // A policy reading more than the key (the key's type) reaches the
+    // elements through their key rows, rather than hiding every element
+    // from the users it binds, alice's own included.
     let r = admin
         .query_drop("CREATE POLICY rlsk_sets ON redis.db0 FOR SELECT USING (type = 'set')")
         .await;

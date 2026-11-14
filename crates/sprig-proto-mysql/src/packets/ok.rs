@@ -202,7 +202,7 @@ impl SessionChange {
                 // every changed variable into one entry (`timestamp` and
                 // `last_gtid` together after a COMMIT under a fixed
                 // timestamp: reading only the first pair lost the commit's
-                // GTID, and with it read-your-writes; R3, agent r3d).
+                // GTID, and with it read-your-writes).
                 session_track::SYSTEM_VARIABLES => loop {
                     let name = data.slice_ref(d.lenenc_bytes()?);
                     let value = data.slice_ref(d.lenenc_bytes()?);

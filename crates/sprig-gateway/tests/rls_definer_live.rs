@@ -1,5 +1,4 @@
-//! Row-level security in definer routines, live (chapter 29; RLS round 6,
-//! decision RL57): a `SQL SECURITY DEFINER` procedure or function over a
+//! Row-level security in definer routines, live: a `SQL SECURITY DEFINER` procedure or function over a
 //! protected table applies its definer's policies, an invoker routine its
 //! caller's, and the caller's context comes back after every call, a
 //! failed one included.
@@ -244,7 +243,7 @@ async fn definer_routines_apply_their_definers_policies() {
         || format!("{sc:?}"),
     );
 
-    // RL57's addition (bugfix-63): a routine without SQL SECURITY over a
+    // A routine without SQL SECURITY over a
     // protected table runs as DEFINER; the gateway notes it, naming the
     // tables. An explicit clause, either way, gets no note.
     for (q, noted) in [
@@ -331,7 +330,7 @@ async fn ids(c: &mut mysql_async::Conn, q: &str) -> Result<Vec<i64>, String> {
     c.query::<i64, _>(q).await.map_err(|e| e.to_string())
 }
 
-/// RLS round 6 (RL58): a subtree above `rls.inline_subtree_max` is read
+/// A subtree above `rls.inline_subtree_max` is read
 /// from `__sprig_sys.__sprig_subtree` instead of refused. Needs
 /// `SPRIG_TEST_RLS_CTL`, `SPRIG_TEST_RLS_TENANT_ID` and a child tenant's id
 /// in `SPRIG_TEST_RLS_SUBTREE_CHILD`; `SPRIG_TEST_RLS_DIRECT` adds the
@@ -514,7 +513,7 @@ async fn large_subtrees_read_the_subtree_table() {
     assert!(ck.failed.is_empty(), "{:#?}", ck.failed);
 }
 
-/// bugfix-64 (RLS round 6, item 6): a session pinned to its backend
+/// A session pinned to its backend
 /// connection (here by `GET_LOCK`) keeps MariaDB's database-level grants
 /// of its last `USE`. After `rls.backend_enforcement` moved from `views`
 /// to `triggers` (grants widened at database level) its reads failed with

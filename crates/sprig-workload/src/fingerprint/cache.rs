@@ -11,13 +11,43 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use sprig_common::ids::TenantId;
+use sprig_common::ids::{DbId, TenantId};
 
 use super::{
-    Fingerprint, FingerprintId, FpFlags, FpKind, Reserved, SqlCtx, digest_seeded,
+    Fingerprint, FingerprintId, FpFlags, FpKind, Normalized, Reserved, SqlCtx, digest_seeded,
     normalize::normalize_with,
 };
 use crate::shape::{ExtractCtx, Shape, StmtType, TableResolver, extract};
+
+/// The database part of a SQL fingerprint's id, and its `db_id` (chapter
+/// 12): the database of the first table the statement names (CTEs
+/// aside). The normalized text already names every table with its
+/// database, so the same statement from sessions with different default
+/// databases, or none, is one fingerprint. A statement that names no
+/// table, or a table with no database, keeps the session's database: its
+/// meaning can depend on it (unqualified routines, `SHOW TABLES`). A
+/// database the resolver doesn't know gives 0.
+fn key_db(norm: &Normalized, ctx: &SqlCtx<'_>, resolver: &dyn TableResolver) -> DbId {
+    // An unqualified first table is in the session's database.
+    let Some(t) = &norm.qualified_first else {
+        return ctx.db_id;
+    };
+    let Some(db) = t.db.as_deref() else {
+        return ctx.db_id;
+    };
+    let current = ctx.current_db.is_some_and(|c| {
+        if ctx.lower_case_table_names {
+            c.eq_ignore_ascii_case(db)
+        } else {
+            c == db
+        }
+    });
+    if current {
+        ctx.db_id
+    } else {
+        resolver.database(db, &t.name).unwrap_or(DbId(0))
+    }
+}
 
 /// A fingerprint this gateway has seen: what every execution shares.
 #[derive(Debug)]
@@ -143,13 +173,14 @@ impl SqlFingerprinter {
             };
         }
         let (stored, truncated) = norm.stored_text(ctx.max_text_bytes);
-        let mut id = digest_seeded(FpKind::Sql, ctx.db_id, caller_fn, &norm.text, 0);
+        let db_id = key_db(&norm, ctx, resolver);
+        let mut id = digest_seeded(FpKind::Sql, db_id, caller_fn, &norm.text, 0);
         let mut known = self.lookup(tenant, id, stored);
         let mut collision = false;
         if let Some(Err(())) = known {
             // Same id, other text: the second text takes seed 1.
             collision = true;
-            id = digest_seeded(FpKind::Sql, ctx.db_id, caller_fn, &norm.text, 1);
+            id = digest_seeded(FpKind::Sql, db_id, caller_fn, &norm.text, 1);
             known = self.lookup(tenant, id, stored);
         }
         let known = if let Some(Ok(k)) = known {
@@ -188,7 +219,7 @@ impl SqlFingerprinter {
             literals: norm.literals,
             front_end: ctx.front_end,
             caller: ctx.caller,
-            db_id: ctx.db_id,
+            db_id,
             flags: known.flags,
             in_list_max: norm.in_list_max,
             list_slots: norm.list_slots,

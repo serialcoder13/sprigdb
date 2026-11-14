@@ -1,5 +1,4 @@
-//! Account functions and `DATABASE()` inside stored programs and views
-//! (chapter 07, "Account names"; build step 12, R4).
+//! Account functions and `DATABASE()` inside stored programs and views.
 //!
 //! A view, procedure, function, trigger or event runs inside MariaDB, as
 //! the tenant's backend account and in a physical schema, where the gateway
@@ -197,7 +196,7 @@ enum Call {
     Database,
     CurrentUser,
     User,
-    /// `VERSION()`: the persona's version string (gaps row 53).
+    /// `VERSION()`: the persona's version string.
     Version,
 }
 
@@ -300,8 +299,8 @@ pub fn substitute_with(sql: &str, lex_opts: &LexOptions, oracle: bool) -> Option
 }
 
 /// [`substitute_with`], with `VERSION()` also replaced by `version`, the
-/// version string the creating session's persona reports (gaps row 53:
-/// MariaDB would answer its own, `11.8.9-MariaDB-...`, on both ports).
+/// version string the creating session's persona reports
+/// (MariaDB would answer its own, `11.8.9-MariaDB-...`, on both ports).
 /// The value is fixed when the program is created; [`restore`] shows the
 /// call again.
 #[must_use]
@@ -639,8 +638,8 @@ fn diagnostics_edits(src: &[u8], toks: &[Token], oracle: bool) -> Vec<(Range<usi
     edits
 }
 
-/// A client's own statement with caught error text mapped (chapter 07
-/// step 12), or `None` when nothing changes:
+/// A client's own statement with caught error text mapped, or `None` when
+/// nothing changes:
 ///
 /// - `GET DIAGNOSTICS` with text items into user variables runs inside
 ///   `BEGIN NOT ATOMIC ... END` with its mapping (a compound statement

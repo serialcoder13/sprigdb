@@ -1,9 +1,9 @@
-//! DC failover across two etcd tiers (chapter 25, "Promotion and epochs";
-//! chapter 23 step 10's `Global` service): what lifts decision W12.
+//! DC failover across two etcd tiers, with the global leader's `Global`
+//! service.
 //!
-//! With one etcd (R0's single-etcd mode) the global leader writes every
-//! step of a promotion itself. With two tiers it can't reach the standby
-//! DC's tier or nodes, so the promotion is split where the book splits it:
+//! With one etcd (single-etcd mode) the global leader writes every step
+//! of a promotion itself. With two tiers it can't reach the standby DC's
+//! tier or nodes, so the promotion is split between the two leaders:
 //!
 //! ```text
 //! global leader:  1. the commit point in tenants/T (home Y, epoch + 1,
@@ -23,15 +23,14 @@
 //! global key `global-service` (holder, URL), so DC leaders reach it
 //! without knowing which controller leads. The service is JSON over HTTP
 //! on `[controller] internal_addr`, like the other internal services
-//! (decision F2), and has one call so far, `PromotionDone`; the book's
-//! other `Global` calls (`CreateTenant`, `SetDcState`, ...) are still direct
+//! and has one call so far, `PromotionDone`; the other planned `Global`
+//! calls (`CreateTenant`, `SetDcState`, ...) are still direct
 //! writes, which the etcd roles below the global leader don't allow yet.
 //!
 //! The old home's maps can't be quarantined from here (its tier is its own
 //! etcd, out of reach while it is lost): its gateways are fenced by their
 //! permits, and the returning DC quarantines and fences the moved tenants
-//! itself before it takes writes again (chapter 25, "A returning server or
-//! DC stays fenced").
+//! itself before it takes writes again (a returning DC stays fenced).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

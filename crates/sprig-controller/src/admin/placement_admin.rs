@@ -1,4 +1,4 @@
-//! Operator placement calls (chapter 11, "Manual moves and pins"):
+//! Operator placement calls (manual moves and pins):
 //! pinning and unpinning a tenant, and the decision rows of operator
 //! moves and pins. Any controller answers them: pins are DC-tier records
 //! (`sprig_balancer::pins`).

@@ -1,6 +1,5 @@
-//! `Cursors` (chapter 37, "APIs for Studio"; chapter 44 open question 7,
-//! decided as ST23 and built as ST30): fetching an arbitrary query's rows
-//! page by page past the row cap.
+//! `Cursors`: fetching an arbitrary query's rows page by page past the row
+//! cap.
 //!
 //! A cursor rides the router's own stream: `Open` starts the statement
 //! through the same [`SqlEngine`](super::super::sql::SqlEngine) path as

@@ -1,13 +1,12 @@
 //! What a statement does to session state and routing: [`StmtInfo`].
 //!
-//! Chapter 06 takes these facts from parsing (chapter 17's parser, R1).
-//! Until then [`StmtInfo::classify`] derives them from a conservative
-//! token scan: a statement counts as a plain read only when it starts with
-//! `SELECT`, `WITH`, `VALUES`, `TABLE`, `DESCRIBE` or `EXPLAIN` and has no
-//! locking clause, no `INTO`, no user-variable assignment and no call of a
-//! function with side effects; anything not understood is a write and goes
-//! to the writer. The pass-through executor (decision D3) can use it as is;
-//! a real parser fills the same struct.
+//! [`StmtInfo::classify`] derives these facts from a conservative token scan:
+//! a statement counts as a plain read only when it starts with `SELECT`,
+//! `WITH`, `VALUES`, `TABLE`, `DESCRIBE` or `EXPLAIN` and has no locking
+//! clause, no `INTO`, no user-variable assignment and no call of a function
+//! with side effects; anything not understood is a write and goes to the
+//! writer. The pass-through executor can use it as is; a real parser fills
+//! the same struct.
 
 /// Where a statement may run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +17,7 @@ pub enum StmtClass {
     Write,
 }
 
-/// A session-state effect of a statement (chapter 06, "Replay rules").
+/// A session-state effect of a statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// `BEGIN`, `START TRANSACTION`.
@@ -60,7 +59,7 @@ pub enum Effect {
     /// `CALL`: a routine may change anything; session tracking tells.
     Call,
     /// `SET NAMES`: the client character set takes the collation it gives
-    /// `collation_connection` (chapter 06, "Login collation").
+    /// `collation_connection`.
     SetNames,
 }
 
@@ -94,7 +93,7 @@ pub struct StmtInfo {
     pub sets_gateway_vars: Vec<String>,
     /// It calls a user-level lock function (`GET_LOCK`, `RELEASE_LOCK`,
     /// `RELEASE_ALL_LOCKS`, `IS_FREE_LOCK`, `IS_USED_LOCK`): on Galera it
-    /// runs on the cluster's lock node (chapter 28, "Locks"; R4 round 4).
+    /// runs on the cluster's lock node.
     pub user_lock: bool,
 }
 
@@ -263,8 +262,8 @@ impl StmtInfo {
                     info.user_lock = true;
                     side_effects = true;
                 }
-                // R4 round 4: the lock checks read the lock node's state,
-                // so they go where the locks are taken, not to a reader.
+                // The lock checks read the lock node's state, so they go
+                // where the locks are taken, not to a reader.
                 "IS_FREE_LOCK" | "IS_USED_LOCK" if call => {
                     info.user_lock = true;
                     side_effects = true;
@@ -755,7 +754,7 @@ mod tests {
         assert_eq!(c("SELECT a INTO @x FROM t").assigns_user_vars, vec!["x"]);
         assert_eq!(c("SELECT @x := 1").assigns_user_vars, vec!["x"]);
         assert_eq!(c("SELECT GET_LOCK('a', 1)").effects, vec![Effect::GetLock]);
-        // R4 round 4: every lock function marks the statement, and the
+        // Every lock function marks the statement, and the
         // checks stay off the readers.
         for q in [
             "SELECT GET_LOCK('a', 1)",

@@ -1,6 +1,6 @@
-//! Limits and admission (chapter 04, "Limits and admission"; build step 7).
+//! Limits and admission.
 //!
-//! Per gateway in R0:
+//! Per gateway:
 //!
 //! - **Connections:** `gateway.max_connections` client connections, checked
 //!   at accept ([`Limiter::try_connection`]; MySQL gets 1040 in place of the
@@ -31,10 +31,10 @@
 //! tenant's settings snapshot changes; a tenant whose catalog isn't cached
 //! (and the limiter in tests) gets the dc and global values. The gateway
 //! keys (`gateway.max_connections`, `gateway.memory_limit_mb`) stay at dc
-//! and global. Chapter 04 grants by deficit round robin across tenants;
-//! with a separate cap per tenant there is no shared pool to divide, so each
-//! tenant's queue is served on its own (round robin across tenants returns
-//! with a gateway-wide statement cap). Memory is charged for HTTP results
+//! and global. There is no deficit round robin across tenants: with a
+//! separate cap per tenant there is no shared pool to divide, so each
+//! tenant's queue is served on its own (round robin across tenants would
+//! matter only with a gateway-wide statement cap). Memory is charged for HTTP results
 //! the gateway buffers (`Sql.Execute`); the MySQL relay is bounded by
 //! `gateway.relay_buffer_kb` per session and not charged yet.
 
@@ -174,7 +174,7 @@ fn mb(n: u64) -> usize {
 
 /// 75% of the cgroup's memory limit, when the process has one: read once
 /// per process (every statement asks for the limits twice, and reading
-/// the file each time cost two `open` calls per statement; R5 round 4).
+/// the file each time cost two `open` calls per statement).
 fn cgroup_budget() -> Option<usize> {
     static BUDGET: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(read_cgroup_budget)
@@ -329,9 +329,9 @@ struct State {
 /// The gateway's limits.
 pub struct Limiter {
     source: LimitSource,
-    /// The limits last resolved, with the settings snapshot they came from
-    /// (decision PF7): every statement asks, and resolving seven keys each
-    /// time was 4% of a point select's gateway CPU.
+    /// The limits last resolved, with the settings snapshot they came from:
+    /// every statement asks, and resolving seven keys each time was 4% of a
+    /// point select's gateway CPU.
     memo: Mutex<Option<(sprig_settings::watch::Snapshot, Limits)>>,
     /// The same per tenant, for the tenant-scoped keys.
     tenant_memo: Mutex<HashMap<TenantId, TenantMemo>>,

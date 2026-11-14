@@ -1,5 +1,4 @@
-//! `TEST CONNECTION` and `TEST SINK` through a live private deployment
-//! (chapter 51, "Testing connections and sinks"; R9, r9tests).
+//! `TEST CONNECTION` and `TEST SINK` through a live private deployment.
 //!
 //! ```sh
 //! export SPRIG_TEST_SINKTEST_GATEWAY=127.0.0.1:38306   # MySQL wire
@@ -15,7 +14,7 @@
 //! cargo test -p sprig-gateway --test sink_test_live -- --nocapture --test-threads 1
 //! ```
 //!
-//! `test_connection_write` (R9, r9last) also writes one marked test record
+//! `test_connection_write` also writes one marked test record
 //! per target with `TEST CONNECTION ... WRITE`: into the `MinIO` bucket `qcr`
 //! (deleted again), a Kafka topic named after the run, and the webhook.
 //!
@@ -360,7 +359,7 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         let v: serde_json::Value = serde_json::from_str(r[3].as_deref().unwrap()).unwrap();
         assert_eq!(v["kind"], "a");
         assert!(r[2].as_deref().unwrap().starts_with('k'));
-        // R9 (r9last): the webhook's own request body for the record.
+        // The webhook's own request body for the record.
         let payload = r.get(6).cloned().flatten().unwrap_or_default();
         assert!(
             !payload.starts_with("not shown") && payload.contains("\"kind\""),
@@ -478,8 +477,8 @@ async fn test_sink_shows_records_and_delivers_nothing() {
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }
 
-/// `TEST CONNECTION c WRITE [TO 'target']` (R9, r9last; decision 105's
-/// "write a test record when asked"): after the checks, one marked record
+/// `TEST CONNECTION c WRITE [TO 'target']` writes a test record when
+/// asked: after the checks, one marked record
 /// written as a sink writes it: the webhook gets one request besides the
 /// `OPTIONS`; a Kafka topic named with `TO` gets a record (refused without
 /// `TO`); an S3 object is put and deleted again; a database table's
@@ -611,7 +610,7 @@ fn authed<T>(m: T, auth: &str) -> tonic::Request<T> {
     r
 }
 
-/// The gRPC forms (R9 closers, item 117): `sprig.v1.Sinks.Test` and
+/// The gRPC forms: `sprig.v1.Sinks.Test` and
 /// `sprig.v1.Connections.Test` answer the statements' rows, as the caller.
 /// Needs `SPRIG_TEST_SINKTEST_HTTP` (the gateway's HTTP listener, h2c) and
 /// `SPRIG_TEST_SINKTEST_CLOSED` (an allowed address nothing listens on).

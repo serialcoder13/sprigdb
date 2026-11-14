@@ -175,6 +175,33 @@ pub(crate) fn wanted_types(
             change.fields.push((id, want.own_fields.clone()));
             change.upsert_types.push(want);
         }
+        // Record hierarchies of the tables the child inherits (decision
+        // T28): the child's statements go through chapter 32's plans too,
+        // and its levels keep their own paths.
+        for ph in pd.hierarchies() {
+            if ph.state != sprig_types::model::HierState::Active
+                || !matches!(
+                    sprig_inherit::plan::tenant_edge(parent, child, &db_name, &ph.table, lctn),
+                    Ok(Some(_))
+                )
+            {
+                continue;
+            }
+            let Some(co) = cs.object_named_ci(cdb.db_id, &ph.table) else {
+                continue;
+            };
+            let want = sprig_types::model::HierarchyDef {
+                object_id: co.object_id,
+                db: cdb.db_id,
+                table: co.table.clone(),
+                ..(**ph).clone()
+            };
+            let have = have_db.and_then(|d| d.hierarchy(&co.table, lctn));
+            if have.is_some_and(|h| **h == want) {
+                continue;
+            }
+            change.upsert_hierarchies.push(want);
+        }
     }
     (change, follow)
 }

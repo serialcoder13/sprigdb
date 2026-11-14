@@ -340,6 +340,23 @@ fn record(keys: &mut Vec<KeyChanges>, e: &ChangeEvent, db: u32, elem: bool, zset
     }
 }
 
+/// The tail as the loop reads it: in a task of its own (decision r9-131),
+/// so the subscriber check's wait never cancels a read half-way.
+type Feed = sprig_feed::pump::Pump<FeedItem>;
+
+fn feed_of(tail: TenantTail) -> Feed {
+    sprig_feed::pump::Pump::start(tail, Feed::AHEAD, "keyspace notifications")
+}
+
+/// The next feed item, or `None` after `wait` without one (the loop then
+/// checks for subscribers). Cancel-safe.
+async fn read(feed: &mut Feed, wait: Duration) -> sprig_common::Result<Option<FeedItem>> {
+    match tokio::time::timeout(wait, feed.next()).await {
+        Ok(i) => i.map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 async fn run(
     weak: &std::sync::Weak<sprig_redis::Env>,
     svc: &crate::tenant::TenantServices,
@@ -347,7 +364,7 @@ async fn run(
     scope: &str,
 ) -> sprig_common::Result<()> {
     let (clusters, placement, names) = crate::http::changes::feed(svc)?;
-    let mut tail = TenantTail::start(
+    let tail = TenantTail::start(
         tenant,
         StartAt::Now,
         clusters,
@@ -359,6 +376,7 @@ async fn run(
         },
     )
     .await?;
+    let mut feed = feed_of(tail);
     tracing::info!(tenant = %tenant, "keyspace notifications from the feed started");
     let mut keys: Vec<KeyChanges> = Vec::new();
     loop {
@@ -371,9 +389,8 @@ async fn run(
         }
         let database = env.config().logical_database;
         drop(env);
-        let item = match tokio::time::timeout(CHECK, tail.next()).await {
-            Ok(i) => i?,
-            Err(_) => continue,
+        let Some(item) = read(&mut feed, CHECK).await? else {
+            continue;
         };
         match item {
             FeedItem::Event(e) => {
@@ -439,6 +456,24 @@ mod tests {
             micros: 0,
             fsp: 3,
         })
+    }
+
+    /// Decision r9-131: the subscriber check's wait (5 s) fires while the
+    /// tail waits on a new table's catalog lookup (6 s here): no change
+    /// may be lost, so no notification is.
+    #[tokio::test(start_paused = true)]
+    async fn the_subscriber_check_never_drops_a_change() {
+        use sprig_feed::testing::{SlowFeed, keys_once};
+        let feed = SlowFeed::new(5, Duration::from_secs(6));
+        let mut f = feed_of(feed.tail().await);
+        let mut items = Vec::new();
+        let end = tokio::time::Instant::now() + Duration::from_secs(120);
+        while tokio::time::Instant::now() < end && keys_once(&items).len() < 5 {
+            if let Some(i) = read(&mut f, CHECK).await.unwrap() {
+                items.push(i);
+            }
+        }
+        assert_eq!(keys_once(&items), (1..=5).collect::<Vec<_>>());
     }
 
     #[test]

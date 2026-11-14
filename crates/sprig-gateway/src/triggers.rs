@@ -1,6 +1,5 @@
-//! The gateway's side of `sprig.internal.logic.v1.LogicPeer` (chapter 41,
-//! "Triggers on streams and queues"; R9, r9triggers): a worker's run of a
-//! trigger on a stream or queue.
+//! The gateway's side of `sprig.internal.logic.v1.LogicPeer`: a worker's
+//! run of a trigger on a stream or queue.
 //!
 //! ```text
 //! RunTrigger(RunRequest):
@@ -78,7 +77,7 @@ impl LogicPeerService {
         .await
     }
 
-    /// `SinkSql` (R9, r9queue): a sink's statements as its owner
+    /// `SinkSql`: a sink's statements as its owner
     /// ([`crate::sink_peer`]).
     pub async fn sink_sql(
         &self,

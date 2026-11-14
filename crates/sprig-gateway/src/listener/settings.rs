@@ -1,5 +1,4 @@
-//! The listener keys and their resolution into [`ListenerSpec`]s (chapter
-//! 04, "Configuration").
+//! The listener keys and their resolution into [`ListenerSpec`]s.
 //!
 //! The registry holds fixed keys, so each listener's four keys and the
 //! `default` bundle's two are declared one by one; other bundle names can't
@@ -46,7 +45,7 @@ pub struct ListenerKeys {
 /// `listener.<name>.client_cert`: whether the listener asks TLS clients for
 /// a certificate (`off`, `optional`, `required`), verified against
 /// `tls.bundles.default.client_ca_path`, for `REQUIRE X509`, `SUBJECT` and
-/// `ISSUER` (chapter 14).
+/// `ISSUER`.
 macro_rules! client_cert {
     ($name:literal, $CC:ident) => {
         #[doc = concat!("`listener.", $name, ".client_cert`.")]
@@ -88,7 +87,7 @@ pub static DEFAULT_BUNDLE_CLIENT_CA: Setting<Text> = Setting {
     apply: Apply::Rebind,
     operator_only: false,
     owner: 4,
-    doc: "PEM CA certificates that sign client certificates (listener.<name>.client_cert); read when listeners apply",
+    doc: "PEM CA certificates that sign client certificates (listener.<name>.client_cert); watched for changes",
 };
 sprig_settings::register!(DEFAULT_BUNDLE_CLIENT_CA);
 
@@ -254,7 +253,7 @@ listener!(
 
 /// Every client listener the manager runs. Telemetry (9180) is bound by the
 /// `sprigdb` binary before the role starts, and the peer listener (7403,
-/// fixed mutual TLS) is build step 10.
+/// fixed mutual TLS) is the peer service's own.
 pub static LISTENERS: [ListenerKeys; 10] = [
     ListenerKeys {
         name: "mysql",
@@ -521,7 +520,8 @@ pub fn resolve(settings: &MemSettings<'_>, ctx: &SettingCtx<'_>, certs: &CertSto
         } else {
             None
         };
-        let (client_cert, client_ca) = match client_certs(settings, ctx, keys, enabled, tls) {
+        let (client_cert, client_ca) = match client_certs(settings, ctx, certs, keys, enabled, tls)
+        {
             Ok(c) => c,
             Err(e) => {
                 res.rejected.push(reject(e));
@@ -550,6 +550,7 @@ pub fn resolve(settings: &MemSettings<'_>, ctx: &SettingCtx<'_>, certs: &CertSto
 fn client_certs(
     settings: &MemSettings<'_>,
     ctx: &SettingCtx<'_>,
+    certs: &CertStore,
     keys: &ListenerKeys,
     enabled: bool,
     tls: TlsMode,
@@ -578,9 +579,11 @@ fn client_certs(
             keys.client_cert.key, DEFAULT_BUNDLE_CLIENT_CA.key
         ));
     }
-    let ca = crate::tls::ClientCa::load(Path::new(path.as_ref()))
+    // One handle per file, re-read when it changes.
+    let ca = certs
+        .client_ca(Path::new(path.as_ref()))
         .map_err(|e| format!("client CA {e}"))?;
-    Ok((mode, Some(Arc::new(ca))))
+    Ok((mode, Some(ca)))
 }
 
 fn bundle(

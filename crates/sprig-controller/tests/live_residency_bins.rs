@@ -1,5 +1,5 @@
-//! Residency with the real binaries (chapter 26; R2's done-when "a pinned
-//! tenant never leaves its jurisdiction"): `sprigdb controller` and
+//! Residency with the real binaries (a pinned tenant never leaves its
+//! jurisdiction): `sprigdb controller` and
 //! `sprigdb gateway` in two simulated DCs over one private etcd, set up
 //! with `sprigctl` as an operator would.
 //!
@@ -10,8 +10,8 @@
 //!
 //! `fra1` (tagged `jurisdiction=DE`) holds the tenant's cluster, a private
 //! `mariadb:11.8` container; `ams1` (`jurisdiction=NL`) has a controller
-//! and a gateway only. Ports are agent r2prov's (42306-42337); tenant ids
-//! start at 4,230,600,000 (rule 8b). Nothing touches the shared stack.
+//! and a gateway only. This test's ports are 42306-42337; tenant ids start
+//! at 4,230,600,000 (its MySQL port × 100,000). Nothing touches the shared stack.
 //!
 //! Checked, in order:
 //! 1. before any policy, a login at `ams1`'s gateway is decided there;
@@ -48,7 +48,7 @@ use sprig_testkit::skip;
 const ROOT_PW: &str = "sprig-r2prov-root";
 const APP_PW: &str = "sprig-r2prov-app";
 const DEPLOYMENT: &str = "sprigdb-r2prov";
-/// Rule 8b: port 42306 x 100,000.
+/// A private deployment's tenant ids: its MySQL port 42306 x 100,000.
 const TENANT_BASE: u64 = 4_230_600_000;
 const TENANT: &str = "r2prov-eu";
 
@@ -569,7 +569,7 @@ async fn bins_a_pinned_tenant_stays_in_its_jurisdiction() {
     )
     .await;
     let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
-    assert!(id >= TENANT_BASE, "rule 8b ids: {id}");
+    assert!(id >= TENANT_BASE, "tenant id range: {id}");
     ctl_retry(
         &sprigctl,
         "fra1",

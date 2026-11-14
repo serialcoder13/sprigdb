@@ -1,4 +1,4 @@
-//! Recommendations in SQL (chapter 52, "SQL"):
+//! Recommendations in SQL:
 //!
 //! ```sql
 //! SHOW SPRIG RECOMMENDATIONS [ALL] [FOR DATABASE db | FOR TABLE [db.]t];

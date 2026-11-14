@@ -1,5 +1,4 @@
-//! Result metadata on port 3306 (chapter 28, "Output on port 3306"; the
-//! part R0 needs of build step 11).
+//! Result metadata on port 3306.
 //!
 //! The gateway's backend connections for MySQL persona sessions ask
 //! MariaDB for extended metadata (`MARIADB_CLIENT_EXTENDED_METADATA`), which

@@ -1,5 +1,4 @@
-//! Snapshot reads outside transactions (chapter 30, "Read preference,
-//! write concern, read concern"; R5 round 4).
+//! Snapshot reads outside transactions.
 //!
 //! A read with `readConcern: {level: "snapshot"}` outside a transaction
 //! (a driver's snapshot session) sees one point in time across commands.
@@ -23,7 +22,7 @@
 //! `count` read at a snapshot, as in MongoDB 8.0; other commands keep
 //! refusing it with 72. A tenant spread over several clusters gets one
 //! point per cluster only (the executor session's own), not a time
-//! across them (chapter 18's read time).
+//! across them (a distributed read time).
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,5 +1,4 @@
-//! MongoDB's `failCommand` fail point, for driver test suites (chapter 30,
-//! "Testing"; `decisions/r5-interim.md` D18).
+//! MongoDB's `failCommand` fail point, for driver test suites.
 //!
 //! The drivers' retryable-writes, transactions and change-stream
 //! specification tests inject errors through

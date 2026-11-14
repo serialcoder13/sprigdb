@@ -1,18 +1,17 @@
 //! `sprig-common`: the foundations every SprigDB crate shares.
 //!
-//! Layer 1 (foundations). Design: chapter 03 (Codebase and conventions) of
-//! the SprigDB low-level design, with telemetry from chapter 47.
+//! Layer 1 (foundations).
 //!
 //! - [`error`]: [`SprigError`], [`Result`] and protocol rendering;
-//! - [`ids`]: identifier newtypes, sized per the writing guide (12.12);
+//! - [`ids`]: identifier newtypes;
 //! - [`config`]: process configuration from `sprigdb.toml`;
 //! - [`time`]: the [`time::Clock`] every component reads time through;
 //! - [`telemetry`]: tracing setup, metrics and health endpoints;
-//! - [`names`]: physical MariaDB schema, account and internal names (chapter 07);
-//! - [`audit`]: the audit spool, shipper and sinks (chapter 47);
-//! - [`https`]: the Admin API over TLS (chapter 37).
+//! - [`names`]: physical MariaDB schema, account and internal names;
+//! - [`audit`]: the audit spool, shipper and sinks;
+//! - [`https`]: the Admin API over TLS.
 //!
-//! Not here yet: `certwatch` (chapter 23 step 9).
+//! Not here yet: `certwatch`.
 
 pub mod audit;
 pub mod config;
@@ -36,15 +35,15 @@ pub use tokio_util::sync::CancellationToken;
 /// A server role: one subcommand of the `sprigdb` binary (guide 5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
-    /// `sprigdb gateway`: client listeners and sessions (chapter 04).
+    /// `sprigdb gateway`: client listeners and sessions.
     Gateway,
-    /// `sprigdb controller`: reconcilers and leader election (chapter 23).
+    /// `sprigdb controller`: reconcilers and leader election.
     Controller,
-    /// `sprigdb worker`: the job runtime (chapters 10 and 13).
+    /// `sprigdb worker`: the job runtime.
     Worker,
-    /// `sprigdb agent`: the node agent for VMs (chapter 27).
+    /// `sprigdb agent`: the node agent for VMs.
     Agent,
-    /// `sprigdb operator`: the Kubernetes operator (chapter 27).
+    /// `sprigdb operator`: the Kubernetes operator.
     Operator,
 }
 

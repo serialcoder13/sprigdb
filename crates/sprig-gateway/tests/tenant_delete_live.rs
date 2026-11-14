@@ -1,8 +1,7 @@
-//! bugfix-27 and bugfix-29 (decisions/bugfix-interim.md): deleting a
-//! tenant that still has databases, streams, queues, sinks and inherited
-//! instances finishes on its own, also when the worker is killed in the
-//! middle, and the gateway's backend connections of the deleted tenants
-//! close.
+//! Deleting a tenant that still has databases, streams, queues, sinks and
+//! inherited instances finishes on its own, also when the worker is killed
+//! in the middle, and the gateway's backend connections of the deleted
+//! tenants close.
 //!
 //! - A declarer with `FOR EACH TENANT` streams and queues, a member with
 //!   an instance database, and a plain tenant with a database, a table, a
@@ -17,7 +16,7 @@
 //!   by an unfinished creation was never dropped.
 //! - No `t<id>_` schema or backend account of them is left on the node,
 //!   though sessions of the plain tenant keep running statements (and
-//!   logging in again) through its deletion and 20 s after (bugfix-32),
+//!   logging in again) through its deletion and 20 s after,
 //!   and the node has no connection of their accounts within 15 s of the
 //!   deletion (before, the
 //!   gateway kept an idle connection per user until
@@ -322,9 +321,9 @@ async fn deleted_tenants_finish_and_close_their_connections() {
     for c in [d, d2, m, m2, p, p2] {
         c.disconnect().await.ok();
     }
-    // bugfix-32: sessions that keep running statements while their tenant
-    // is deleted, and new logins, must not bring its backend accounts back
-    // (r9fanin found `t<id>_u1` left after a deletion).
+    // Sessions that keep running statements while their tenant is
+    // deleted, and new logins, must not bring its backend accounts back
+    // (`t<id>_u1` was once found left after a deletion).
     let busy_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut busy = Vec::new();
     for (user, fresh) in [("app", false), ("two", false), ("app", true)] {

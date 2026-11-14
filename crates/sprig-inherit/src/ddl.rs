@@ -439,25 +439,6 @@ pub(crate) async fn enable(
             format!("Unknown column '{t}' in 'TAG FIELD'"),
         ));
     }
-    if hierarchical {
-        // Inside one tenant only (decision T22, piece 6).
-        let probe = InheritableObject {
-            object_id,
-            db,
-            table: table.name.clone(),
-            key: key_cols.clone(),
-            columns: Vec::new(),
-            slots: std::collections::BTreeMap::new(),
-            uniques: Vec::new(),
-            tag_field: None,
-            version: 1,
-            auto: None,
-            links: Vec::new(),
-            adopted: false,
-            type_root: None,
-        };
-        crate::hier::refuse_tenants(ctx, &probe)?;
-    }
     let klist = key_cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
     let mut ops = vec![
         "ADD COLUMN `_sprig_space` BIGINT UNSIGNED NOT NULL DEFAULT 1 INVISIBLE".to_owned(),
@@ -813,15 +794,10 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
     if let Some(f) = s.filter {
         validate_filter(o, f, columns.as_deref(), &ctx.lex)?;
     }
-    // A record hierarchy is shared whole, inside the tenant (decision T22).
+    // A record hierarchy is shared whole (decisions T22 and T28).
     for m in ctx.state.group_of(o.object_id) {
         if let Some(mo) = ctx.state.object(m) {
-            crate::hier::check_share(
-                mo,
-                matches!(to, ShareTarget::Tenant(_)),
-                to == ShareTarget::AllChildren && from == ROOT_SPACE,
-                s.filter.is_some() || s.columns.is_some(),
-            )?;
+            crate::hier::check_share(mo, s.filter.is_some() || s.columns.is_some())?;
         }
     }
     let edges = ctx.chain_edges(o, from)? + 1;
@@ -858,7 +834,11 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
         None if deep => MergeMode::Materialized,
         Some(_) | None => MergeMode::ReadThrough,
     };
+    // A copy between spaces of one tenant would be read by the spaces'
+    // reconciles before the worker applied it; a child tenant's copy is
+    // reconciled by the worker itself (decision T28).
     if mode == MergeMode::Materialized
+        && !matches!(to, ShareTarget::Tenant(_))
         && ctx
             .state
             .group_of(o.object_id)
@@ -867,8 +847,8 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
             .any(|m| crate::hier::has_paths(m))
     {
         return Err(unsupported(
-            "a materialized share of a table with a record hierarchy is not supported yet: \
-             set inherit.merge = read_through",
+            "a materialized share of a table with a record hierarchy to spaces is not supported \
+             yet: set inherit.merge = read_through, or share it TO SPACE <child tenant>",
         ));
     }
     let mut c = root_change(ctx);
@@ -934,7 +914,7 @@ pub async fn alter_share(
                 return Err(alter_denied(&db, &o.table));
             }
             validate_filter(o, f, sh.columns.as_deref(), &ctx.lex)?;
-            crate::hier::check_share(o, false, false, true)?;
+            crate::hier::check_share(o, true)?;
             let mut n = (*sh).clone();
             n.filter = Some(f.clone());
             n.version += 1;
@@ -962,7 +942,7 @@ pub async fn alter_share(
                 if let Some(f) = t {
                     validate_filter(o, f, sh.columns.as_deref(), &ctx.lex)?;
                 }
-                crate::hier::check_share(o, false, false, t.is_some())?;
+                crate::hier::check_share(o, t.is_some())?;
                 let mut n = (*sh).clone();
                 n.take.clone_from(t);
                 n.version += 1;
@@ -1012,6 +992,7 @@ pub async fn alter_share(
             if let Some(f) = t {
                 validate_filter(o, f, sh.columns.as_deref(), &ctx.lex)?;
             }
+            crate::hier::check_share(o, t.is_some())?;
             let mut c = root_change(ctx);
             c.upsert_takes.push(Take {
                 share_id: sh.id,
@@ -1058,7 +1039,10 @@ pub async fn drop_share(
     }
     // A record hierarchy's spaces below keep their own rows only while
     // the rows they hang under stay visible (decision T22).
-    if let Some(o) = ctx.state.object(sh.object_id).filter(|o| crate::hier::has_paths(o))
+    if let Some(o) = ctx
+        .state
+        .object(sh.object_id)
+        .filter(|o| crate::hier::has_paths(o))
         && let crate::model::ShareTarget::Space(to) = sh.to
     {
         let mut spaces = vec![to];
@@ -1073,7 +1057,11 @@ pub async fn drop_share(
                     "SELECT 1 FROM {} WHERE `_sprig_space` IN ({}) AND `_sprig_state` IN ('own', \
                      'orphan') LIMIT 1",
                     res.layer,
-                    spaces.iter().map(|x| x.0.to_string()).collect::<Vec<_>>().join(", ")
+                    spaces
+                        .iter()
+                        .map(|x| x.0.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ))
                 .await?;
             if !rows.rows.is_empty() {
@@ -1086,6 +1074,9 @@ pub async fn drop_share(
     }
     // The children it served, read before the drop (bugfix-44).
     let carried = crate::unshare::carried(ctx, &sh);
+    // Child tenants of a record hierarchy (decision T28): only while they
+    // have no structure of their own; their path overrides go first.
+    Box::pin(crate::hier::tenants::before_unshare(ctx, r, &carried)).await?;
     let mut c = root_change(ctx);
     c.drop_shares.push(sh.id);
     r.commit(&c).await?;

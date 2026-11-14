@@ -1,12 +1,11 @@
-//! MySQL 8.4's `ONLY_FULL_GROUP_BY` on port 3306 (chapter 28, build step
-//! 8), with the `DISTINCT` rule that goes with it, and MySQL's
-//! aggregate-in-`ORDER BY` rule, which MariaDB doesn't have.
+//! MySQL 8.4's `ONLY_FULL_GROUP_BY` on port 3306, with the `DISTINCT` rule that
+//! goes with it, and MySQL's aggregate-in-`ORDER BY` rule, which MariaDB
+//! doesn't have.
 //!
-//! MariaDB never runs `ONLY_FULL_GROUP_BY` for a 3306 session
-//! (`decisions/r4-interim.md` T1): its version has no functional
-//! dependencies (MDEV-11588), so it refuses queries MySQL accepts, such as
-//! selecting `c.name` grouped by `c.id`. The gateway applies MySQL's rule
-//! itself, before the statement is sent:
+//! MariaDB never runs `ONLY_FULL_GROUP_BY` for a 3306 session: its version has
+//! no functional dependencies (MDEV-11588), so it refuses queries MySQL
+//! accepts, such as selecting `c.name` grouped by `c.id`. The gateway applies
+//! MySQL's rule itself, before the statement is sent:
 //!
 //! - **1055** (`ER_WRONG_FIELD_WITH_GROUP`): with `GROUP BY`, an
 //!   expression of the select list, of `ORDER BY` or of a window's

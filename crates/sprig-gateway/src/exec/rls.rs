@@ -1,4 +1,4 @@
-//! Row-level security in the executor (chapter 29; build steps 21 to 24):
+//! Row-level security in the executor:
 //! policy statements, the rewrite before a statement is planned, the
 //! session's `@sprig_rls` context, and MariaDB's write checks.
 //!
@@ -32,7 +32,7 @@
     clippy::too_many_arguments,
     clippy::format_push_string,
     clippy::too_many_lines
-)] // pedantic style: names follow the chapter's pseudocode
+)] // pedantic style lints: long step-by-step functions
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -179,7 +179,7 @@ fn reserved_var() -> SprigError {
 }
 
 impl PassSession {
-    /// Chapter 29's policy statements; `None` for any other text.
+    /// Row-level security policy statements; `None` for any other text.
     pub(super) async fn tenant_policy(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -244,9 +244,8 @@ impl PassSession {
             Ok(PolicyAnswer::Unchanged) => out.ok(OkPacket::new(s)).await?,
             Ok(PolicyAnswer::Changed { object, .. }) => {
                 let mut ok = OkPacket::new(s);
-                // RL50: change sinks over the table aren't paused when its
-                // policies come to bind their owners (RL14 paused them):
-                // their workers filter each batch for the owner.
+                // Change sinks over the table aren't paused when its
+                // policies come to bind their owners: their workers filter each batch for the owner.
                 if let Err(e) = Box::pin(self.deploy_checks(object)).await {
                     tracing::warn!(error = %e, "row-level security write checks not deployed");
                     if let Some(ts) = self.tenant.as_deref_mut() {
@@ -316,7 +315,7 @@ impl PassSession {
         // co-located with this shard, else its first shard, else its
         // database's schema.
         let table_schema = |d: &str, t: &str, here: &str| -> Option<String> {
-            // RL58: the subtree view is the cluster's own.
+            // The subtree view is the cluster's own.
             if d.eq_ignore_ascii_case(sprig_sql::rls::subtree::SYS_SCHEMA) {
                 return Some(sprig_sql::rls::subtree::SYS_SCHEMA.to_owned());
             }
@@ -331,7 +330,7 @@ impl PassSession {
             shards.first().map(|(s, _)| s.clone()).or(Some(tmpl))
         };
         // Triggers and the policy view run as a user who reads and writes
-        // the table itself (RL19): the changing user when it can.
+        // the table itself: the changing user when it can.
         let definer_user = crate::tenant::rls::view_definer(&cat, object, user);
         let definer_account = sprig_auth::authz::backend::account(tenant, definer_user);
         let definer = format!("`{}`@`%`", definer_account.replace('`', "``"));
@@ -349,7 +348,7 @@ impl PassSession {
             })
             .collect();
         // The table's columns on each shard, invisible ones marked: the
-        // views name them (RL28).
+        // views name them.
         let mut probe = super::logic_bound::CtlShards {
             list: list.clone(),
             conns: HashMap::new(),
@@ -357,7 +356,7 @@ impl PassSession {
         };
         let mut columns: HashMap<String, Vec<(String, bool)>> = HashMap::new();
         let mut hidden: Vec<String> = Vec::new();
-        // RL55: a key-value namespace's element tables next to it, each
+        // A key-value namespace's element tables next to it, each
         // with its columns, per shard.
         let mut element_cols: HashMap<String, Vec<(String, Vec<(String, bool)>)>> = HashMap::new();
         let mut element_hidden: Vec<(String, Vec<String>)> = Vec::new();
@@ -401,7 +400,7 @@ impl PassSession {
         crate::tenant::rls::hidden_set(tenant.0, object.0, hidden);
         let mut plan: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
-            // `off` (RL30): the gateway's rewrite alone, nothing in MariaDB.
+            // `off`: the gateway's rewrite alone, nothing in MariaDB.
             if !sec.enabled || enforcement == "off" {
                 let mut d = drops(schema, object.0);
                 d.push(sprig_sql::rls::views::view_drop(
@@ -434,7 +433,7 @@ impl PassSession {
             let mut stmts = spec.statements()?;
             if views {
                 // The context function, its caller's right to run it, then
-                // the views (RL18, RL28).
+                // the views.
                 let v = spec.view_statements(
                     &definer,
                     columns.get(schema).map(Vec::as_slice).unwrap_or_default(),
@@ -447,7 +446,7 @@ impl PassSession {
                     definer_account
                 ));
                 stmts.extend(v.views);
-                // RL55: the element tables' views, after the context
+                // The element tables' views, after the context
                 // function.
                 for (e, ec) in element_cols
                     .get(schema)
@@ -473,7 +472,7 @@ impl PassSession {
             conns: HashMap::new(),
             locator: Arc::clone(&svc.locator),
         };
-        // RL58: policies with subtree functions read
+        // Policies with subtree functions read
         // `__sprig_sys.__sprig_subtree_v` in MariaDB; a view naming it can't
         // be created before it exists.
         let subtree = tp.iter().any(|p| {
@@ -526,7 +525,7 @@ impl PassSession {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     crate::tenant::rls::await_auth(ts, v).await;
                 }
-                // RLS round 5 (RL47): the table's change topic filter view
+                // The table's change topic filter view
                 // follows its policies.
                 Box::pin(self.redeploy_change_view(object)).await;
                 Ok(())
@@ -575,7 +574,7 @@ impl PassSession {
         .unwrap_or_default();
         // The shard list is in the key: a split or move needn't change the
         // catalog version, and the mover copies triggers but not views.
-        // So is `rls.backend_enforcement` (RL30): a global value changes
+        // So is `rls.backend_enforcement`: a global value changes
         // without a catalog version, and every change applies at once.
         let enforcement = crate::tenant::rls::enforcement(ts.services(), &cat, obj.db_id);
         let shards_hash = {
@@ -606,7 +605,7 @@ impl PassSession {
         let triggers = enforcement != "off" && sec.enabled;
         let view = sprig_sql::rls::views::view_name(&obj.name, object.0);
         let hview = sprig_sql::rls::views::hidden_view_name(&obj.name, object.0);
-        // RL55: a key-value namespace's element tables and their views.
+        // A key-value namespace's element tables and their views.
         let element_tables = sprig_sql::rls::triggers::kv_element_tables(&obj.name);
         let element_views: Vec<(String, String)> = element_tables
             .iter()
@@ -630,7 +629,7 @@ impl PassSession {
             let q = |x: &str| sprig_sql::rls::sql_string(x, false);
             // The triggers, and (views) the views' columns against the
             // table's: a column added, dropped or renamed since makes a view
-            // stale (RL28: the first names the visible columns, the second
+            // stale (the first names the visible columns, the second
             // all of them, and exists only when some are invisible).
             let cols = |name: &str, filter: &str| {
                 format!(
@@ -640,7 +639,7 @@ impl PassSession {
                     s = q(schema),
                 )
             };
-            // Then, per element table (RL55): its visible, all and
+            // Then, per element table: its visible, all and
             // invisible columns, and its two views' columns.
             let mut extra = String::new();
             for (e, (ev, ehv)) in element_tables.iter().zip(&element_views) {
@@ -695,10 +694,10 @@ impl PassSession {
                         cell(5).is_none()
                     }
             } else {
-                // Views off (RL30): views left from before must go.
+                // Views off: views left from before must go.
                 cell(4).is_none() && cell(5).is_none()
             };
-            // RL55: an element table here has its views when the key table
+            // An element table here has its views when the key table
             // does; views of element tables that aren't here must go.
             let mut elements_ok = true;
             for (j, e) in element_tables.iter().enumerate() {
@@ -740,7 +739,7 @@ impl PassSession {
                 break;
             }
         }
-        // Stale policy views (RL29): a regroup, split or move left the table
+        // Stale policy views: a regroup, split or move left the table
         // in other schemas of these clusters; views of it elsewhere read
         // nothing valid and hold grants, so they go.
         let mut clusters: Vec<&str> = Vec::new();
@@ -847,9 +846,9 @@ impl PassSession {
             return Ok(None);
         };
         let mut values = SessionValues::of(ts, &cat);
-        // RL10 (round 2): the subtree functions' tenant sets.
+        // The subtree functions' tenant sets.
         crate::tenant::rls::bind_tree(ts, &cat, &rls, &mut values).await?;
-        // An internal exempt session (a search seed, RL17): no filter, and
+        // An internal exempt session (a search seed): no filter, and
         // MariaDB's checks see a bypass.
         let exempt = crate::tenant::rls::is_exempt(cx.session.id);
         let context = if exempt {
@@ -859,7 +858,7 @@ impl PassSession {
         } else {
             values.context(&rls)
         };
-        // RL57: the contexts of wrapped definer routines' definers, which
+        // The contexts of wrapped definer routines' definers, which
         // those routines switch to while they run.
         let accounts = match crate::tenant::rls::definers_of(
             &Arc::clone(ts.services()),
@@ -886,7 +885,7 @@ impl PassSession {
             }
             None => context,
         };
-        // Policy views (RL18): the bound tables' views replace them in
+        // Policy views: the bound tables' views replace them in
         // every statement sent, internal exempt sessions included (their
         // context's bypass lets the view show every row).
         let swap = crate::tenant::rls::view_swap(ts, &cat, &rls);
@@ -961,7 +960,7 @@ impl PassSession {
             .map(|o| o.name.to_lowercase())
             .collect();
         let mut tainted = crate::tenant::rls::tainted(ts, &cat, &names).await?;
-        // RL20: under policy views, views and stored code reading protected
+        // Under policy views, views and stored code reading protected
         // tables read the views instead, and then apply the session's
         // policies in MariaDB; dynamic SQL stays refused.
         let svc2 = Arc::clone(ts.services());
@@ -1016,7 +1015,7 @@ impl PassSession {
                             || v.eq_ignore_ascii_case("IMMEDIATE"))
                 });
                 // Under policy views, code naming a protected table reads the
-                // views (RL20): only dynamic SQL stays refused.
+                // views: only dynamic SQL stays refused.
                 let viewed = named
                     && !dynamic
                     && rls
@@ -1096,7 +1095,7 @@ impl PassSession {
             let inj = match inject(src, lex_opts, &r) {
                 Ok(i) => i,
                 // Say why stored code over a protected table is refused when
-                // pointing it at the policy views failed (RL20).
+                // pointing it at the policy views failed.
                 Err(e) => return Err(with_repoint_reason(e, ts.tenant.0, &tainted)),
             };
             let Some(inj) = inj else {
@@ -1127,7 +1126,7 @@ impl PassSession {
         // Reads through policy views: each view must be on every shard
         // and match the table's columns (checked once per catalog
         // version).
-        // RL30: every bound table is checked (once per version and
+        // Every bound table is checked (once per version and
         // `rls.backend_enforcement` value), so views appear or go as the
         // setting changes, whether the session reads them or not.
         let _ = &swap;
@@ -1167,7 +1166,7 @@ impl PassSession {
             }
         }
         if needs_checks {
-            // The checks may have found invisible columns (RL28): the
+            // The checks may have found invisible columns: the
             // swap reads the all-columns view for statements naming them.
             let now = self
                 .tenant
@@ -1196,7 +1195,7 @@ impl PassSession {
 }
 
 /// `DROP VIEW IF EXISTS` for the policy views of key table `table`'s
-/// key-value element tables in `schema` (RL55).
+/// key-value element tables in `schema`.
 fn element_view_drops(schema: &str, table: &str, object: u64) -> Vec<String> {
     sprig_sql::rls::triggers::kv_element_tables(table)
         .iter()
@@ -1210,7 +1209,7 @@ fn element_view_drops(schema: &str, table: &str, object: u64) -> Vec<String> {
 }
 
 /// Table `table`'s columns in `schema`, in order, `true` for invisible
-/// ones (what the policy views name, RL28).
+/// ones (what the policy views name).
 async fn table_columns(
     s: &mut (dyn sprig_logic::deploy::Session + 'static),
     schema: &str,
@@ -1299,9 +1298,9 @@ fn or_replace(text: &str) -> Option<String> {
 }
 
 impl PassSession {
-    /// Points `code` at the policy views on every shard schema holding it
-    /// (RL20): `SHOW CREATE`, [`sprig_sql::rls::views::swap`], `CREATE OR
-    /// REPLACE` as `sprig_ctl`, keeping definer, `sql_mode` and character
+    /// Points `code` at the policy views on every shard schema holding it:
+    /// `SHOW CREATE`, [`sprig_sql::rls::views::swap`], `CREATE OR REPLACE`
+    /// as `sprig_ctl`, keeping definer, `sql_mode` and character
     /// set. The objects that read no protected table unfiltered now.
     pub(super) async fn repoint(
         &mut self,
@@ -1314,7 +1313,7 @@ impl PassSession {
         let Some(state) = RlsState::of(cat) else {
             return safe;
         };
-        // RL55: which key-value element tables have policy views is known
+        // Which key-value element tables have policy views is known
         // after a check of each protected table's shards on this gateway
         // (the key-value layer's SQL views read element tables).
         let unknown: Vec<ObjectId> = match self.tenant.as_deref() {
@@ -1466,7 +1465,7 @@ impl PassSession {
 struct CodeViews<'a> {
     /// (db, lower-case table) → its policy view.
     views: &'a HashMap<(u32, String), String>,
-    /// Policy view → all-columns view and invisible columns (RL28).
+    /// Policy view → all-columns view and invisible columns.
     hidden: &'a HashMap<String, (String, Vec<String>)>,
     /// Protected tables without a view yet.
     no_view: &'a std::collections::HashSet<(u32, String)>,
@@ -1562,7 +1561,7 @@ async fn repoint_one(
         no_backslash_escapes: up.contains("NO_BACKSLASH_ESCAPES"),
         ..LexOptions::mariadb()
     };
-    // RL57: a definer routine is wrapped to run under its definer's
+    // A definer routine is wrapped to run under its definer's
     // policies; its text as written is the starting point every time.
     let base = sprig_sql::rls::definer::unwrap(&text);
     let swapped = swap_code(&base, lex, schema, v, db_of)?;

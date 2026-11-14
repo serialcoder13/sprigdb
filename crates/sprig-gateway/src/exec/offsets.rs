@@ -1,11 +1,10 @@
 //! `CALL sprig.commit_offset(group, stream, partition, offset [, metadata])`
-//! in a tenant session (chapter 45, "Exactly-once consume and write"; build
-//! step 15), and the same commit for `db.commitOffset` and the triggers on
-//! streams of chapter 41 (R9, r9triggers).
+//! in a tenant session (for exactly-once consume and write), and the same
+//! commit for `db.commitOffset` and the logic triggers on streams.
 //!
 //! ```text
 //! the arguments: SELECT <args> through this session (any expression)
-//! the stream: [db.]name, the database's stream; SELECT on it (chapter 29)
+//! the stream: [db.]name, the database's stream; SELECT on it
 //! outside a transaction: written at once as sprig_ctl (sprig_streams::store)
 //! inside one: CALL t<tenant>_sprig.__sprig_commit_offset(...) on the
 //!   session's own connection to the catalog's cluster, in its transaction
@@ -15,8 +14,8 @@
 //! The procedure and the role are made by `sprig_ctl` the first time an
 //! account commits an offset ([`sprig_streams::offsets::grant_sql`]), then
 //! remembered per cluster and account. The catalog must be on the cluster
-//! of the session's own connection, as R1 keeps it; a transaction whose
-//! connection is elsewhere gets 39958 rather than an XA branch on the
+//! of the session's own connection, as the router keeps it; a transaction
+//! whose connection is elsewhere gets 39958 rather than an XA branch on the
 //! catalog (the coordinator anchors its decisions in shard schemas).
 
 use std::collections::HashSet;
@@ -47,8 +46,8 @@ use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire
 pub(super) struct Collect {
     wire: Wire,
     pub(super) columns: Vec<String>,
-    /// The columns' MySQL types (R4 round 4: `LATERAL`'s gateway apply
-    /// inlines numbers as numbers).
+    /// The columns' MySQL types (`LATERAL`'s gateway apply inlines numbers
+    /// as numbers).
     pub(super) types: Vec<u8>,
     pub(super) rows: Vec<Vec<Option<Vec<u8>>>>,
     pub(super) affected: Option<u64>,
@@ -235,7 +234,7 @@ impl PassSession {
         s.contains(StatusFlags::IN_TRANS) || !s.contains(StatusFlags::AUTOCOMMIT)
     }
 
-    /// Chapter 45's step of [`PassSession::tenant_text`]: `None` when the
+    /// The offset-commit step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't `CALL sprig.commit_offset(...)`.
     pub(super) async fn tenant_offsets(
         &mut self,
@@ -340,7 +339,7 @@ impl PassSession {
                 format!("stream {stream} has no partition {partition}"),
             ));
         }
-        // Chapter 29: committing a position is reading the stream.
+        // Committing a position is reading the stream.
         {
             let grants = crate::tenant::authz::privileges(ts, &cat);
             let db_key = database_key(&db_name, lctn);

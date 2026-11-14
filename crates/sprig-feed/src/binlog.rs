@@ -24,8 +24,7 @@ use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
 use tokio::time::Instant;
 
 use crate::source::{
-    Clusters, DumpScope, RawDdl, RawRow, RawTxn, RowKind, SourceItem, TableShape, TxnSource,
-    XaMark,
+    Clusters, DumpScope, RawDdl, RawRow, RawTxn, RowKind, SourceItem, TableShape, TxnSource, XaMark,
 };
 
 /// The internal schema.

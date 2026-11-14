@@ -1,4 +1,4 @@
-//! The audit pipeline (chapter 47, "The audit pipeline"; build step 4).
+//! The audit pipeline.
 //!
 //! ```text
 //! emit(event):
@@ -13,8 +13,8 @@
 //! 4. trim the spool; sinks deduplicate on (instance, seq)
 //! ```
 //!
-//! Producers build typed events in their own crates (chapter 14's login
-//! and account events in `sprig-auth`, `settings.changed` in the
+//! Producers build typed events in their own crates (login and account
+//! events in `sprig-auth`, `settings.changed` in the
 //! controller) and hand them to the process's [`Pipeline`] as an event
 //! name and a JSON body ([`record`]). The log form stays: `sprig-auth`
 //! still writes each event as a JSON line with target `sprig_audit`.
@@ -25,9 +25,9 @@
 //! what was spooled but not acknowledged, so nothing is lost; a sink may
 //! see a record twice and deduplicates on `(instance, seq)`.
 //!
-//! **Sinks.** [`DirSink`] writes the object-storage layout of chapter 47
+//! **Sinks.** [`DirSink`] writes the audit object-storage layout
 //! (`audit/<stream>/<date>/<instance>-<first>-<last>.jsonl`) under a
-//! directory: the R0 sink, and the layout an S3 sink (R2, with residency
+//! directory: the first sink, and the layout an S3 sink (with residency
 //! routing per DC) keeps. [`MemorySink`] is for tests.
 
 use std::collections::VecDeque;
@@ -132,7 +132,7 @@ pub trait AuditSink: Send + Sync {
     /// Durable write of one batch of one stream; the shipper trims its
     /// spool only after `Ok`.
     async fn write(&self, stream: &AuditStream, batch: &[AuditRecord]) -> Result<()>;
-    /// Where the data lands, for residency checks (chapter 26, R2).
+    /// Where the data lands, for residency checks.
     fn dc(&self) -> &DcId;
 }
 
@@ -602,7 +602,7 @@ pub fn check_available() -> Result<()> {
     global().map_or(Ok(()), Pipeline::check)
 }
 
-/// The R0 sink: chapter 47's object-storage layout under a directory,
+/// The directory sink: the audit object-storage layout under a directory,
 /// `audit/<stream>/<YYYY-MM-DD>/<instance>-<first seq>-<last seq>.jsonl`.
 /// A file is written to a temporary name, fsynced and renamed, so a write
 /// is durable before `Ok`; writing the same records again replaces the
@@ -746,8 +746,8 @@ pub struct PruneReport {
 }
 
 impl DirSink {
-    /// The retention pass (chapter 47, `audit.retention_days`; decision
-    /// bugfix-interim): removes the day directories
+    /// The retention pass (`audit.retention_days`): removes the day
+    /// directories
     /// `audit/<stream>/<YYYY-MM-DD>` under `root` older than `days_for`
     /// the stream (by name, `platform` or `tenant-<id>`; `None` keeps the
     /// stream), oldest first, at most `max` of them; `now_ms` is today.

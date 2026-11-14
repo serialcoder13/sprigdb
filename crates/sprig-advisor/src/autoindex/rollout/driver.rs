@@ -1,8 +1,7 @@
 //! The rollout state machine over the store: one step per call, every
 //! change recorded in the tenant catalog before and after the build, so a
-//! new leader resumes where the old one stopped (chapter 13, "Rollout";
-//! "Cluster failover during rollout": progress is re-read from the
-//! shards).
+//! new leader resumes where the old one stopped (after a cluster failover,
+//! progress is re-read from the shards).
 //!
 //! `rolling_out` rows move to `observing` when every shard is built and to
 //! `failed` after `max_failures`; nothing else changes their state here.
@@ -32,7 +31,7 @@ use crate::autoindex::validate::NodeMarker;
 pub struct RolloutCx<'a> {
     /// The tenant.
     pub tenant: TenantId,
-    /// The cluster holding the object's shards (R0: one).
+    /// The cluster holding the object's shards (one for now).
     pub view: &'a ClusterView,
     /// The object's shards, in rollout order (the validation or canary
     /// shard first, then by benefit).
@@ -48,9 +47,9 @@ pub struct RolloutCx<'a> {
     /// Builds the caller knows of that hold slots elsewhere (the
     /// scheduler's build jobs on the cluster).
     pub external_builds: u32,
-    /// Chapter 10's shard locks.
+    /// The mover's shard locks.
     pub locks: &'a dyn ShardLocks,
-    /// The mover's copy-and-swap (M0.6); `None` until it exists.
+    /// The mover's copy-and-swap; `None` until it exists.
     pub mover: Option<&'a dyn CopySwapHook>,
     /// Takes Galera nodes out of service during rolling RSU builds.
     pub marker: &'a dyn NodeMarker,
@@ -192,7 +191,7 @@ pub async fn advance<Q: Queryable + Send>(
         }
         Err(e) => return Ok(wait(format!("shard lock unreadable: {e}"), s.retry_after)),
     }
-    // Chapter 21: no build while a schema change holds the table.
+    // No build while a distributed schema change holds the table.
     match schema_change_on(store, q, row.object).await {
         Ok(None) => {}
         Ok(Some(job)) => {

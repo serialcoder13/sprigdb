@@ -1,5 +1,4 @@
-//! The write commands, statement by statement (chapter 30, "Dispatch" and
-//! "Retryable writes, exactly once"): `insert`, `update`, `delete`,
+//! The write commands, statement by statement: `insert`, `update`, `delete`,
 //! `findAndModify` and MongoDB 8.0's `bulkWrite` over `sprig-doc`'s engine.
 //!
 //! Each runs the statements whose ids (positions in the command) are not
@@ -156,7 +155,7 @@ pub async fn run(
     db: &str,
     done: &StmtResults,
 ) -> Result<Outcome, MongoError> {
-    // `bypassDocumentValidation` (M3, decision S90): the engine skips the
+    // `bypassDocumentValidation`: the engine skips the
     // collections' validators for this command's writes.
     let bypass = body.get_bool("bypassDocumentValidation").unwrap_or(false);
     sprig_doc::validate::bypass(
@@ -487,9 +486,9 @@ fn bulk_error(e: &MongoError, i: usize, update: bool) -> Document {
 }
 
 #[allow(clippy::too_many_lines)]
-/// MongoDB 8.0's `bulkWrite` (chapter 30, "Dispatch"): `ops` over the
-/// collections of `nsInfo`, one statement per op (its index is its
-/// statement id), with a cursor of per-op results and the totals.
+/// MongoDB 8.0's `bulkWrite`: `ops` over the collections of `nsInfo`, one
+/// statement per op (its index is its statement id), with a cursor of
+/// per-op results and the totals.
 async fn bulk_write(
     engine: &Engine,
     sql: &mut dyn SqlRunner,

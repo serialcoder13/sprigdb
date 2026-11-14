@@ -1,5 +1,4 @@
-//! JSON values as MySQL 8.4 prints them, on port 3306 (chapter 28,
-//! "Output on port 3306", build step 11; gaps row 36).
+//! JSON values as MySQL 8.4 prints them, on port 3306.
 //!
 //! MariaDB stores JSON as the text it was given and returns that text;
 //! MySQL stores a binary form and prints it canonically. [`canonical`]

@@ -1,4 +1,4 @@
-//! Drain (chapter 04, "Drain"; build step 8).
+//! Drain.
 //!
 //! Drain starts on SIGTERM, on `sprigctl gateway drain` (the Admin API's
 //! `Gateways.DrainGateway`, reaching this gateway directly or through the

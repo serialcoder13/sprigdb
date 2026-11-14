@@ -80,6 +80,8 @@ Open **Performance**, then **Automatic indexing**, then the **Fingerprints** tab
 | Unsargable | Predicates no index can serve, such as a function wrapped around a column |
 | Source | `Application`, `Studio`, or `function:<id>` for statements run by a logic function |
 
+![Studio's Fingerprints tab, set to the last hour and to applications, listing statements with their database, runs, total time, p50 and p95, and a Series button on each row](../img/studio/workload.png)
+
 Choose the window (1 hour, 24 hours or 7 days) and the source (all, applications or Studio). Select **Series** on a row to chart its p50 and p95 per bucket over the last seven days, with the same numbers as a table. That chart is how you see the effect of an index: the p95 drops at the bucket where it was built.
 
 ### With the REST API

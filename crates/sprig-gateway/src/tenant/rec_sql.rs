@@ -1,4 +1,4 @@
-//! Chapter 52's SQL: `SHOW SPRIG RECOMMENDATIONS` reads the tenant's own
+//! Recommendations in SQL: `SHOW SPRIG RECOMMENDATIONS` reads the tenant's own
 //! catalog and shows the items the session may see; `SPRIG APPROVE`,
 //! `IGNORE` and `SNOOZE RECOMMENDATION` go to the DC leader's
 //! `Recommendations` service with the session as a caller claim (its
@@ -32,8 +32,8 @@ pub fn install(admin: Arc<AdminApi>) {
     let _ = ADMIN.set(admin);
 }
 
-/// The Admin API forwarder, once HTTP started (chapter 52's gate for the
-/// gateway's own decisions uses it too).
+/// The Admin API forwarder, once HTTP started (the recommendations gate
+/// for the gateway's own decisions uses it too).
 #[must_use]
 pub fn admin() -> Option<Arc<AdminApi>> {
     ADMIN.get().cloned()

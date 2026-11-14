@@ -1,9 +1,9 @@
-//! Statements the gateway answers itself (chapter 05: the persona's version
-//! variables "from the persona, never from the backend"; chapter 04:
-//! `KILL` and `SHOW PROCESSLIST` over the `SessionTable`, since connection
-//! ids are the gateway's).
+//! Statements the gateway answers itself: the persona's version variables,
+//! which come from the persona, never from the backend; and `KILL` and
+//! `SHOW PROCESSLIST` over the `SessionTable`, since connection ids are the
+//! gateway's.
 //!
-//! Without the parser (chapter 07) these are recognized by a small,
+//! Without the parser these are recognized by a small,
 //! conservative matcher: a statement is local only if it is exactly one of
 //! the forms below (case-insensitive, extra spaces and one trailing `;`
 //! allowed); everything else goes to the executor.
@@ -12,7 +12,7 @@
 //!   `@@version`, `@@version_comment`, `@@protocol_version`,
 //!   `@@max_allowed_packet` or `@@hostname` (optionally `@@session.` or
 //!   `@@global.`). A select mixing these with other items goes to the
-//!   executor whole (the router splits them in R1).
+//!   executor whole (the router splits them).
 //! - `KILL [CONNECTION | QUERY] id`, where `id` may be `CONNECTION_ID()`.
 //! - `SHOW [FULL] PROCESSLIST`.
 
@@ -95,7 +95,7 @@ fn words(s: &str) -> Vec<String> {
 /// Recognizes a local statement.
 pub(crate) fn classify(sql: &[u8]) -> Option<Local> {
     // Every local statement is short; a large statement isn't scanned here
-    // on the worker thread (chapter 04, "Large statements").
+    // on the worker thread.
     if sql.len() > 4096 {
         return None;
     }

@@ -1,4 +1,4 @@
-//! The tenant tree in the directory (chapter 23): names, ids, paths and
+//! The tenant tree in the directory: names, ids, paths and
 //! child counts, the parent checks, the delete guard and removal, on
 //! `MemStore`.
 
@@ -55,7 +55,7 @@ fn names_are_dns_labels() {
     }
     for bad in [
         "",
-        // One letter: logins need two (decision bugfix-interim), so the
+        // One letter: logins need two, so the
         // same rule refuses it here.
         "a",
         "Acme",

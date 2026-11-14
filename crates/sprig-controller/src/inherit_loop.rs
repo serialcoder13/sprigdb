@@ -1,4 +1,4 @@
-//! The `inherit` loop (chapter 42, "Materialized copies"), on the DC
+//! The `inherit` loop (materialized copies), on the DC
 //! leader, every second:
 //!
 //! ```text
@@ -153,14 +153,13 @@ mod tests {
     }
 }
 
-/// Bootstrap hooks (R9, r9scale) that give a tenant created under an
+/// Bootstrap hooks that give a tenant created under an
 /// ancestor declaring `FOR EACH TENANT` streams, exchanges, queues or
 /// bindings the catalog modules its instances will need, with the rest of
 /// its catalog: `inherit_msg`, `mq` for the AMQP kinds, `streams` for
 /// streams. A member's first publish made these tables (about 15
 /// `CREATE TABLE`s) on its path before; at 10,000 tenants that was most
-/// of a first queue publish. The instances themselves stay lazy (chapter
-/// 42): only empty catalog tables are made here, and only below a
+/// of a first queue publish. The instances themselves stay lazy: only empty catalog tables are made here, and only below a
 /// declarer. Reading an ancestor's definitions or migrating fails
 /// nothing: the first publish migrates as before.
 #[derive(Clone)]

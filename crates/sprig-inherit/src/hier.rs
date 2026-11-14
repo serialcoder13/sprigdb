@@ -22,10 +22,12 @@
 //! ```text
 //! LOCK               before the plan's first statement: one structural
 //!                    change of the object at a time (a row of
-//!                    __sprig_hlock, FOR UPDATE)
+//!                    __sprig_hlock, FOR UPDATE, taken by the system on a
+//!                    provisioning connection: decision T27)
 //! CHANGED (k, ...)   rows inserted or moved in space s: reconcile(x, keys)
 //!                    for every space x below s that inherits through s,
-//!                    top first
+//!                    top first; from the root space, the child tenants'
+//!                    structure is checked too ([`tenants`])
 //! DELETED (k, ...)   rows deleted in s: the same; a row of x left under a
 //!                    deleted record fails the statement (39714)
 //! ADDED              ADD HIERARCHY filled s: every space below gets its
@@ -47,9 +49,14 @@
 //!     a path override is upserted
 //! ```
 //!
-//! Inside one tenant only: shares of a hierarchical object to child
-//! tenants, from a parent tenant, through materialized copies, or with
-//! filters or column lists are refused (39891), as T22's piece 6 says.
+//! Across tenants (decision T27, T22's piece 7): a child tenant's levels
+//! keep their own paths the same way. A structural change in a tenant's
+//! root space locks the child tenants below it (as the system), checks
+//! their structure against the new tree (39711, 39712, 39714) and commits;
+//! the copy worker then reconciles each child tenant's paths
+//! ([`crate::copy::Maintainer::on_keys`]), as it orphans across tenants.
+//! Shares with filters, column lists or a `TAKE`, and materialized shares
+//! between spaces of one tenant, stay refused (39891).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -64,7 +71,9 @@ use crate::Runner;
 use crate::grammar::{Name, unsupported};
 use crate::model::{InheritableObject, SpaceId};
 use crate::plan::{Ctx, Cut, Resolved, physical_schema};
-use crate::view::{Top, ViewSql, q};
+use crate::view::{ViewSql, q};
+
+pub mod tenants;
 
 /// The path columns, as chapter 32 names them.
 pub const PATH_COLUMNS: [&str; 3] = [HPATH, HDEPTH, RK];
@@ -117,7 +126,10 @@ pub fn names_only_paths(sql: &str, lex: &sprig_sql::lex::LexOptions) -> bool {
 /// The hierarchy of `o`, by this tenant's types.
 #[must_use]
 pub fn hierarchy_of(ctx: &Ctx<'_>, o: &InheritableObject) -> Option<Arc<HierarchyDef>> {
-    ctx.types()?.db(o.db)?.hierarchy(&o.table, ctx.lctn).cloned()
+    ctx.types()?
+        .db(o.db)?
+        .hierarchy(&o.table, ctx.lctn)
+        .cloned()
 }
 
 /// Whether the table `layer` names has the path columns (they're
@@ -288,6 +300,12 @@ pub async fn follow(
             for x in below(ctx, &res.obj, s)? {
                 written += reconcile(ctx, r, &res, &h, x, keys, false).await?.1;
             }
+            // Child tenants inherit the root space's tree: their structure
+            // is checked under their locks; the copy worker brings their
+            // paths up to date once this commits.
+            if s == crate::model::ROOT_SPACE {
+                Box::pin(tenants::check(ctx, r, &res, &h, change)).await?;
+            }
         }
         HierChange::Added => {
             for x in below(ctx, &res.obj, s)? {
@@ -303,45 +321,46 @@ pub async fn follow(
 }
 
 /// Serializes structural changes of the object: its row of
-/// [`LOCK_TABLE`], `FOR UPDATE`, made on first use.
+/// [`LOCK_TABLE`], `FOR UPDATE`, made on first use, taken by the system on
+/// a provisioning connection until the session's transaction ends
+/// (decision T27), so a user whose grants name single tables is
+/// serialized too.
+///
+/// # Errors
+/// The backend's (1205 after the lock wait).
 pub(crate) async fn lock(ctx: &Ctx<'_>, r: &mut dyn Runner, res: &Resolved) -> Result<()> {
-    let sql = format!(
-        "SELECT `object_id` FROM {}{} WHERE `object_id` = {} FOR UPDATE",
-        res.prefix,
-        q(LOCK_TABLE),
-        res.obj.object_id.0
-    );
-    if let Ok(rows) = r.query(&sql).await
-        && !rows.rows.is_empty()
-    {
-        return Ok(());
-    }
     let schema = physical_schema(ctx.cat, &res.db_name, ctx.lctn)?;
-    r.ctl(&format!(
+    r.hier_lock(ctx.cat.tenant, &schema, res.obj.object_id.0)
+        .await
+}
+
+/// `CREATE TABLE` of [`LOCK_TABLE`] in `schema`.
+#[must_use]
+pub fn lock_ddl(schema: &str) -> String {
+    format!(
         "CREATE TABLE IF NOT EXISTS {}.{} (`object_id` BIGINT UNSIGNED NOT NULL PRIMARY KEY) \
          ENGINE=InnoDB",
-        q(&schema),
+        q(schema),
         q(LOCK_TABLE)
-    ))
-    .await?;
-    r.ctl(&format!(
-        "INSERT IGNORE INTO {}.{} (`object_id`) VALUES ({})",
-        q(&schema),
-        q(LOCK_TABLE),
-        res.obj.object_id.0
-    ))
-    .await?;
-    match r.query(&sql).await {
-        Ok(rows) if !rows.rows.is_empty() => Ok(()),
-        Ok(_) => Err(SprigError::internal("the hierarchy's lock row is missing")),
-        // A user whose grants name single tables can't read the lock
-        // table: the plan runs unserialized, as on a plain table.
-        Err(e) if e.protocol().mysql_errno == 1142 => {
-            tracing::warn!(object = res.obj.object_id.0, "hierarchy lock not readable: {}", e.message);
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+    )
+}
+
+/// The statements taking `object`'s lock in `schema`: the row made on
+/// first use (autocommitted, before the transaction), then the lock.
+#[must_use]
+pub fn lock_sql(schema: &str, object: u64) -> (String, String) {
+    (
+        format!(
+            "INSERT IGNORE INTO {}.{} (`object_id`) VALUES ({object})",
+            q(schema),
+            q(LOCK_TABLE)
+        ),
+        format!(
+            "SELECT `object_id` FROM {}.{} WHERE `object_id` = {object} FOR UPDATE",
+            q(schema),
+            q(LOCK_TABLE)
+        ),
+    )
 }
 
 /// Every row of space `x`, from its top rows (`ADD HIERARCHY`): 39716
@@ -416,12 +435,9 @@ pub(crate) async fn reconcile(
 ) -> Result<(BTreeSet<String>, u64)> {
     let o = &res.obj;
     let nbe = ctx.lex.no_backslash_escapes;
+    // A space whose top reads the parent tenant (its share view, or a
+    // serving copy) reconciles from that view as from any other.
     let chain = ctx.chain(o, x, &res.prefix)?;
-    if matches!(chain.top, Top::Upstream { .. }) {
-        return Err(unsupported(
-            "a record hierarchy read through a copy or from a parent tenant is not supported yet",
-        ));
-    }
     let sv = SpaceView {
         res,
         h,
@@ -467,6 +483,7 @@ pub(crate) async fn reconcile(
     let mut kids: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut frontier: Vec<String> = all.keys().cloned().collect();
     let mut reached: BTreeSet<String> = tops.clone();
+    let mut nested: BTreeSet<String> = BTreeSet::new();
     let mut rounds = 0u32;
     while !frontier.is_empty() {
         rounds += 1;
@@ -475,23 +492,21 @@ pub(crate) async fn reconcile(
                 ctx,
                 x,
                 SprigCode::HierarchyTooDeep,
-                &format!("'{}' would be deeper than MAX DEPTH {}", h.table, h.max_depth),
+                &format!(
+                    "'{}' would be deeper than MAX DEPTH {}",
+                    h.table, h.max_depth
+                ),
             ));
         }
         let found = sv.children_of(r, &frontier).await?;
         frontier.clear();
         for c in found {
             let parent = c.parent.clone().unwrap_or_default();
+            // A top under another root: the keys need not be whole
+            // subtrees (the copy worker's are any changed rows), so it is
+            // nested, unless its own ancestors lead back to it (a cycle).
             if tops.contains(&c.key) {
-                return Err(err_in(
-                    ctx,
-                    x,
-                    SprigCode::HierarchyCycle,
-                    &format!(
-                        "Record {} of '{}' would be under its own descendant {parent}",
-                        c.key, h.table
-                    ),
-                ));
+                nested.insert(c.key.clone());
             }
             kids.entry(parent).or_default().push(c.key.clone());
             reached.insert(c.key.clone());
@@ -510,6 +525,30 @@ pub(crate) async fn reconcile(
             &format!("Record {k} of '{}' would be in a cycle", h.table),
         ));
     }
+    for n in &nested {
+        let mut cur = all[n].parent.clone();
+        let mut steps = 0u32;
+        while let Some(p) = cur {
+            if p == *n {
+                return Err(err_in(
+                    ctx,
+                    x,
+                    SprigCode::HierarchyCycle,
+                    &format!(
+                        "Record {n} of '{}' would be under its own descendant {}",
+                        h.table,
+                        all[n].parent.clone().unwrap_or_default()
+                    ),
+                ));
+            }
+            steps += 1;
+            if steps > u32::from(h.max_depth) + 2 {
+                break;
+            }
+            cur = all.get(&p).and_then(|x| x.parent.clone());
+        }
+    }
+    let tops: BTreeSet<String> = tops.difference(&nested).cloned().collect();
     // 3. The expected paths, top-down.
     let mut want: BTreeMap<String, Want> = BTreeMap::new();
     let mut queue: Vec<String> = Vec::new();
@@ -526,13 +565,20 @@ pub(crate) async fn reconcile(
                 rk: n.key.clone(),
             },
             Some(p) => {
-                let Some(pn) = sv.rows_of(r, std::slice::from_ref(p)).await?.into_iter().next()
+                let Some(pn) = sv
+                    .rows_of(r, std::slice::from_ref(p))
+                    .await?
+                    .into_iter()
+                    .next()
                 else {
                     return Err(err_in(
                         ctx,
                         x,
                         SprigCode::HierarchyParentNotFound,
-                        &format!("Parent {p} of record {} of '{}' isn't visible", n.key, h.table),
+                        &format!(
+                            "Parent {p} of record {} of '{}' isn't visible",
+                            n.key, h.table
+                        ),
                     ));
                 };
                 let (Some(pp), Some(pd), Some(prk)) = (pn.path, pn.depth, pn.rk) else {
@@ -601,6 +647,21 @@ pub(crate) async fn reconcile(
         .collect();
     if differ.is_empty() {
         return Ok((walked, 0));
+    }
+    // One reconcile rewrites at most `hierarchy.max_move_rows` rows
+    // (decision T29).
+    let n = differ.len() as u64;
+    if n > ctx.limits.max_move_rows {
+        return Err(err_in(
+            ctx,
+            x,
+            SprigCode::SubtreeTooLarge,
+            &format!(
+                "The change rewrites the paths of {n} rows of '{}', over \
+                 hierarchy.max_move_rows ({})",
+                h.table, ctx.limits.max_move_rows
+            ),
+        ));
     }
     let written = write(ctx, r, &sv, &want, &differ).await?;
     Ok((walked, written))
@@ -751,6 +812,55 @@ async fn write(
     Ok(n)
 }
 
+/// The copy worker's reconcile of a child tenant's paths of `keys` after
+/// a change above it committed (decision T28): one transaction on `r` (a
+/// provisioning connection, physical names) under the tenant's lock, the
+/// root space first, then every space below it that inherits through it.
+/// Returns the rows written.
+///
+/// # Errors
+/// [`reconcile`]'s; the backend's.
+pub async fn reconcile_tenant(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    res: &Resolved,
+    h: &HierarchyDef,
+    schema: &str,
+    keys: &[String],
+) -> Result<u64> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let (row, lock) = lock_sql(schema, res.obj.object_id.0);
+    r.exec(&lock_ddl(schema)).await?;
+    r.exec(&row).await?;
+    // READ COMMITTED, as a plan's own transaction (T17): the path writes'
+    // INSERT ... SELECT then reads the levels above without share locks,
+    // which a writer above holding this tenant's lock could wait behind.
+    r.exec(sprig_types::exec::PLAN_ISOLATION).await?;
+    r.exec("BEGIN").await?;
+    let result = async {
+        r.query(&lock).await?;
+        let root = crate::model::ROOT_SPACE;
+        let mut n = reconcile(ctx, r, res, h, root, keys, false).await?.1;
+        for x in below(ctx, &res.obj, root)? {
+            n += reconcile(ctx, r, res, h, x, keys, false).await?.1;
+        }
+        Ok(n)
+    }
+    .await;
+    match result {
+        Ok(n) => {
+            r.exec("COMMIT").await?;
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = r.exec("ROLLBACK").await;
+            Err(e)
+        }
+    }
+}
+
 /// Before `SPRIG RESET` of a hierarchical object in the session's space
 /// (inside the reset's transaction): the hierarchy's lock, and the keys
 /// whose layer rows the reset may change (`cond`: the reset's ` AND (...)`).
@@ -801,6 +911,16 @@ pub(crate) async fn after_reset(
     for x in below(ctx, &res.obj, s)? {
         reconcile(ctx, r, res, h, x, keys, false).await?;
     }
+    if s == crate::model::ROOT_SPACE {
+        Box::pin(tenants::check(
+            ctx,
+            r,
+            res,
+            h,
+            &HierChange::Changed(keys.to_vec()),
+        ))
+        .await?;
+    }
     Ok(())
 }
 
@@ -812,7 +932,7 @@ pub(crate) async fn after_reset(
 /// 39891.
 pub(crate) async fn before_add(ctx: &Ctx<'_>, r: &mut dyn Runner, res: &Resolved) -> Result<()> {
     let o = &res.obj;
-    refuse_tenants(ctx, o)?;
+    refuse_tenants(ctx, o, "ADD HIERARCHY")?;
     for sh in ctx.state.shares_of(o.object_id) {
         if sh.filter.is_some() || sh.columns.is_some() || sh.take.is_some() {
             return Err(unsupported(format!(
@@ -820,7 +940,9 @@ pub(crate) async fn before_add(ctx: &Ctx<'_>, r: &mut dyn Runner, res: &Resolved
                 sh.name
             )));
         }
-        if sh.mode == crate::model::MergeMode::Materialized {
+        if sh.mode == crate::model::MergeMode::Materialized
+            && !matches!(sh.to, crate::model::ShareTarget::Tenant(_))
+        {
             return Err(unsupported(format!(
                 "ADD HIERARCHY on a table whose share '{}' is materialized",
                 sh.name
@@ -854,7 +976,8 @@ pub(crate) async fn before_add(ctx: &Ctx<'_>, r: &mut dyn Runner, res: &Resolved
 ///
 /// # Errors
 /// The statements'.
-pub(crate) async fn before_drop(r: &mut dyn Runner, res: &Resolved) -> Result<()> {
+pub(crate) async fn before_drop(ctx: &Ctx<'_>, r: &mut dyn Runner, res: &Resolved) -> Result<()> {
+    refuse_tenants(ctx, &res.obj, "DROP HIERARCHY")?;
     let pb = path_bits(&res.obj);
     if pb == 0 {
         return Ok(());
@@ -872,16 +995,20 @@ pub(crate) async fn before_drop(r: &mut dyn Runner, res: &Resolved) -> Result<()
     Ok(())
 }
 
-/// Refuses a hierarchical object that is received from a parent tenant or
-/// shared to child tenants (decision T22, piece 7 isn't built).
+/// `ADD HIERARCHY` (`what`) or `DROP HIERARCHY` on an object received
+/// from a parent tenant or shared to child tenants: refused, since child
+/// tenants would hold rows without paths, or paths without a hierarchy
+/// (decision T28). The hierarchy is the top tenant's, declared before the
+/// table is shared to child tenants.
 ///
 /// # Errors
 /// 39891.
-pub(crate) fn refuse_tenants(ctx: &Ctx<'_>, o: &InheritableObject) -> Result<()> {
+pub(crate) fn refuse_tenants(ctx: &Ctx<'_>, o: &InheritableObject, what: &str) -> Result<()> {
     if ctx.up_edge(o)?.is_some() {
-        return Err(unsupported(
-            "a record hierarchy on a table received from a parent tenant is not supported yet",
-        ));
+        return Err(unsupported(format!(
+            "{what} on a table received from a parent tenant: the parent tenant's hierarchy \
+             applies"
+        )));
     }
     let reaches = ctx.state.shares_of(o.object_id).any(|sh| {
         matches!(sh.to, crate::model::ShareTarget::Tenant(_))
@@ -889,33 +1016,23 @@ pub(crate) fn refuse_tenants(ctx: &Ctx<'_>, o: &InheritableObject) -> Result<()>
                 && matches!(sh.to, crate::model::ShareTarget::AllChildren))
     });
     if reaches {
-        return Err(unsupported(
-            "a record hierarchy on a table shared to child tenants is not supported yet",
-        ));
+        return Err(unsupported(format!(
+            "{what} on a table shared to child tenants: drop the shares to child tenants first \
+             (a hierarchy is declared before the table is shared to them)"
+        )));
     }
     Ok(())
 }
 
-/// Whether a share of `o` may be created or changed this way (decision
-/// T22, piece 6): inside the tenant, without filters or column lists,
-/// which would cut rows or the path columns out of a space's tree.
+/// Whether a share of `o` may be created or changed this way (decisions
+/// T22 and T28): without filters or column lists, which would cut rows or
+/// the path columns out of a space's tree. Child tenants may receive it.
 ///
 /// # Errors
 /// 39891.
-pub(crate) fn check_share(
-    o: &InheritableObject,
-    to_tenant: bool,
-    all_children_from_root: bool,
-    filtered: bool,
-) -> Result<()> {
+pub(crate) fn check_share(o: &InheritableObject, filtered: bool) -> Result<()> {
     if !has_paths(o) {
         return Ok(());
-    }
-    if to_tenant || all_children_from_root {
-        return Err(unsupported(
-            "a share of a table with a record hierarchy to child tenants (or ALL CHILDREN from \
-             the root space) is not supported yet: share it to spaces",
-        ));
     }
     if filtered {
         return Err(unsupported(

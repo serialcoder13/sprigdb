@@ -27,6 +27,11 @@ spec:
     # Each controller's registered Admin address (controller.yaml).
     - "*.sprigdb-controller-pods.{{ $.Release.Namespace }}.svc"
     {{- end }}
+    {{- if eq $role "gateway" }}
+    # Each gateway's registered address, where the peer service is
+    # reached (gateway.yaml).
+    - "*.sprigdb-gateway-pods.{{ $.Release.Namespace }}.svc"
+    {{- end }}
   issuerRef: {{- toYaml $.Values.tls.issuerRef | nindent 4 }}
 {{- end }}
 {{- end }}

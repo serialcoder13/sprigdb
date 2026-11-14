@@ -1,5 +1,5 @@
 //! `EXPLAIN FUNCTION | PROCEDURE [db.]name [FORMAT = SQL]` in a tenant
-//! session (chapter 41, "Placement"): one row per stored version that
+//! session: one row per stored version that
 //! isn't retired or superseded, newest first, with its state, tier and
 //! placement (the reasons with their source locations, the route, the
 //! tables read and written, the cost), as `sprigctl logic compile` prints

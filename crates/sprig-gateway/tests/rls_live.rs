@@ -1,4 +1,4 @@
-//! Row-level security, live (chapter 29, "RLS suite"; build step 26): a
+//! Row-level security, live: a
 //! differential and adversarial suite through both personas.
 //!
 //! The administrator (`acme.app`) creates a database, three users and a
@@ -313,7 +313,7 @@ async fn reads(ck: &mut Checks, c: &mut Conn, user: &str, reader: bool, tag: &st
             || format!("{sql}: got {got:?}, want {}", set_text(&want)),
         );
     }
-    // RL28: `docs` has an invisible column (`hid`; a split adds
+    // `docs` has an invisible column (`hid`; a split adds
     // `_sprig_rk`): `*` never shows it, naming it reads it, through the
     // policy views for bound users.
     let star: Result<Vec<Row>, String> = c
@@ -626,7 +626,7 @@ async fn writes(ck: &mut Checks, c: &mut Conn, admin: &mut Conn, user: &str, tag
     });
 }
 
-/// Straight to MariaDB as a bound user's backend account (decision RL18):
+/// Straight to MariaDB as a bound user's backend account:
 /// the account can't read the protected table, and its policy view shows
 /// only the rows the session's context allows. Needs
 /// `SPRIG_TEST_RLS_DIRECT=host:port` (a cluster holding the tenant),
@@ -668,7 +668,7 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
         .await
         .unwrap();
     // `docs` has invisible columns (`hid`, and `_sprig_rk` once split):
-    // its policy views name their columns (RL28), so it has views too.
+    // its policy views name their columns, so it has views too.
     ck.ok("policy views exist", !schemas.is_empty(), || "none".into());
     let account = format!("t{tid}_u{uid}");
     let pw = sprig_auth::authz::backend::BackendKey::new(secret.as_bytes())
@@ -702,7 +702,7 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
         ck.ok(&format!("direct: view read in {s}"), got.is_ok(), || {
             format!("{got:?}")
         });
-        // RL28: the policy view has the visible columns only; the
+        // The policy view has the visible columns only; the
         // all-columns view has the invisible ones and the same rows.
         let cols: Result<Vec<Row>, String> = b
             .query(format!("SELECT * FROM `{s}`.__sprig_rls_docs LIMIT 1"))
@@ -743,7 +743,7 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
     });
 }
 
-/// RL30: `rls.backend_enforcement` applies at the next statement:
+/// `rls.backend_enforcement` applies at the next statement:
 /// `triggers` drops the policy views (the rewrite still filters), and back
 /// to `views` they return.
 async fn enforcement_switch(ck: &mut Checks, admin: &mut Conn, a: &mut Conn, db: &str) {
@@ -908,7 +908,7 @@ async fn row_level_security_suite() {
             reads(&mut ck, &mut c, user, false, &tag).await;
             if user != "rls_carol" {
                 // A statement prepared before SET ROLE carries the old
-                // policies: the gateway prepares it again (RL15, round 2)
+                // policies: the gateway prepares it again
                 // and the execute sees the new role's rows.
                 let st = c.prep("SELECT id FROM docs WHERE id > ?").await.unwrap();
                 c.query_drop("SET ROLE 'rls_reader'").await.unwrap();
@@ -943,8 +943,8 @@ async fn row_level_security_suite() {
         );
         drop(d);
     }
-    // Search (chapter 39): the copy is seeded while the creator is bound
-    // (FORCE), so only the internal exemption (RL17) lets it hold every
+    // Search: the copy is seeded while the creator is bound (FORCE), so
+    // only the internal exemption lets it hold every
     // row; each user's search then sees exactly its visible rows.
     admin_db
         .query_drop("ALTER TABLE docs FORCE ROW LEVEL SECURITY")
@@ -1028,7 +1028,7 @@ async fn row_level_security_suite() {
         || format!("{got:?}"),
     );
     drop(c);
-    // Views and stored code over the protected table (RL20): under policy
+    // Views and stored code over the protected table: under policy
     // views they read the views, so a bound user sees its own rows;
     // dynamic SQL stays refused.
     let sharded = std::env::var("SPRIG_TEST_RLS_SHARDED").is_ok();
@@ -1040,8 +1040,8 @@ async fn row_level_security_suite() {
         "DROP PROCEDURE IF EXISTS p_dyn",
         "DROP FUNCTION IF EXISTS f_cnt",
         "DROP PROCEDURE IF EXISTS p_def",
-        // Invoker routines apply the caller's policies (RL20); definer
-        // routines, MariaDB's default, their definer's (RL57).
+        // Invoker routines apply the caller's policies; definer routines,
+        // MariaDB's default, their definer's.
         "CREATE PROCEDURE p_docs() SQL SECURITY INVOKER SELECT id FROM docs ORDER BY id",
         "CREATE PROCEDURE p_dyn() BEGIN PREPARE s FROM 'SELECT id FROM docs'; EXECUTE s; END",
         "CREATE FUNCTION f_cnt() RETURNS INT READS SQL DATA SQL SECURITY INVOKER RETURN (SELECT COUNT(*) FROM docs)",
@@ -1077,7 +1077,7 @@ async fn row_level_security_suite() {
             shown.clone()
         });
     } else {
-        // Views over sharded tables aren't supported (chapter 17).
+        // Views over sharded tables aren't supported.
         eprintln!("view not created: {view:?}");
     }
     if !sharded {

@@ -1,5 +1,5 @@
-//! Metadata of grouped tables (r6three's S1): every path lists a table the
-//! advisor moved into a group's schema, once, with its logical names.
+//! Metadata of grouped tables: every path lists a table the advisor moved into
+//! a group's schema, once, with its logical names.
 
 use sprig_common::ids::{DbId, GroupId, ShardId, TenantId};
 use sprig_proto_mysql::packets::Persona;
@@ -191,7 +191,7 @@ fn information_schema_reads_every_group() {
     reads_every_group(&s);
 }
 
-/// bugfix-8: a group whose schema is on another cluster: the first pass
+/// A group whose schema is on another cluster: the first pass
 /// asks for that branch only, with its cluster; the second appends the
 /// rows read there to that branch, for lists and `information_schema`.
 #[test]

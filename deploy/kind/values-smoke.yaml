@@ -1,0 +1,39 @@
+# Values for deploy/kind/smoke.sh: the chart on one kind node, with TLS on
+# (certificates made by the script in place of cert-manager), every
+# optional listener on, and one replica of each role except the
+# controllers and gateways (two each: each controller registers its own
+# Admin address, and a KILL crosses from one gateway to the other).
+dc: {id: kind1, tags: {}}
+deploymentId: 0b7c5e2a-6d0e-4f4e-9c1a-5a6b2f1d9e31
+global:
+  endpoints: ["https://sprigdb-etcd-dc-0.sprigdb-etcd-dc.sprigdb.svc:2379"]
+  voter: {enabled: false, advertise: ""}
+etcd:
+  replicas: 1
+  storage: 1Gi
+controller:
+  replicas: 2
+  bootstrap: true
+gateway:
+  autoscaling: {minReplicas: 2, maxReplicas: 2, targetCPUUtilizationPercentage: 80}
+  service: {type: ClusterIP}
+  clientTls:
+    secretName: smoke-gateway-public-tls
+  listeners:
+    mongo: {enabled: true, port: 27017}
+    redis: {enabled: true, port: 6379}
+    bolt: {enabled: true, port: 7687}
+    kafka: {enabled: true, port: 9092}
+    amqp: {enabled: true, port: 5672}
+    amqps: {enabled: true, port: 5671}
+worker: {replicas: 1}
+operator: {replicas: 1, agentSidecar: false}
+nodeServices: {type: ClusterIP}
+pools: []
+tls:
+  enabled: true
+  issuerRef: {kind: ClusterIssuer, name: smoke-ca}
+  bundleConfigMap: sprigdb-ca-bundle
+image: {repository: sprigdb, tag: kind-smoke, pullPolicy: Never}
+monitoring: {serviceMonitor: false}
+networkPolicy: {enabled: true}

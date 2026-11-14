@@ -1,5 +1,4 @@
-//! The reconciler runtime (chapter 23, "Sessions, election and
-//! reconcilers" and "The reconciler pattern and the loops"; build step 5).
+//! The reconciler runtime: sessions, leader election and the loops.
 //!
 //! Every controller loop is a [`Reconciler`]: level-triggered, keyed, and
 //! driven by watch events plus a periodic full resync.
@@ -159,7 +158,7 @@ impl WatchSpec {
 /// What a loop gets: the stores, the leadership it acts under, the clock,
 /// the step-down token and the settings.
 ///
-/// The decision-log writer of chapter 11 joins this once `sprig-balancer`
+/// The balancer's decision-log writer joins this once `sprig-balancer`
 /// exists.
 #[derive(Clone)]
 pub struct LoopCx {
@@ -233,7 +232,7 @@ impl LoopCx {
     }
 }
 
-/// One controller loop (chapter 23, "Interfaces").
+/// One controller loop.
 #[async_trait::async_trait]
 pub trait Reconciler: Send + Sync + 'static {
     /// What the loop reconciles: a cluster id, a job id, or a unit key for
@@ -243,8 +242,8 @@ pub trait Reconciler: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     /// Where the loop runs.
     fn tier(&self) -> LoopTier;
-    /// The prefixes whose events feed [`Self::keys_for`]. The book's trait
-    /// leaves this implicit; the runtime needs it to open the watches.
+    /// The prefixes whose events feed [`Self::keys_for`]; the runtime
+    /// needs them to open the watches.
     fn watches(&self) -> Vec<WatchSpec> {
         Vec::new()
     }

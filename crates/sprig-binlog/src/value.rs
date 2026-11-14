@@ -1,7 +1,7 @@
-//! Column values in row images, decoded from MariaDB's binlog row format
-//! (chapter 10, "Decoding").
+//! Column values in row images, decoded from MariaDB's binlog row
+//! format.
 //!
-//! Choices from the book: `ENUM` and `SET` stay numbers; `TIMESTAMP` is
+//! Choices: `ENUM` and `SET` stay numbers; `TIMESTAMP` is
 //! epoch seconds (UTC); `DECIMAL` is a string. Strings stay bytes in their
 //! column's collation ([`crate::Column::collation`]), because SQL appliers
 //! re-insert them with that collation; [`Value::as_str`] gives a `&str`

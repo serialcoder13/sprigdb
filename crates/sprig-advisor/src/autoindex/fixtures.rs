@@ -1,6 +1,6 @@
-//! The tables and fingerprints of chapter 13's worked examples, shared by
-//! the candidate, cost and policy tests. Shapes are written in chapter
-//! 12's stored JSON form, the contract with `sprig-workload`.
+//! The tables and fingerprints of four example workloads, shared by the
+//! candidate, cost and policy tests. Shapes are written in the workload
+//! store's JSON form, the contract with `sprig-workload`.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 
@@ -90,7 +90,7 @@ fn table(schema: &str, name: &str, rows: u64, bytes: f64) -> TableStats {
     }
 }
 
-/// Worked example 1: `shop.orders`, 48 million rows, 31.5 GB with
+/// Example 1: `shop.orders`, 48 million rows, 31.5 GB with
 /// indexes, a user index `idx_created (created_at)`.
 pub(crate) fn orders() -> TableStats {
     let mut t = table("t42_d1_g1_s1", "orders", 48_000_000, 31.5 * GB);
@@ -239,7 +239,7 @@ pub(crate) fn orders_other_reads() -> Vec<FpInput> {
     vec![mk(0x2001, 0.79, 100.0), mk(0x2002, 0.5, 100.0)]
 }
 
-/// Worked example 2: `shop.events`, 220 million rows on Galera, 800,000
+/// Example 2: `shop.events`, 220 million rows on Galera, 800,000
 /// inserts an hour.
 pub(crate) fn events() -> TableStats {
     let mut t = table("t42_d1_g1_s1", "events", 220_000_000, 120.0 * GB);
@@ -291,7 +291,7 @@ fn events_fp(id: u64, runs: u64, p95: f64, mean: f64, body: &serde_json::Value) 
     }
 }
 
-/// Example 2's F1 to F4. The chapter's run counts are read as per hour
+/// Example 2's F1 to F4. The run counts are read as per hour
 /// (×24 over the 24-hour window): per day, the merged index's benefit
 /// (about 17,000 ms/h) would fail its own gate against 2 × 40,000 ms/h of
 /// write cost.
@@ -320,9 +320,9 @@ pub(crate) fn events_fps() -> [FpInput; 4] {
                 {"t": "e", "col": "account_id", "op": "eq", "args": [0]},
                 {"t": "e", "col": "kind", "op": "eq", "args": [1]}]}),
     );
-    // F3's mean isn't in the chapter: 60 ms (p95 160) is low enough that
-    // its own index is worth less per byte than the merged one, which is
-    // the chapter's outcome; at a 120 ms mean the own index wins first.
+    // F3's mean is chosen: 60 ms (p95 160) is low enough that its own
+    // index is worth less per byte than the merged one, the intended
+    // outcome; at a 120 ms mean the own index wins first.
     let f3 = events_fp(
         0xF3,
         2400 * 24,
@@ -351,7 +351,7 @@ pub(crate) fn events_writes() -> Vec<FpInput> {
     vec![write_fp(0x3001, EVENTS, "insert", &[], 800_000 * 24)]
 }
 
-/// Worked example 3: `billing.invoices`, 9 million rows, 4.1 GB; the
+/// Example 3: `billing.invoices`, 9 million rows, 4.1 GB; the
 /// histogram puts `overdue` at 0.5% of rows.
 pub(crate) fn invoices() -> TableStats {
     let mut t = table("t42_d2_g1_s1", "invoices", 9_000_000, 4.1 * GB);
@@ -453,7 +453,7 @@ pub(crate) fn invoices_fps() -> [FpInput; 2] {
     [f5, f6]
 }
 
-/// Worked example 4: the collection `shop.orders`, 12 million documents,
+/// Example 4: the collection `shop.orders`, 12 million documents,
 /// with field columns for `customer.id` and `createdAt`.
 pub(crate) fn doc_orders() -> TableStats {
     let mut t = table("t42_d1_g1_s1", "orders_doc", 12_000_000, 9.0 * GB);

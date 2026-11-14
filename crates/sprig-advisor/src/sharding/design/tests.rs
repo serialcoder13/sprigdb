@@ -90,7 +90,7 @@ fn stmt(fp: u64, weight: f64, touches: Vec<Touch>, joins: Vec<JoinEdge>) -> Stmt
     }
 }
 
-/// Chapter 16's shop, in SQL only.
+/// A shop workload, in SQL only.
 fn shop() -> Input {
     let n = Some(KeyClass::Numeric);
     Input {
@@ -352,7 +352,7 @@ fn verdicts_follow_the_guardrails() {
     assert_eq!(decide(Cause::FirstSplit, &thin, &off), Verdict::Apply);
 }
 
-// Pins (chapter 16 step 8).
+// Pins.
 
 fn pin(o: Obj, kind: PinKind) -> Pin {
     Pin {
@@ -440,7 +440,7 @@ fn pinned_unsharded_and_reference_tables_stay_out_of_groups() {
 #[test]
 fn a_shard_key_pin_routes_by_its_columns() {
     let s = AdvisorSettings::default();
-    // The book's example matches the seed: orders stays a column member of
+    // The expected design matches the seed: orders stays a column member of
     // the customers group on customer_id.
     let mut input = shop();
     input.pins = vec![pin(ORDERS, shard_key(&["customer_id"]))];
@@ -540,7 +540,7 @@ fn the_search_never_moves_a_pinned_table() {
     assert_eq!(a.best, b.best);
 }
 
-/// Chapter 22: `customers` and `events` in one group keyed by customer id,
+/// `customers` and `events` in one group keyed by customer id,
 /// with statement 9's join `customers.id = events.customer_id` only.
 fn joined(events_sql: SqlType, rules: Rules) -> (Input, Design) {
     let mut input = shop();
@@ -600,7 +600,7 @@ fn a_join_counts_only_when_its_comparison_co_locates() {
     let (i, d) = joined(SqlType::text(ci), Rules::Sql);
     assert_eq!(score(&i, &d, &s).stmt_local, 0.0);
     assert!(!i.stmts[0].joins[0].could_colocate(&i));
-    // The same columns under MongoDB's rules ($lookup, R5): local.
+    // The same columns under MongoDB's rules ($lookup): local.
     let (i, d) = joined(SqlType::text(ci), Rules::Mongo);
     assert_eq!(score(&i, &d, &s).stmt_local, 1.0);
     assert!(i.stmts[0].joins[0].could_colocate(&i));

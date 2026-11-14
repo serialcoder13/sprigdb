@@ -1,4 +1,4 @@
-//! Chapter 52: the `recommended` rows of a tenant with the settings the
+//! The `recommended` rows of a tenant with the settings the
 //! approvals gate needs, resolved for each row's object exactly as
 //! automatic indexing resolves its own policy.
 

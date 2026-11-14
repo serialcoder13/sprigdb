@@ -1,5 +1,4 @@
-//! Policy views (chapter 29, "Inside MariaDB: defence in depth"; build
-//! step 24's reads, decisions RL18 to RL21 in `decisions/rls-interim.md`).
+//! Policy views: defence in depth for reads, inside MariaDB.
 //!
 //! Each shard schema of a protected table holds an updatable view
 //! `__sprig_rls_<table>` over it that keeps only the rows the
@@ -28,15 +27,14 @@
 //!                   (x(...)), SHOW / DESCRIBE / DDL statements
 //! ```
 //!
-//! Views name their columns (decision RL28): `__sprig_rls_<table>` holds
-//! the columns `SELECT *` on the table shows, so invisible columns stay
-//! out of `*` and `_sprig_` columns out of every user's results. A table
-//! with invisible columns (a split table's `_sprig_rk`, the advisor's and
-//! the key-value layer's `_sprig_p_` columns, a user's own) also gets
-//! `__sprig_rlsh_<table>` with every column; a statement that names one of
-//! the invisible columns reads that one. Such a statement with a `*`
-//! select list isn't swapped (its account then gets 1142): `*` on the
-//! second view would show the invisible columns.
+//! Views name their columns: `__sprig_rls_<table>` holds the columns `SELECT *`
+//! on the table shows, so invisible columns stay out of `*` and `_sprig_`
+//! columns out of every user's results. A table with invisible columns (a split
+//! table's `_sprig_rk`, the advisor's and the key-value layer's `_sprig_p_`
+//! columns, a user's own) also gets `__sprig_rlsh_<table>` with every column; a
+//! statement that names one of the invisible columns reads that one. Such a
+//! statement with a `*` select list isn't swapped (its account then gets 1142):
+//! `*` on the second view would show the invisible columns.
 
 #![allow(clippy::many_single_char_names)] // token indexes: t, i, k, m, c, n
 
@@ -51,7 +49,7 @@ use crate::lex::{self, LexOptions, TokenKind, ident_value};
 pub const VIEW_PREFIX: &str = "__sprig_rls_";
 
 /// The prefix of the policy views that also show a table's invisible
-/// columns (RL28); the table's name follows.
+/// columns; the table's name follows.
 pub const HIDDEN_PREFIX: &str = "__sprig_rlsh_";
 
 /// The function returning the session's context inside a view.
@@ -74,7 +72,7 @@ pub fn view_name(table: &str, object: u64) -> String {
 }
 
 /// The policy view of table `table` (object `object`) with every column,
-/// invisible ones included (RL28): `__sprig_rlsh_<table>`, or for names
+/// invisible ones included: `__sprig_rlsh_<table>`, or for names
 /// over 51 characters `__sprig_rlsh_<first 39>~<object id>`.
 #[must_use]
 pub fn hidden_view_name(table: &str, object: u64) -> String {
@@ -116,7 +114,7 @@ pub fn is_policy_view(name: &str) -> bool {
 /// Stored-code text as written: every `` `__sprig_rls_t` AS `t` `` back to
 /// `` `t` ``, and other references to a policy view back to its table's
 /// name (`SHOW CREATE VIEW`, `PROCEDURE`, ... of code the gateway pointed
-/// at the views, RL20).
+/// at the views).
 #[must_use]
 pub fn unswap(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains("`__sprig_rls") {
@@ -304,7 +302,7 @@ pub trait Lookup {
     fn view(&self, schema: Option<&str>, table: &str) -> Option<String>;
 
     /// For a table with invisible columns: its all-columns view and the
-    /// invisible columns' lower-case names (RL28). `view` is what
+    /// invisible columns' lower-case names. `view` is what
     /// [`Lookup::view`] returned.
     fn hidden(&self, view: &str) -> Option<(String, Vec<String>)> {
         let _ = view;
@@ -495,8 +493,8 @@ pub fn swap(
     let ctes = cte_names(&t);
     let mut ident_cache: Option<HashSet<String>> = None;
     let mut widened = false;
-    // RL28: the all-columns view when the statement names an invisible
-    // column of the table.
+    // The all-columns view when the statement names an invisible column of the
+    // table.
     let mut choose = |view: String| -> String {
         let Some((full, cols)) = lookup.hidden(&view) else {
             return view;
@@ -738,11 +736,11 @@ pub struct ViewSwap {
     /// tables of the same name).
     pub temporary: std::collections::BTreeSet<String>,
     /// Policy view → the table's all-columns view and its invisible
-    /// columns (lower case), for tables with invisible columns (RL28).
+    /// columns (lower case), for tables with invisible columns.
     pub hidden: std::collections::BTreeMap<String, (String, Vec<String>)>,
     /// Temporary tables by (lower-case schema, lower-case name) that shadow
     /// a protected table on this connection: a gathered read's copies,
-    /// filled through the views already (RL28).
+    /// filled through the views already.
     pub shadowed: std::collections::BTreeSet<(String, String)>,
 }
 

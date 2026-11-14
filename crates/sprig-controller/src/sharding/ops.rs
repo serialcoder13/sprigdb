@@ -1,5 +1,5 @@
-//! Operator calls on the sharding loop (chapter 20's `sprigctl shard`,
-//! chapter 16's `sprigctl advisor`), behind the Admin API.
+//! Operator calls on the sharding loop (`sprigctl shard`, `sprigctl
+//! advisor`), behind the Admin API.
 //!
 //! Manual jobs skip the triggers but obey the same exclusion as automatic
 //! ones: a schema change holding a shard, a whole-tenant job, a running
@@ -53,7 +53,7 @@ pub enum ManualJob {
         /// The target cluster.
         to: String,
     },
-    /// Re-key the whole group online (chapter 16, R3): every member moves
+    /// Re-key the whole group online: every member moves
     /// to new shards routed by `column` (or its own column in `members`).
     Rekey {
         /// The new key's column, in every member not in `members`.
@@ -378,7 +378,8 @@ impl ShardingLoop {
     /// it may apply the design.
     ///
     /// # Errors
-    /// 39471 for a tenant that already has table groups (re-keys are R3);
+    /// 39471 for a tenant that already has table groups (those take a
+    /// re-key);
     /// store and catalog errors.
     pub async fn advisor_run(&self, tenant: TenantId) -> Result<TickReport> {
         let ts = self.settings.settings(tenant);

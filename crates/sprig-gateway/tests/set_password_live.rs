@@ -1,4 +1,4 @@
-//! bugfix-26 (decisions/bugfix-interim.md): `SET PASSWORD FOR` another
+//! `SET PASSWORD FOR` another
 //! account follows MySQL 8.4's and MariaDB's rule, on both personas.
 //!
 //! Both servers ask for `UPDATE` on the `mysql` schema

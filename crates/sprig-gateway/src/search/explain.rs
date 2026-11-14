@@ -1,5 +1,4 @@
-//! `EXPLAIN` of searches (chapter 39, "Observability" and build step 14;
-//! decision S25): what a search ran on, shared by SQL's `EXPLAIN` and
+//! `EXPLAIN` of searches: what a search ran on, shared by SQL's `EXPLAIN` and
 //! MongoDB's `explain`.
 //!
 //! ```text

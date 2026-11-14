@@ -43,6 +43,8 @@ fn req(auth: &str) -> HttpRequest<'_> {
         tenant_header: None,
         client_ip: "192.0.2.10".parse().unwrap(),
         tls: true,
+        client_cert: false,
+        client_dn: None,
     }
 }
 

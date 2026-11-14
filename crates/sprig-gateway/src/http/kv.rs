@@ -1,6 +1,6 @@
-//! `sprig.v1.KeyValue` (chapter 33, "Interfaces"; chapter 37): `Get`,
-//! `Put`, `Delete`, `Scan` and `Exec` on a namespace, over REST
-//! (`POST /v1/databases/{db}/namespaces/{ns}:get` ...) and gRPC.
+//! `sprig.v1.KeyValue`: `Get`, `Put`, `Delete`, `Scan` and `Exec` on a
+//! namespace, over REST (`POST /v1/databases/{db}/namespaces/{ns}:get` ...)
+//! and gRPC.
 //!
 //! A call opens the caller's own executor session, as a Redis login does,
 //! so privileges, name virtualization and the router apply. The
@@ -90,7 +90,7 @@ fn entry_json(e: &Entry) -> Value {
     Value::Object(m)
 }
 
-/// A reply as JSON (chapter 33: "RESP3 mapped to JSON").
+/// A reply as JSON (RESP3 mapped to JSON).
 #[must_use]
 pub fn frame_json(f: &Frame) -> Value {
     let text = |b: &[u8]| match std::str::from_utf8(b) {
@@ -221,7 +221,7 @@ pub async fn call(
                 _ => Pre::None,
             };
             let ttl = int_of(body, "ttl_ms");
-            // Chapter 36 (R6 round 3): a location, with its columns.
+            // A location, with its columns.
             let loc = lat_lng(body.get("location"));
             if loc.is_some() {
                 ensure_geo(&mut sql, env, &key, &ns).await?;
@@ -346,8 +346,7 @@ fn lat_lng(v: Option<&Value>) -> Option<(f64, f64)> {
     Some((v.get("latitude")?.as_f64()?, v.get("longitude")?.as_f64()?))
 }
 
-/// The namespace's location columns, once per gateway (chapter 36, R6
-/// round 3).
+/// The namespace's location columns, once per gateway.
 async fn ensure_geo(
     sql: &mut crate::redis::SqlSession,
     env: &sprig_redis::Env,

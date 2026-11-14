@@ -1,6 +1,5 @@
-//! Live test of the resolver finding anchors through shard maps (chapter
-//! 18, "Resolver"): `MapLocator` over in-memory maps, `MyAdmin` on the dev
-//! single node.
+//! Live test of the resolver finding anchors through shard maps:
+//! `MapLocator` over in-memory maps, `MyAdmin` on the dev single node.
 //!
 //! ```sh
 //! SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301 \

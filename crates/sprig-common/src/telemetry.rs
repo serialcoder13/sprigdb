@@ -1,14 +1,14 @@
 //! Tracing setup, the Prometheus recorder and the telemetry endpoints
-//! `/metrics`, `/healthz` and `/readyz` (chapters 03, 04 and 47).
+//! `/metrics`, `/healthz` and `/readyz`.
 //!
-//! Chapter 47's traces are in [`trace`]: spans with target
+//! Traces are in [`trace`]: spans with target
 //! [`trace::TARGET`] become W3C traces, tail-sampled in process, kept in a
 //! ring served as `/debug/traces` and exported over OTLP. `/readyz?verbose`
 //! lists the process identity (pid and start time, so a check can prove no
 //! restart happened), every named check ([`Health::set_check`]) and whether
 //! `sprigdb.toml` still matches the running configuration
-//! ([`Health::watch_config`], chapter 47 "No restarts"). Not here yet: OTLP
-//! export of metrics and logs, and log redaction (step 1).
+//! ([`Health::watch_config`]). Not here yet: OTLP
+//! export of metrics and logs, and log redaction.
 
 pub mod trace;
 
@@ -36,8 +36,7 @@ use crate::time::{Clock, SystemClock};
 /// reads it without a settings lookup (`sprig_settings::ops` sets it).
 static TENANT_SERIES_MIN_RPS: AtomicU64 = AtomicU64::new(10);
 
-/// Statements per second a tenant needs before its own series appear
-/// (chapter 47, "Metric catalogue").
+/// Statements per second a tenant needs before its own series appear.
 #[must_use]
 pub fn tenant_series_min_rps() -> u64 {
     TENANT_SERIES_MIN_RPS.load(Ordering::Relaxed)
@@ -109,7 +108,7 @@ pub const SLI_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
 
-/// Histograms the SLOs and alerts read (chapter 47): exported as
+/// Histograms the SLOs and alerts read: exported as
 /// Prometheus histograms with [`SLI_BUCKETS`], so burn rates can count
 /// the share under a threshold. Every other histogram is a summary.
 pub const SLI_HISTOGRAMS: &[&str] = &[
@@ -463,8 +462,8 @@ pub async fn serve(
                         health.tick();
                         // `install_recorder` runs no upkeep: histogram samples
                         // pile up until something drains them, so a process
-                        // nobody scrapes grows without bound (found in the
-                        // M0.7 soak: about 12 MB a minute under load).
+                        // nobody scrapes grows without bound (found in a
+                        // soak: about 12 MB a minute under load).
                         upkeep.run_upkeep();
                     }
                 }

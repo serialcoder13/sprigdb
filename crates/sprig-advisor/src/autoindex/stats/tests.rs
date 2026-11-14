@@ -46,7 +46,7 @@ fn column(name: &str, data_type: &str) -> ColumnInfo {
     }
 }
 
-/// `shop.orders` of worked example 1: 48 million rows; `customer_id`
+/// `shop.orders` of example 1: 48 million rows; `customer_id`
 /// with `avg_frequency` 400; `status` with a histogram where `open` is 6%
 /// and `hold` 1%.
 fn orders() -> TableStats {

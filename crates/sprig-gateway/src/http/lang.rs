@@ -1,20 +1,17 @@
-//! `language` on `Sql.Query` and `Sql.Execute` (chapter 37, "Languages";
-//! tui decision T2): Studio and `sprig` reach graphs and documents over the
-//! one statement API.
+//! `language` on `Sql.Query` and `Sql.Execute`: Studio and `sprig` reach
+//! graphs and documents over the one statement API.
 //!
 //! - **`sql`** (or empty): the executor, as before ([`SqlEngine::run_capped`]).
-//! - **`cypher`, `gql`**: the graph executor (chapter 43) through a Bolt
-//!   session of the caller's principal ([`crate::bolt::BoltGraphService::api_session`]):
-//!   the same parser (GQL's forms are rewritten into Cypher, so both names
-//!   reach it), graphs, privileges, budgets and stale-map retries as a Bolt
-//!   `RUN` in auto-commit. `database` is Bolt's `db`. One result: a header
-//!   with the statement's fields, rows, and an end whose `info` lists the
-//!   update counters (`nodes-created: 2, ...`) and whose `affected_rows` is
-//!   their sum. Cells are text for strings, numbers and booleans, and JSON
-//!   for everything else, with nodes, relationships and paths as
-//!   `{"$node"}`, `{"$rel"}` and `{"$path"}` (what `sprig --protocol bolt`
-//!   shows); a column's type comes from its first value (`BIGINT`,
-//!   `DOUBLE`, `BOOLEAN`, `VARCHAR`, else `JSON`).
+//! - **`cypher`, `gql`**: the graph executor through a Bolt session of the caller's
+//!   principal ([`crate::bolt::BoltGraphService::api_session`]): the same parser (GQL's
+//!   forms are rewritten into Cypher, so both names reach it), graphs, privileges,
+//!   budgets and stale-map retries as a Bolt `RUN` in auto-commit. `database` is Bolt's
+//!   `db`. One result: a header with the statement's fields, rows, and an end whose
+//!   `info` lists the update counters (`nodes-created: 2, ...`) and whose
+//!   `affected_rows` is their sum. Cells are text for strings, numbers and booleans, and
+//!   JSON for everything else, with nodes, relationships and paths as `{"$node"}`,
+//!   `{"$rel"}` and `{"$path"}` (what `sprig --protocol bolt` shows); a column's type
+//!   comes from its first value (`BIGINT`, `DOUBLE`, `BOOLEAN`, `VARCHAR`, else `JSON`).
 //! - **`mongo`**: `sql` holds one MongoDB command document as JSON
 //!   (Extended JSON v2: `{"find": "users", "filter": {"age": {"$gt": 30}}}`),
 //!   run in `database` through the MongoDB front end's command path
@@ -31,9 +28,9 @@
 //! Caps apply as for SQL: `max_rows` and `max_bytes` end the result with
 //! `truncated` (the graph stream is dropped, the cursor killed),
 //! `timeout_ms` ends the call with 3024. A client that goes away stops the
-//! statement (tui T3): the graph session's connections close, the MongoDB
-//! command is interrupted. Transaction handles hold SQL sessions, so these
-//! languages take no `transaction` (39794), and no `multi_statements`.
+//! statement: the graph session's connections close, the MongoDB command is
+//! interrupted. Transaction handles hold SQL sessions, so these languages
+//! take no `transaction` (39794), and no `multi_statements`.
 //!
 //! Errors keep SprigDB's and MySQL's numbers where the other language's
 //! error has one (a syntax error is 39900, a missing graph 39902, access
@@ -109,9 +106,9 @@ fn invalid(m: impl Into<String>) -> SprigError {
 }
 
 /// `language` and `output` of a request as one text for [`SqlEngine::run_in`]:
-/// `mongo;output=canonical_ejson` (chapter 37's `Documents` option, which
-/// Studio's JSON tree asks for to show exact BSON types). Empty `output`
-/// leaves `language` as it is.
+/// `mongo;output=canonical_ejson` (the `Documents` option, which Studio's JSON
+/// tree asks for to show exact BSON types). Empty `output` leaves `language`
+/// as it is.
 #[must_use]
 pub fn with_output(language: &str, output: &str) -> String {
     if output.trim().is_empty() {

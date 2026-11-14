@@ -1,13 +1,12 @@
-//! Read routing and read-your-writes (chapter 06, "Read routing and
-//! read-your-writes"; build step 6).
+//! Read routing and read-your-writes.
 //!
 //! A plain read may leave the writer. Its **causal target** is the
 //! session's last commit ([`GtidSet`], from session tracking's `last_gtid`)
 //! plus, under `reads.causal_scope = tenant_gateway`, the [`Watermarks`] of
-//! every commit by the same tenant through this gateway (in M0.2, the same
-//! cluster and backend account: decision D1). [`choose`] then picks:
+//! every commit by the same tenant through this gateway (per cluster and
+//! backend account). [`choose`] then picks:
 //!
-//! - **Galera** (decisions D13 and D14): like replicas. Nodes more than
+//! - **Galera**: like replicas. Nodes more than
 //!   `reads.max_galera_lag_ms` behind the most advanced node (marked
 //!   behind) get no reads. A read with an empty target goes to the
 //!   least-loaded remaining node. One that must see a write goes to the
@@ -49,7 +48,7 @@ use crate::backend::cluster::{ClusterView, NodeKey, NodeRef};
 use crate::backend::health::{NodeHealth, NodeRole, NodeTable};
 use crate::backend::settings::{BackendSettings, GaleraUnconfirmed, Routing};
 
-/// Where a read goes (chapter 06, "Interfaces").
+/// Where a read goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadTarget {
     /// The writer.
@@ -63,7 +62,8 @@ pub enum ReadTarget {
         wait_for: Option<GtidSet>,
     },
     /// A Galera node: the writer, one whose position covers the target,
-    /// or (decision D14) one not yet known to have it.
+    /// or (under `reads.galera_unconfirmed = check`) one not yet known to
+    /// have it.
     GaleraNode {
         /// The node.
         node: NodeRef,
@@ -93,7 +93,7 @@ impl ReadTarget {
 }
 
 /// Every commit by a tenant through this gateway, per cluster and backend
-/// account (chapter 06: `reads.causal_scope = tenant_gateway`).
+/// account (`reads.causal_scope = tenant_gateway`).
 #[derive(Debug, Default)]
 pub struct Watermarks {
     map: Mutex<HashMap<(ClusterId, String), GtidSet>>,
@@ -195,7 +195,7 @@ pub fn choose(
     }
 }
 
-/// The Galera rule of [`choose`] (decisions D13 and D14).
+/// The Galera rule of [`choose`].
 #[allow(clippy::too_many_arguments)]
 fn choose_galera(
     view: &ClusterView,
@@ -230,7 +230,7 @@ fn choose_galera(
     let confirmed_elsewhere = fresh.iter().any(|&(_, w, c, _)| c && !w);
     let unconfirmed =
         causal && !confirmed_elsewhere && settings.galera_unconfirmed == GaleraUnconfirmed::Check;
-    // Without a read off the writer known to have the write (decision D14),
+    // Without a read off the writer known to have the write,
     // any node with a known lag under the limit may serve it after the
     // check; among equally loaded nodes, the one with the least lag.
     let cands: Vec<(&NodeRef, bool, bool, Duration)> = fresh
@@ -292,7 +292,7 @@ pub fn wait_query(target: &GtidSet, timeout: Duration) -> String {
 /// The error MariaDB raises when the wait-or-fail prefix times out.
 pub const WAIT_TIMEOUT_ERRNO: u16 = 1242;
 
-/// The Galera safety net (decision D13): a statement that waits until the
+/// The Galera safety net: a statement that waits until the
 /// node has applied everything the cluster had committed when it started
 /// (`wsrep_sync_wait = 1`), so a read that follows it sees the session's
 /// writes. It runs before the client's statement, which keeps
@@ -414,7 +414,9 @@ mod tests {
         t.record_galera_positions(&v.id, &polled, Some(3));
     }
 
-    /// Decision D13, kept by `reads.galera_unconfirmed = writer`.
+    /// The strict rule, kept by `reads.galera_unconfirmed = writer`: a read
+    /// that must see a write goes only to a node that already has it, else
+    /// to the writer.
     #[test]
     fn galera_routing_and_sync_wait() {
         let v = view(TopologyKind::Galera);
@@ -530,7 +532,7 @@ mod tests {
         }
     }
 
-    /// Decision D14: a read that must see a write no polled position shows
+    /// A read that must see a write no polled position shows
     /// off the writer, in both modes of `reads.galera_unconfirmed`.
     #[test]
     fn galera_unconfirmed_reads_in_both_modes() {

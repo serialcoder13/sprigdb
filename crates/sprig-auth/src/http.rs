@@ -62,6 +62,11 @@ pub struct HttpRequest<'a> {
     /// Whether the request arrived over TLS (8443, or a trusted proxy's
     /// TLS).
     pub tls: bool,
+    /// The client presented a certificate the listener verified
+    /// (`REQUIRE X509`, authfix2).
+    pub client_cert: bool,
+    /// That certificate's subject and issuer (`REQUIRE SUBJECT`, `ISSUER`).
+    pub client_dn: Option<&'a crate::mysql::ClientDn>,
 }
 
 impl std::fmt::Debug for HttpRequest<'_> {
@@ -256,8 +261,8 @@ impl HttpAuth {
                 sni: host,
                 client_ip: req.client_ip,
                 tls: req.tls,
-                client_cert: false,
-                client_dn: None,
+                client_cert: req.client_cert,
+                client_dn: req.client_dn.cloned(),
                 can_handle_expired_password: false,
             })
             .await;
@@ -400,7 +405,9 @@ impl HttpAuth {
             ));
         }
         let need_tls = user.row.require_tls != RequireTls::None || cl.require_tls(&catalog);
-        if (need_tls && !req.tls) || user.row.require_tls == RequireTls::X509 {
+        if (need_tls && !req.tls)
+            || !crate::mysql::certificate_ok(&user.row, req.client_cert, req.client_dn)
+        {
             return Err((
                 "tls_required",
                 HttpAuthError::denied(name, req.client_ip, true),

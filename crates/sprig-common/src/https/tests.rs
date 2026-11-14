@@ -191,7 +191,7 @@ fn bad_files_name_themselves() {
 }
 
 /// The pooled internal client: `http://` plain, `https://` mutual TLS with
-/// the installed process identity (hardening round 3).
+/// the installed process identity.
 #[tokio::test]
 async fn the_internal_connector_speaks_tls_to_https_and_plain_to_http() {
     use hyper_util::client::legacy::Client;

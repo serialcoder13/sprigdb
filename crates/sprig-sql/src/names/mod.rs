@@ -1,33 +1,32 @@
-//! Name virtualization (chapter 07).
+//! Name virtualization.
 //!
 //! - [`map`]: the physical-name grammar (from [`sprig_common::names`]) and
-//!   the per-tenant [`NameMap`] (build step 1; the catalog-backed map comes
-//!   with chapter 08 step 4).
-//! - [`rewrite`](mod@rewrite): the statement rewrite: lexing per persona, every name
-//!   position, span editing (build step 2) and the substitutions for
-//!   `DATABASE()`, account functions and query attributes (build step 3).
+//!   the per-tenant [`NameMap`].
+//! - [`rewrite`](mod@rewrite): the statement rewrite: lexing per persona, every
+//!   name position, span editing and the substitutions for `DATABASE()`,
+//!   account functions and query attributes.
 //!
 //! - [`ddl`]: the typed DDL target of each statement
 //!   ([`StatementInfo::ddl`]) and its conversion to the catalog's
-//!   `DdlStatement` (chapter 08 step 10, the gateway side).
-//! - [`show`]: the `SHOW` family (build step 4): classification, the
+//!   `DdlStatement` (the gateway side).
+//! - [`show`]: the `SHOW` family: classification, the
 //!   local answers (`SHOW DATABASES`, `SHOW PROCESSLIST`, routines from
 //!   their original text).
 //! - [`infoschema`]: `information_schema` inline views, pushdown, the
-//!   column registry, `SCHEMATA` and `PROCESSLIST` (build step 5).
-//! - [`output`]: column-definition and message mapping (build step 7).
+//!   column registry, `SCHEMATA` and `PROCESSLIST`.
+//! - [`output`]: column-definition and message mapping.
 //! - [`hide`]: what a session may see, the `SHOW CREATE TABLE` line
-//!   filter and `CREATE TABLE ... LIKE` (build step 8).
-//! - [`autoindex`]: chapter 13's side of hiding: reserved `sprig_auto_`
-//!   index names, `@sprig_show_auto_indexes` and the 64-index rule
-//!   (chapter 13 step 12).
+//!   filter and `CREATE TABLE ... LIKE`.
+//! - [`autoindex`]: automatic indexes' side of hiding: reserved
+//!   `sprig_auto_` index names, `@sprig_show_auto_indexes` and the 64-index
+//!   rule.
 //! - [`result`]: the [`ResultMapper`] a forwarded statement's result goes
 //!   through.
 //! - [`plan`](mod@plan): the whole flow for a client's text, one
 //!   [`StmtPlan`] per statement.
 //!
-//! Not here yet: `performance_schema`, `sys` and `mysql` (step 6),
-//! `DEFINER` mapping beyond output (step 9), the `SPRIG_` views (step 11).
+//! Not here yet: `performance_schema`, `sys` and `mysql`, `DEFINER` mapping
+//! beyond output, the `SPRIG_` views.
 
 pub mod autoindex;
 pub mod ddl;

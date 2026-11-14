@@ -1,5 +1,4 @@
-//! ERR packets and the persona error maps (chapter 05, "Error packets",
-//! build step 11).
+//! ERR packets and the persona error maps.
 //!
 //! [`errmap`] turns a [`SprigError`] into the (errno, SQLSTATE, message)
 //! triple a persona sends; [`StdErr`] lists the standard errors the wire
@@ -217,7 +216,7 @@ pub fn truncate_message(s: &str, max: usize) -> &str {
     &s[..n]
 }
 
-/// Standard errors the wire layer raises itself (chapter 05).
+/// Standard errors the wire layer raises itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StdErr {
@@ -266,7 +265,7 @@ impl StdErr {
     /// The error number in this persona. MySQL and MariaDB share every
     /// number but one: MariaDB reports disabled local infile as 4166
     /// `ER_LOAD_INFILE_CAPABILITY_DISABLED` where MySQL 8.4 uses 3948
-    /// (measured on MariaDB 11.8 and 12.3; chapter 05 open question 5).
+    /// (measured on MariaDB 11.8 and 12.3).
     #[must_use]
     pub fn code(self, persona: Persona) -> u16 {
         if persona == Persona::MariaDb && self == StdErr::LocalFilesDisabled {
@@ -296,8 +295,7 @@ impl StdErr {
 
     /// The SQLSTATE in this persona. MariaDB sends 3159 with `08004` (MySQL
     /// 8.4: `HY000`) and its 4166 with `HY000` (MySQL's 3948: `42000`), as
-    /// measured on MariaDB 12.3 and MySQL 8.4 (chapter 05 open questions 5
-    /// and 8).
+    /// measured on MariaDB 12.3 and MySQL 8.4.
     #[must_use]
     pub fn sqlstate_for(self, persona: Persona) -> [u8; 5] {
         match (persona, self) {
@@ -381,8 +379,8 @@ impl StdErr {
 ///
 /// SprigDB errors keep their 39xxx number and SQLSTATE; backend and
 /// standard errors keep theirs (MariaDB-only codes on 3306 are mapped by the
-/// translator in R4). The message is the error's client-safe text, cut to
-/// 512 bytes; chapter 07's name rewriting happens before this.
+/// error translator). The message is the error's client-safe text, cut to
+/// 512 bytes; name rewriting happens before this.
 #[must_use]
 pub fn errmap(persona: Persona, err: &SprigError) -> (u16, [u8; 5], String) {
     let (code, sqlstate) = match err.kind {

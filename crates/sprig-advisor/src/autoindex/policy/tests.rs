@@ -97,7 +97,7 @@ fn chapter_08_example_tightened_bounds_clamp_the_object() {
     );
 }
 
-/// Decision O1's keys at global, tenant, database and object scope: the
+/// The usage keys at global, tenant, database and object scope: the
 /// most specific wins, and each scope only reaches its own objects.
 #[test]
 fn usage_keys_resolve_most_specific_first() {
@@ -502,8 +502,7 @@ fn dampers_block_harmful_recreation_and_hold_cooldowns() {
 
 /// A simulated month: a definition dropped as harmful is never proposed
 /// again inside the block, so it is created at most once per
-/// `recreate_block_days + cooldown` (chapter 13's stability test, in
-/// miniature).
+/// `recreate_block_days + cooldown` (a stability test, in miniature).
 #[test]
 fn simulated_month_never_flaps() {
     let day = Duration::from_secs(86_400);
@@ -535,7 +534,7 @@ fn simulated_month_never_flaps() {
     assert_eq!(creations, 2);
 }
 
-/// Decision E2 (confirmed): `auto_index.min_storage_budget_mb` defaults to
+/// `auto_index.min_storage_budget_mb` defaults to
 /// 64, is set by tenants at tenant, database and object scope (not
 /// operator-only) and by operators at global, dc and cluster scope, and
 /// resolves per object: a table's value overrides its tenant's.

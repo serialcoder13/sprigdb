@@ -1,8 +1,7 @@
-//! Studio's approvals inbox (chapter 52, "Studio"; chapter 44):
-//! `/v1/recommendations...` to the DC leader's `Recommendations` service,
-//! with the caller as a claim the controller checks against every item:
-//! the tenant, `SPRIG_TENANT_ADMIN`, and the `ALTER` and `INDEX` grants
-//! read from `SHOW GRANTS`.
+//! Studio's approvals inbox: `/v1/recommendations...` to the DC leader's
+//! `Recommendations` service, with the caller as a claim the controller
+//! checks against every item: the tenant, `SPRIG_TENANT_ADMIN`, and the
+//! `ALTER` and `INDEX` grants read from `SHOW GRANTS`.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

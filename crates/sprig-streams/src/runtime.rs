@@ -445,6 +445,8 @@ pub async fn run_job(
         stats: Arc::default(),
     };
     let stats = Arc::clone(&seq.stats);
+    let _lag = lag::Entry::new(Arc::clone(&stats));
+    lag::set_threshold(&*env);
     let settings_object = match def.kind {
         StreamKind::Events => ObjectId(id.0),
         StreamKind::Changes => def.source_object.unwrap_or(ObjectId(id.0)),
@@ -468,16 +470,10 @@ pub async fn run_job(
                     "items": stats.items.load(Ordering::Relaxed),
                     "lag_ms": stats.lag_ms.load(Ordering::Relaxed),
                 });
-                // Lag per instance (R9, r9feed): one series per stream
-                // sequencer on this worker.
-                #[allow(clippy::cast_precision_loss)]
-                let lag = stats.lag_ms.load(Ordering::Relaxed) as f64 / 1000.0;
-                metrics::gauge!(
-                    "sprig_stream_sequencer_lag_seconds",
-                    "tenant" => tenant.to_string(),
-                    "stream" => id.0.to_string()
-                )
-                .set(lag);
+                // Lag per instance stays in the progress record (`lag_ms`);
+                // the gauges are this worker's worst lag and the count over
+                // the threshold (decision r9-132).
+                lag::export(false);
                 if !report.progress(p).await {
                     stop.cancel();
                 }
@@ -491,6 +487,7 @@ pub async fn run_job(
                 }
                 if last_maint.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
                     last_maint = Some(Instant::now());
+                    lag::set_threshold(&*env);
                     let r = maintain_once(&env, tenant, &cat_pool, &cat_schema, &def, settings_object, &log_schema, &outbox_schemas).await;
                     match r {
                         Ok(Some(m)) if m != crate::retention::Maintained::default() => {
@@ -510,17 +507,126 @@ pub async fn run_job(
         }
     };
     tracing::info!(%tenant, stream = id.0, ?end, "stream sequencer stopped");
-    metrics::gauge!(
-        "sprig_stream_sequencer_lag_seconds",
-        "tenant" => tenant.to_string(),
-        "stream" => id.0.to_string()
-    )
-    .set(0.0);
     Ok(match end {
         RunEnd::Stopped if gone => JobEnd::Gone,
         RunEnd::Stopped => JobEnd::Stopped,
         RunEnd::Fenced => JobEnd::Fenced,
     })
+}
+
+/// The lag of this worker's stream sequencers as bounded series (R9,
+/// feedcancel; decision r9-132, replacing r9feed's gauge per instance):
+///
+/// - `sprig_stream_sequencer_lag_max_seconds`: the worst lag of the
+///   sequencers running here (0 with none);
+/// - `sprig_stream_sequencers_lagging`: how many of them are further
+///   behind than `stream.sequencer_lag_alert_seconds`.
+///
+/// Each instance's lag stays in its job's progress record (`lag_ms`), for
+/// `SHOW` and Studio. A sequencer job registers its stats while it runs;
+/// one of the jobs' 1-second ticks exports the pair at most once a second
+/// (one pass over the jobs, however many there are), and a job's end
+/// exports at once.
+pub mod lag {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+    use crate::sequencer::SeqStats;
+
+    use super::{JobEnv, now_ms};
+
+    #[derive(Default)]
+    struct Jobs {
+        next: u64,
+        stats: HashMap<u64, Arc<SeqStats>>,
+    }
+
+    fn jobs() -> &'static Mutex<Jobs> {
+        static J: OnceLock<Mutex<Jobs>> = OnceLock::new();
+        J.get_or_init(Mutex::default)
+    }
+
+    static LAST_EXPORT_MS: AtomicU64 = AtomicU64::new(0);
+    static THRESHOLD_MS: AtomicU64 = AtomicU64::new(60_000);
+
+    /// A running sequencer's stats, counted until dropped.
+    #[derive(Debug)]
+    pub struct Entry(u64);
+
+    impl Entry {
+        /// Counts `stats` in the worker's lag.
+        #[must_use]
+        pub fn new(stats: Arc<SeqStats>) -> Self {
+            let mut j = jobs().lock().unwrap_or_else(PoisonError::into_inner);
+            j.next += 1;
+            let id = j.next;
+            j.stats.insert(id, stats);
+            Self(id)
+        }
+    }
+
+    impl Drop for Entry {
+        fn drop(&mut self) {
+            jobs()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .stats
+                .remove(&self.0);
+            export(true);
+        }
+    }
+
+    /// Reads `stream.sequencer_lag_alert_seconds` from the worker's live
+    /// settings (the default without them).
+    pub fn set_threshold(env: &dyn JobEnv) {
+        let secs = env.settings().map_or(
+            crate::settings::SEQUENCER_LAG_ALERT_SECONDS.default,
+            |(s, dc)| {
+                s.get(
+                    &crate::settings::SEQUENCER_LAG_ALERT_SECONDS,
+                    &sprig_settings::SettingCtx::process(&dc),
+                )
+            },
+        );
+        THRESHOLD_MS.store(secs.saturating_mul(1000), Ordering::Relaxed);
+    }
+
+    /// The worst lag and how many lags are over `threshold_ms`.
+    #[must_use]
+    pub fn summarize(lags: impl IntoIterator<Item = u64>, threshold_ms: u64) -> (u64, u64) {
+        lags.into_iter().fold((0, 0), |(max, over), l| {
+            (max.max(l), over + u64::from(l > threshold_ms))
+        })
+    }
+
+    /// Exports the pair, at most once a second unless `now`.
+    pub fn export(now: bool) {
+        let t = now_ms();
+        if now {
+            LAST_EXPORT_MS.store(t, Ordering::Relaxed);
+        } else {
+            let last = LAST_EXPORT_MS.load(Ordering::Relaxed);
+            if t < last.saturating_add(1000)
+                || LAST_EXPORT_MS
+                    .compare_exchange(last, t, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_err()
+            {
+                return;
+            }
+        }
+        let (max, over) = {
+            let j = jobs().lock().unwrap_or_else(PoisonError::into_inner);
+            summarize(
+                j.stats.values().map(|s| s.lag_ms.load(Ordering::Relaxed)),
+                THRESHOLD_MS.load(Ordering::Relaxed),
+            )
+        };
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("sprig_stream_sequencer_lag_max_seconds").set(max as f64 / 1000.0);
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("sprig_stream_sequencers_lagging").set(over as f64);
+    }
 }
 
 /// Whether stream `id`'s subscription is gone or no longer active (a read
@@ -582,6 +688,12 @@ async fn maintain_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lag_series_are_the_worst_and_the_count_over_the_threshold() {
+        assert_eq!(lag::summarize([], 1000), (0, 0));
+        assert_eq!(lag::summarize([0, 1000, 1001, 250_000], 1000), (250_000, 2));
+    }
 
     #[test]
     fn names() {

@@ -1,10 +1,10 @@
-//! The router in the tenant path (chapter 17, R1): a statement chapter 07
-//! rewrote goes to [`sprig_router::plan`] when the session's tenant has
+//! The router in the tenant path: a statement the name layer rewrote goes
+//! to [`sprig_router::plan`] when the session's tenant has
 //! sharded or reference tables, and is relayed as before otherwise.
 //!
 //! ```text
 //! no sharded or reference table in the catalog  → forward (one lookup)
-//! BEGIN, COMMIT, ROLLBACK, SAVEPOINT,           → chapter 18's coordinator, never the
+//! BEGIN, COMMIT, ROLLBACK, SAVEPOINT,           → the transaction coordinator, never the
 //!   ROLLBACK TO, RELEASE                          backend (39441 closes the connection)
 //! a range a mover cutover holds is named        → wait for the hold (outside transactions)
 //! NotRouted                                     → forward (in a coordinator transaction:
@@ -88,7 +88,7 @@ struct Services {
     /// Bumped when a `router.*` or `txn.*` row changes at any scope:
     /// sessions resolve their [`Configs`] again.
     settings_gen: tokio::sync::watch::Receiver<u64>,
-    /// Chapter 19's ID blocks, per tenant.
+    /// The `AUTO_INCREMENT` ID blocks, per tenant.
     ids: Mutex<HashMap<sprig_common::ids::TenantId, Arc<ids::TenantIds>>>,
 }
 
@@ -110,7 +110,7 @@ impl Services {
     }
 }
 
-/// One statement's values from chapter 19's ID blocks.
+/// One statement's values from the ID blocks.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IdsTaken {
     /// The first generated value (`LAST_INSERT_ID()` after it).
@@ -123,7 +123,7 @@ pub(crate) struct IdsTaken {
     count: u64,
 }
 
-/// Chapters 17's and 18's settings as one session resolved them, with
+/// The router's and coordinator's settings as one session resolved them, with
 /// what they were resolved at.
 #[derive(Debug, Clone)]
 pub(crate) struct Configs {
@@ -155,8 +155,8 @@ fn services(svc: &TenantServices) -> &'static Services {
     })
 }
 
-/// The router's shard map cache of `tenant`'s home DC (R8 round 6: the
-/// graph store reads its groups' maps here too).
+/// The router's shard map cache of `tenant`'s home DC (the graph store
+/// reads its groups' maps here too).
 ///
 /// # Errors
 /// `Internal` never in practice.
@@ -190,8 +190,8 @@ pub(crate) enum Probe {
 pub(crate) struct RouterState {
     /// The session's connections to clusters other than its own.
     others: HashMap<ClusterId, BackendSession>,
-    /// Chapter 18's coordinator, once the session met a sharded table.
-    /// Chapter 19's lookup sessions (Pre, Main, Post) over the
+    /// The transaction coordinator, once the session met a sharded table.
+    /// The lookup sessions (Pre, Main, Post) over the
     /// coordinator, which it derefs to.
     coord: Option<DistTxn<GwTxn>>,
     /// The layout the coordinator's anchors were taken from.
@@ -201,37 +201,37 @@ pub(crate) struct RouterState {
     pub(crate) probe: Probe,
     pub(crate) hit: Option<SprigError>,
     /// The probe also holds back 1054 (a column a schema change is
-    /// dropping, chapter 21): a routed statement outside a transaction.
+    /// dropping): a routed statement outside a transaction.
     pub(crate) probe_column: bool,
     /// The settings this session last resolved.
     cfg: Option<Configs>,
     /// Shard schemas the open coordinator transaction used, with their
-    /// range epochs then (chapter 17: a shard that moves under a
+    /// range epochs then (a shard that moves under a
     /// transaction rolls it back with 39424).
     touched: HashMap<String, u64>,
-    /// The ID-block values the statement being run took (chapter 19).
+    /// The ID-block values the statement being run took.
     ids: Option<IdsTaken>,
     /// Collision retries of the prepared statement being run.
     collisions: u32,
     /// For an `INSERT IGNORE` with ID-block values: the read of the first
     /// value it really inserted, and its row count.
     readback: Option<(Plan, u64)>,
-    /// An `INSERT … SELECT` or `LOAD DATA` runs its parts (R3): they never
+    /// An `INSERT … SELECT` or `LOAD DATA` runs its parts: they never
     /// start another.
     write_form: bool,
-    /// R8 round 6: the `GRAPH_TABLE` calls of the statement under way,
+    /// The `GRAPH_TABLE` calls of the statement under way,
     /// placeholders in its text until the router path binds their rows
     /// ([`graph`]).
     pub(super) graph: Option<graph::Pending>,
-    /// R8 round 6: the bound statement's graph plan and rows, which narrow
+    /// The bound statement's graph plan and rows, which narrow
     /// its read to the shards of the rows' keys.
     graph_bound: Option<graph::Bound>,
-    /// R8 round 7 (G62): session temporary tables holding a graph
+    /// Session temporary tables holding a graph
     /// statement's rows past the inline limit, on the session's own
     /// connection; dropped before the next routed statement.
     graph_tmp: Vec<String>,
     /// SQL-level prepared statements the gateway holds, by folded name
-    /// (bugfix prepfix, [`sql_prepare`]).
+    /// ([`sql_prepare`]).
     sql_ps: HashMap<String, sql_prepare::Held>,
 }
 
@@ -250,7 +250,7 @@ impl RouterState {
         self.coord.as_ref().is_some_and(|c| c.in_txn())
     }
 
-    /// ST31 (bugfix5): the session's statement was abandoned (`KILL QUERY`,
+    /// The session's statement was abandoned (`KILL QUERY`,
     /// or its REST, gRPC or MySQL client went away): every statement still
     /// under way on the router's other connections (the session's
     /// connection to another cluster, the coordinator's branches) is
@@ -330,14 +330,14 @@ enum Ran {
     /// Outside a transaction, before anything reached the client: an
     /// unknown column (1054) or shards that disagree on columns
     /// (`schema_skew`), as a schema change dropping a column leaves them
-    /// for a moment (chapter 21, decision D8).
+    /// for a moment.
     ColumnGone(SprigError),
     /// A generated `AUTO_INCREMENT` value met a row that already holds it
     /// (1062 naming the value), before anything reached the client:
-    /// chapter 19's collision retry takes new values.
+    /// the collision retry takes new values.
     Collision(SprigError),
     /// The executor refused a read's plan at run time (39420), before
-    /// anything reached the client: chapter 17's gathered read (R3) may
+    /// anything reached the client: a gathered read may
     /// answer it instead.
     Regather(SprigError, sprig_router::Rejection),
 }
@@ -360,7 +360,7 @@ fn readback_plan(
     }
 }
 
-/// Chapter 19's collision retries per statement.
+/// `AUTO_INCREMENT` collision retries per statement.
 const COLLISION_RETRIES: u32 = 3;
 
 /// Whether `e` is a duplicate-key error on one of the values `t` generated.
@@ -380,7 +380,7 @@ fn collides(e: &SprigError, t: &IdsTaken) -> bool {
     v >= t.first && (v - t.first) % t.step.max(1) == 0 && k < i128::from(t.count)
 }
 
-/// `lookup.lock_wait_seconds`' default (chapter 19): Pre sessions' lock
+/// `lookup.lock_wait_seconds`' default: Pre sessions' lock
 /// wait. The key isn't registered yet.
 const LOOKUP_LOCK_WAIT_SECONDS: u64 = 5;
 
@@ -556,7 +556,7 @@ impl PassSession {
         // The cache may still be loading. With none of the groups' maps in
         // yet the layout is empty (`None`), and a gateway's first statement
         // of a sharded tenant went unrouted, to the database's first
-        // schema: 1146 for every regrouped table (bugfix5).
+        // schema: 1146 for every regrouped table.
         let loading = match &layout {
             Some(l) => !l.missing.is_empty(),
             None => Layouts::has_groups(cat),
@@ -570,7 +570,7 @@ impl PassSession {
         Some((layout, cache))
     }
 
-    /// Chapter 07 (R1): where this session's metadata statements read the
+    /// Where this session's metadata statements read the
     /// tenant's grouped tables; `None` when nothing is grouped.
     pub(super) async fn grouped_tables(&self) -> Option<Arc<sprig_sql::names::GroupedTables>> {
         let (layout, _) = self.router_layout().await?;
@@ -645,15 +645,15 @@ impl PassSession {
                 .collect()
         };
         for c in missing {
-            // The capability profile decides (chapter 09's `derived.xa`).
+            // The capability profile decides (its `derived.xa`).
             // `SPRIGDB_ROUTER_XA_CLUSTERS` stays as an operator override
-            // for clusters whose profile is wrong (decision RR11); nothing
+            // for clusters whose profile is wrong; nothing
             // sets it in tests any more.
             let forced = std::env::var("SPRIGDB_ROUTER_XA_CLUSTERS")
                 .is_ok_and(|v| v.split(',').any(|x| x.trim() == c.as_str()));
             // And `SPRIGDB_ROUTER_NO_XA_CLUSTERS` the other way: clusters
             // whose transactions take Sprig 2PC although they have XA (live
-            // tests of chapter 18's held branches through a gateway, R3).
+            // tests of the coordinator's held branches through a gateway).
             let denied = std::env::var("SPRIGDB_ROUTER_NO_XA_CLUSTERS")
                 .is_ok_and(|v| v.split(',').any(|x| x.trim() == c.as_str()));
             let xa = !denied && (forced || svc.locator.cluster_xa(&c).await.unwrap_or(false));
@@ -755,8 +755,8 @@ impl PassSession {
     /// Runs physical `sql` that the gateway made itself (names the client
     /// can't write) on the session's own cluster, inside the session's
     /// transaction: the coordinator's branch there in a coordinator
-    /// transaction, else the main connection. Chapter 45's
-    /// `sprig.commit_offset` (R9, r9triggers). Its rows or OK go to `out`.
+    /// transaction, else the main connection: the stream layer's
+    /// `sprig.commit_offset`. Its rows or OK go to `out`.
     ///
     /// # Errors
     /// The statement's error.
@@ -1103,14 +1103,11 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
-        // SQL-level `PREPARE`, `EXECUTE` and `DEALLOCATE` (bugfix prepfix):
-        // the gateway holds them for tenants with shards.
-        if let Some(step) =
-            Box::pin(self.sql_prepared(cx, &sql, original, more, format, &mapper, map, out)).await?
-        {
+        // SQL-level `PREPARE`, `EXECUTE` and `DEALLOCATE`: the gateway holds them for tenants with shards.
+        if let Some(step) = Box::pin(self.sql_prepared(cx, original, more, format, out)).await? {
             return Ok(step);
         }
-        // R8 round 6: `GRAPH_TABLE` placeholders get their rows (or the
+        // `GRAPH_TABLE` placeholders get their rows (or the
         // statement its EXPLAIN) before the router plans it.
         let sql =
             match Box::pin(self.graph_bind(cx, sql, original, more, format, &mapper, map, out))
@@ -1174,7 +1171,7 @@ impl PassSession {
                 }
             };
         }
-        // Chapter 07 (R1): a SHOW or DESCRIBE of a grouped table whose
+        // A SHOW or DESCRIBE of a grouped table whose
         // group has no shard on this session's cluster runs where it is.
         if !self.router.in_txn()
             && !self.legacy_txn()
@@ -1203,14 +1200,14 @@ impl PassSession {
             };
         }
         // `autocommit = 0`: a statement that reads or writes opens a
-        // coordinator transaction, as MariaDB opens one (decision RR13).
+        // coordinator transaction, as MariaDB opens one.
         self.implicit_begin(&text);
         let mut retries = 0usize;
         let mut column_retried = false;
         let mut collisions = 0u32;
         let mut regather: Option<sprig_router::Rejection> = None;
         let mut regathered = false;
-        // R3: `LOAD DATA LOCAL INFILE` into a sharded table becomes routed
+        // `LOAD DATA LOCAL INFILE` into a sharded table becomes routed
         // inserts (`write_forms`).
         if !self.router.write_form
             && let Some(ld) = write_forms::load_data_parse(&text)
@@ -1233,7 +1230,7 @@ impl PassSession {
                     Err(e) => return self.fail(out, &e).await,
                 }
             };
-            // R3: `INSERT … SELECT` into or out of shards runs as a read
+            // `INSERT … SELECT` into or out of shards runs as a read
             // and routed inserts (`write_forms`).
             if let Plan::Reject(r) = &plan
                 && r.reason == sprig_router::Reason::InsertSelect
@@ -1369,8 +1366,8 @@ impl PassSession {
         }
     }
 
-    /// R3: the statement as a gathered read, after its read plan was
-    /// refused at run time (chapter 17, "Gathered reads (R3)").
+    /// The statement as a gathered read, after its read plan was refused
+    /// at run time.
     fn plan_regather(
         &self,
         layout: &TenantLayout,
@@ -1400,7 +1397,7 @@ impl PassSession {
     }
 
     /// Plans a text statement of the router path. An INSERT that takes
-    /// chapter 19's ID blocks gets its values first; they are kept in
+    /// the ID blocks gets its values first; they are kept in
     /// `self.router.ids` for its OK packet.
     ///
     /// # Errors
@@ -1430,11 +1427,11 @@ impl PassSession {
             ids: self.id_mode(),
         };
         let tenant = self.tenant.as_deref().map(|t| t.tenant);
-        // R6 round 4: the key-value front ends' one-key compound
+        // The key-value front ends' one-key compound
         // statements (guarded batches) go to that key's shard; only the
         // gateway's own internal statements take this path.
         let internal = self.tenant.as_deref().is_some_and(|t| t.types.internal);
-        // Chapter 20: writes count into the gateway's sketches.
+        // Writes count into the gateway's sketches.
         let plan = crate::write_load::observe(
             tenant,
             text,
@@ -1448,7 +1445,7 @@ impl PassSession {
             |p| p,
         );
         self.router.ids = None;
-        // R8 round 6: a bound graph statement reads only the shards of its
+        // A bound graph statement reads only the shards of its
         // graph rows' keys.
         let plan = match &self.router.graph_bound {
             Some(b) if b.text == text => b.plan.narrow(plan, &b.rows),
@@ -1493,7 +1490,7 @@ impl PassSession {
             ids: self.id_mode(),
         };
         let tenant = self.tenant.as_deref().map(|t| t.tenant);
-        // Chapter 20: writes count into the gateway's sketches.
+        // Writes count into the gateway's sketches.
         let mut pp = crate::write_load::observe(
             tenant,
             text,
@@ -1520,7 +1517,7 @@ impl PassSession {
         Ok(pp)
     }
 
-    /// The session's `NO_AUTO_VALUE_ON_ZERO` (chapter 19).
+    /// The session's `NO_AUTO_VALUE_ON_ZERO`.
     fn id_mode(&self) -> sprig_router::planner::IdMode {
         let zero = self
             .bs
@@ -1536,7 +1533,7 @@ impl PassSession {
     /// Takes an INSERT's `AUTO_INCREMENT` values from the tenant's ID
     /// blocks, in the session's `auto_increment_increment` and
     /// `auto_increment_offset` series, and raises the sequence past its
-    /// explicit values (chapter 19).
+    /// explicit values.
     async fn take_ids(&self, f: &sprig_router::plan::IdFill) -> Result<IdsTaken> {
         let ts = self
             .tenant
@@ -1737,7 +1734,7 @@ impl PassSession {
                 .await
             }
             // An INSERT with ID-block values runs through the executor, so
-            // its OK packet carries the first value (chapter 19).
+            // its OK packet carries the first value.
             Plan::Pass(t) if self.router.ids.is_none() => {
                 metrics::counter!("sprig_router_statements_total", "plan" => "pass").increment(1);
                 let cluster = ClusterId::new(&t.cluster)
@@ -1839,7 +1836,7 @@ impl PassSession {
                 gather: sprig_router::GatherLimits {
                     max_rows: cfg.gather_max_rows,
                     max_concurrent: cfg.gather_max_concurrent,
-                    // Analytic reads (chapter 17, R3).
+                    // Analytic reads.
                     analytics: cfg.analytics,
                 },
                 fk_lock_wait: cfg.fk_lock_wait_seconds,
@@ -1847,7 +1844,7 @@ impl PassSession {
             let mut budget = Budget::mb(cfg.max_statement_memory_mb);
             let r = sprig_router::execute_to(plan, &mut be, &mut budget, &mut sink).await;
             // `INSERT IGNORE` that skipped rows: MariaDB reports the first
-            // generated value it really inserted (chapter 19).
+            // generated value it really inserted.
             if let (Ok(Output::Ok(ok)), Some((rb, rows))) = (&r, &readback)
                 && ok.affected > 0
                 && ok.affected < *rows
@@ -1919,7 +1916,7 @@ impl PassSession {
                 let mut p = OkPacket::new(status);
                 p.affected_rows = ok.affected;
                 p.last_insert_id = ok.last_insert_id;
-                // Chapter 19: the first generated value, as MariaDB reports
+                // The first generated value, as MariaDB reports
                 // a multi-row INSERT; it becomes the session's
                 // LAST_INSERT_ID(), which reaches a connection before a
                 // statement reads it.
@@ -1980,8 +1977,8 @@ impl PassSession {
         }
     }
 
-    /// `COM_STMT_PREPARE` of a statement naming sharded tables (H9,
-    /// bugfix3): the backend prepares it, for its parameter and column
+    /// `COM_STMT_PREPARE` of a statement naming sharded tables: the backend
+    /// prepares it, for its parameter and column
     /// definitions, with every such table in one shard's schema
     /// ([`sprig_router::metadata_sql`]), on that shard's cluster when the
     /// session isn't in a transaction. A table the advisor regrouped is no
@@ -2026,7 +2023,7 @@ impl PassSession {
         Some(r)
     }
 
-    /// bugfix-8: runs the `information_schema` branch `sql` on `cluster`
+    /// Runs the `information_schema` branch `sql` on `cluster`
     /// (a group's schema that isn't on the session's cluster) as the
     /// session, and renders its rows for the second planning pass
     /// ([`sprig_sql::names::inline_rows`]).
@@ -2205,7 +2202,7 @@ impl PassSession {
                 }
                 match ran {
                     Ran::Done(step) => Ok(ExecRoute::Done(step.status)),
-                    // Chapter 19: new values, the statement again.
+                    // A collision: new values, the statement again.
                     Ran::Collision(_) if self.router.collisions < COLLISION_RETRIES => {
                         self.router.collisions += 1;
                         metrics::counter!("sprig_ids_collision_retries_total").increment(1);
@@ -2327,7 +2324,7 @@ pub(super) enum ExecRoute {
     Answered,
 }
 
-/// Chapter 29 (bugfix-25): a digest of where `cat`'s tenant's shards are
+/// A digest of where `cat`'s tenant's shards are
 /// (every shard schema's range epoch, every group's map version, the
 /// clusters), which every split, merge, move, re-key and regroup changes,
 /// and the clusters holding them. `None` for a tenant without sharded or
@@ -2356,7 +2353,7 @@ pub(crate) fn placement_digest(
     Some((h.finish(), clusters))
 }
 
-/// Chapter 21's view of a tenant's shards (`tenant::ddl::ShardedDdl`):
+/// The schema-change view of a tenant's shards (`tenant::ddl::ShardedDdl`):
 /// for a template schema and a table, the shard schemas holding it and
 /// their clusters (a sharded table: its group's shards; a reference table:
 /// each copy); for database-level objects (`None`), every shard schema of
@@ -2493,7 +2490,7 @@ fn as_db(e: &SprigError) -> Option<DbError> {
 /// `schema` (the session's default schema). A session without one (an
 /// internal session, a client that names every table) anchors on its
 /// tenant's first database's first schema, which is on the session's own
-/// cluster and has `__sprig_dtx` (R34, bugfix5). Before, the anchor's
+/// cluster and has `__sprig_dtx`. Before, the anchor's
 /// schema was empty, and a transaction whose first statement was
 /// unsharded and that then wrote on two clusters failed its `COMMIT` with
 /// 1102 (`Incorrect database name ''`): the decision row went to that
@@ -2601,7 +2598,7 @@ mod tests {
         let map = MemoryNameMap::new(TenantId(7))
             .with_db(2, "b", 0, 0)
             .with_db(1, "a", 0, 0);
-        // R34: before, the anchor's schema was '' (COMMIT then failed 1102).
+        // Before, the anchor's schema was '' (COMMIT then failed 1102).
         let r = home_ref_of(None, Some(&map));
         let first = map.database("a").unwrap().shards[0].to_string();
         assert_eq!(r.schema, first);

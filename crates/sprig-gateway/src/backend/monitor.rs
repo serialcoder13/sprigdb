@@ -1,20 +1,19 @@
 //! The per-cluster monitor: health checks every `backend.health_interval_ms`
-//! and position polling every `reads.replica_position_poll_ms` (chapter
-//! 06, "Health checks" and "Read routing"), on one side connection per
-//! node, all nodes in parallel, each check with a 1 s timeout.
+//! and position polling every `reads.replica_position_poll_ms`, on one side
+//! connection per node, all nodes in parallel, each check with a 1 s timeout.
 //!
 //! The checks log in as the cluster's `sprig_gw` monitoring account
 //! (`SLAVE MONITOR` only), or, while it can't log in, as the first login's
 //! backend account ([`Backends::monitor_connection`]); a connection opened
 //! as the latter is replaced once `sprig_gw` may be tried again. Each
 //! poll also reads the node's `max_allowed_packet`; the smallest of a
-//! round is the cluster's packet limit (chapter 05, "Packet limit").
+//! round is the cluster's packet limit.
 //!
-//! Every node's position is polled, Galera nodes included (decision D13):
-//! a read that must see a write goes only to a node whose position covers
-//! it. After each round the monitor estimates every node's lag and marks
-//! the nodes that are behind (no reads), with `sprig_backend_node_behind`
-//! and the `backend.node_behind` and `backend.node_caught_up` events.
+//! Every node's position is polled, Galera nodes included: a read that must
+//! see a write goes only to a node whose position covers it. After each
+//! round the monitor estimates every node's lag and marks the nodes that
+//! are behind (no reads), with `sprig_backend_node_behind` and the
+//! `backend.node_behind` and `backend.node_caught_up` events.
 
 use std::collections::HashMap;
 use std::sync::Arc;

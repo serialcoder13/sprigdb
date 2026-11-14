@@ -74,7 +74,7 @@ openssl s_client -connect gw1.example.internal:3306 -starttls mysql -servername 
 
 **Confirm.** `sprigctl settings get listener.mysql.client_cert` and `... tls.bundles.default.client_ca_path`. `sprig_gateway_tls_handshakes_total{outcome=...}` counts the failures. Check the client's certificate against the CA with `openssl verify -CAfile client-ca.pem client.pem`.
 
-**Fix.** Issue the client a certificate from the configured CA, or use `optional` so clients without one still connect. The CA file is read when listener settings apply; after replacing it, change a listener setting or restart the gateway.
+**Fix.** Issue the client a certificate from the configured CA, or use `optional` so clients without one still connect. Gateways reload the CA file within a few seconds of it changing, with no restart; if a changed file doesn't load, the gateway log shows `gateway.client_ca_rejected` and the old CAs stay in use. While you rotate a CA, keep both the old and the new one in the file.
 
 ### "Access denied" only when connecting without TLS
 
@@ -88,12 +88,14 @@ openssl s_client -connect gw1.example.internal:3306 -starttls mysql -servername 
 
 - The client sent no certificate, or the listener doesn't ask for one (`listener.<name>.client_cert` is `off`, the default).
 - The certificate's subject or issuer isn't exactly the name the account requires. Names are compared as text in the form `/C=GB/O=Acme/CN=billing`, in certificate order.
-- The protocol doesn't carry certificate details to the login: accounts with a certificate requirement can't log in over Bolt, AMQP or HTTP, and accounts with `SUBJECT` or `ISSUER` can't log in over Kafka.
-- The login was handed to another data centre for the tenant's residency, which carries no subject or issuer.
+- The certificate was signed by a CA the gateway no longer trusts, after the CA file changed.
+- The login was handed to another data centre for the tenant's residency by a gateway of an earlier release, which carries no subject or issuer.
 
-SprigDB checks this after the password and answers 1045; the audit event's `reason` is `tls_required`.
+Every protocol checks the requirement: MySQL and MariaDB answer 1045, MongoDB 18 `AuthenticationFailed`, Redis `WRONGPASS`, Kafka `SASL_AUTHENTICATION_FAILED`, Bolt `Neo.ClientError.Security.Unauthorized`, AMQP 403 `ACCESS_REFUSED` and HTTP 401. The audit event's `reason` is `tls_required`. The same applies to an AMQP `EXTERNAL` login, which is also refused for an account with no certificate requirement.
 
-**Fix.** Compare the account's requirement with `openssl x509 -in client.pem -noout -subject -issuer -nameopt compat`, set the listener's `client_cert` to `optional`, and connect on a protocol that checks certificates. See [Client certificates](../security/tls.md#client-certificates).
+**Confirm.** `SHOW CREATE USER billing;` shows the account's `REQUIRE` clause.
+
+**Fix.** Compare the account's requirement with `openssl x509 -in client.pem -noout -subject -issuer -nameopt compat`, set the listener's `client_cert` to `optional`, and send the certificate with the login. See [Client certificates](../security/tls.md#client-certificates).
 
 ## caching_sha2_password fails on the first login
 

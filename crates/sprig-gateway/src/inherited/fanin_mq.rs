@@ -1,5 +1,5 @@
-//! AMQP fan-in consumers and the ready index (chapter 42, "Fan-in:
-//! reading every member's instance"; chapter 50, "Fan-in consumers"):
+//! AMQP fan-in consumers and the ready index, reading every member's
+//! instance:
 //!
 //! ```text
 //! basic.consume(q, arguments {x-sprig-fan-in: true})   (1.0: link property)

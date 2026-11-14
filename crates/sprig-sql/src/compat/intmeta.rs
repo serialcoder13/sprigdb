@@ -1,5 +1,4 @@
-//! Integer result metadata on port 3306 (chapter 28, "Output on port
-//! 3306", build step 11; `decisions/mysql-persona-gaps.md` row 34).
+//! Integer result metadata on port 3306.
 //!
 //! MySQL 8.4 types every integer an expression computes as `LONGLONG` (8):
 //! literals, arithmetic, comparisons, `CAST(.. AS SIGNED)`, integer
@@ -269,7 +268,7 @@ fn fix_of(e: &Expr) -> Fix {
     match e {
         // User and system variables: MySQL's integers are LONGLONG, and so
         // are MariaDB's, except a value the gateway answers itself as a
-        // literal (`@@max_connections`, chapter 06).
+        // literal (`@@max_connections`).
         Expr::Identifier(i) if i.value.starts_with('@') => Fix::LongLong,
         Expr::CompoundIdentifier(p) if p.first().is_some_and(|i| i.value.starts_with('@')) => {
             Fix::LongLong

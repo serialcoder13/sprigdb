@@ -182,7 +182,7 @@ async fn tenant_endpoints_by_sni() {
     c.disconnect().await.unwrap();
 
     // SNI wins: a dotted name naming another tenant is that tenant's
-    // user name, which doesn't exist (chapter 14).
+    // user name, which doesn't exist.
     let conflict = e.connect(&acme, "globex.app", &e.password, None).await;
     assert_eq!(errno(&conflict), Some(1045), "globex.app at {acme}");
     let unknown = e

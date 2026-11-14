@@ -1,5 +1,4 @@
-//! `sql_mode` on the MySQL persona (chapter 28, "Emulated system
-//! variables"; R4).
+//! `sql_mode` on the MySQL persona.
 //!
 //! A 3306 session has two values:
 //!
@@ -221,11 +220,11 @@ const fn expand(bits: u64) -> u64 {
     b
 }
 
-/// MariaDB-only modes that SprigDB's own output can carry: stored programs
-/// keep the `sql_mode` MariaDB recorded, and `mysqldump` through 3306
-/// writes it back as `SET sql_mode = '...,NO_AUTO_CREATE_USER,...'`
-/// (measured with the M0.3 harness). They are accepted and ignored, so a
-/// dump restores; MySQL 8.4 itself would refuse them with 1231.
+/// MariaDB-only modes that SprigDB's own output can carry: stored programs keep
+/// the `sql_mode` MariaDB recorded, and `mysqldump` through 3306 writes it back
+/// as `SET sql_mode = '...,NO_AUTO_CREATE_USER,...'` (measured). They are
+/// accepted and ignored, so a dump restores; MySQL 8.4 itself would refuse them
+/// with 1231.
 const MARIADB_REPORTED: &[&str] = &[
     "NO_AUTO_CREATE_USER",
     "TIME_ROUND_FRACTIONAL",
@@ -296,8 +295,8 @@ impl Mode {
             .join(",")
     }
 
-    /// Whether `ONLY_FULL_GROUP_BY` is on (the gateway's check, chapter
-    /// 28; not sent to MariaDB).
+    /// Whether `ONLY_FULL_GROUP_BY` is on (the gateway's check; not
+    /// sent to MariaDB).
     #[must_use]
     pub const fn only_full_group_by(self) -> bool {
         self.0 & ONLY_FULL_GROUP_BY != 0

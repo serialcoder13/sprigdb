@@ -1,5 +1,4 @@
-//! Basic packets (chapter 05, "Other packets", "Capability flags" and the
-//! handshake tables): flags, personas, OK, ERR, EOF and the connection-phase
+//! Basic packets: flags, personas, OK, ERR, EOF and the connection-phase
 //! packets. Each has `decode` and `encode`, since the gateway is both a
 //! server and a client.
 
@@ -83,7 +82,7 @@ bitflags::bitflags! {
         const SESSION_TRACK = 1 << 23;
         /// OK instead of EOF packets.
         const DEPRECATE_EOF = 1 << 24;
-        /// Resultset metadata may be omitted (R4).
+        /// Resultset metadata may be omitted.
         const OPTIONAL_RESULTSET_METADATA = 1 << 25;
         /// zstd compression.
         const ZSTD_COMPRESSION_ALGORITHM = 1 << 26;
@@ -105,7 +104,7 @@ bitflags::bitflags! {
         const MARIADB_CLIENT_STMT_BULK_OPERATIONS = 1 << 34;
         /// MariaDB: extended column metadata (type names).
         const MARIADB_CLIENT_EXTENDED_METADATA = 1 << 35;
-        /// MariaDB: cached resultset metadata (R4).
+        /// MariaDB: cached resultset metadata.
         const MARIADB_CLIENT_CACHE_METADATA = 1 << 36;
         /// MariaDB: per-row results from bulk execution.
         const MARIADB_CLIENT_BULK_UNIT_RESULTS = 1 << 37;
@@ -140,9 +139,8 @@ impl Caps {
         Self::from_bits_retain(u64::from(low) | u64::from(extended) << 32)
     }
 
-    /// What a gateway listener of this persona advertises (chapter 05's
-    /// capability table), without `SSL`, which depends on the listener's
-    /// TLS mode.
+    /// What a gateway listener of this persona advertises, without `SSL`,
+    /// which depends on the listener's TLS mode.
     #[must_use]
     pub fn server_default(persona: Persona) -> Self {
         let common = Caps::FOUND_ROWS
@@ -218,7 +216,7 @@ bitflags::bitflags! {
     }
 }
 
-/// The server a gateway listener impersonates (chapter 05).
+/// The server a gateway listener impersonates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Persona {
     /// MySQL 8.4, port 3306.

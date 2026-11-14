@@ -1,15 +1,15 @@
-//! Event streams in a tenant session (chapter 45, R9: build steps 2 and 3,
-//! and the SQL reads).
+//! Event streams in a tenant session: stream DDL, publishing and the SQL
+//! reads.
 //!
-//! Before chapter 07's name plan, each statement of a tenant text goes to
+//! Before the name layer's plan, each statement of a tenant text goes to
 //! [`sprig_streams::sql::handle`] with the tenant's streams from the
 //! session's catalog snapshot. Stream DDL runs here: physical tables on the
-//! shards as `sprig_ctl` (like chapter 41's deploys), the catalog row in
+//! shards as `sprig_ctl` (like logic deploys), the catalog row in
 //! one versioned change, and the stream's feed subscription. A publish or a
 //! read becomes a statement on the outbox or the log, which runs through
 //! this same session ([`PassSession::tenant_text`]) in internal mode, as
-//! chapter 32's plans do: logical names, chapter 29's checks, the session's
-//! connection and transaction, so a publish commits or rolls back with the
+//! typed-table plans do: logical names, the authorization checks, the
+//! session's connection and transaction, so a publish commits or rolls back with the
 //! client's other writes.
 //!
 //! After `ALTER TABLE t SPRIG SET (stream.change_topic = ...)` succeeds,
@@ -187,7 +187,7 @@ impl Host for GwHost<'_> {
     }
 
     async fn change_view(&mut self, def: &StreamDef) -> Result<()> {
-        // Chapter 29 (RL47).
+        // The change topic's row-level security filter view.
         Box::pin(self.sess.deploy_change_view(def)).await
     }
 
@@ -196,7 +196,7 @@ impl Host for GwHost<'_> {
         db_name: &str,
         def: &StreamDef,
     ) -> Result<Option<sprig_streams::read::RecordFilter>> {
-        // Chapter 29 (RL44): the records whose images this session's
+        // The records whose images this session's
         // policies show.
         let (Some(object), Some(db)) = (def.source_object, self.db_id(db_name)) else {
             return Err(crate::tenant::rls_streams::bound(
@@ -443,7 +443,7 @@ impl PassSession {
         }
     }
 
-    /// Chapter 45's step of [`PassSession::tenant_text`]: `None` when the
+    /// The streams step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't the stream layer's.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn tenant_streams(

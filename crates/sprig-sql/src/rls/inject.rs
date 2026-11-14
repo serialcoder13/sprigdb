@@ -1,7 +1,6 @@
-//! The rewrite for tables (chapter 29, "Evaluation: the rewrite"; build
-//! step 23): every reference to a protected table gets its policies'
-//! predicate, before any join, so MariaDB evaluates them per shard and the
-//! router prunes with them.
+//! The rewrite for tables: every reference to a protected table gets its
+//! policies' predicate, before any join, so MariaDB evaluates them per shard
+//! and the router prunes with them.
 //!
 //! ```text
 //! inject(text):
@@ -21,14 +20,13 @@
 //!   verify: the edited parse view parses to the expected AST, else 39366
 //! ```
 //!
-//! The text is edited, not regenerated: the policy predicate comes first
-//! and the client's own condition stays in parentheses, so comments,
-//! hints and literals survive byte for byte and nothing the client wrote
-//! can change what the predicate means. The predicate is the same as the
-//! chapter's filtered derived table (a filter on the base relation below
-//! every join), in the form the router can push to shards and prune with;
-//! the derived table remains for `USING` and `NATURAL` joins on the
-//! nullable side.
+//! The text is edited, not regenerated: the policy predicate comes first and
+//! the client's own condition stays in parentheses, so comments, hints and
+//! literals survive byte for byte and nothing the client wrote can change what
+//! the predicate means. The predicate is the same as a filtered derived table
+//! (a filter on the base relation below every join), in the form the router can
+//! push to shards and prune with; the derived table remains for `USING` and
+//! `NATURAL` joins on the nullable side.
 
 use std::ops::ControlFlow;
 

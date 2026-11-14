@@ -1,5 +1,4 @@
-//! SASL on the Kafka listener onto chapter 14's logins (chapter 45,
-//! "Authentication").
+//! SASL on the Kafka listener onto the gateway's logins.
 //!
 //! - **PLAIN** runs the same login as HTTP Basic: the tenant from the TLS
 //!   server name under `listener.tenant_sni_suffixes`, else the user name's
@@ -8,7 +7,7 @@
 //!   audit.
 //! - **SCRAM-SHA-256 and SCRAM-SHA-512** resolve the account the same way,
 //!   take its `scram_sha_256` (or `scram_sha_512`) verifier from the
-//!   tenant's auth cache (chapter 14 stores both with every password), run
+//!   tenant's auth cache (both are stored with every password), run
 //!   the exchange, and then the same policy order on the result. With a
 //!   retained second password (`RETAIN CURRENT PASSWORD`) sharing the
 //!   primary's salt, the proof may match either. An account without such
@@ -17,7 +16,7 @@
 //!
 //! Accounts whose password was set before SCRAM verifiers were stored get
 //! them at their next successful PLAIN login (or MySQL full or HTTP Basic
-//! login): chapter 14's upgrade on login. Logins are labelled `kafka` in
+//! login): the upgrade on login. Logins are labelled `kafka` in
 //! metrics and audit events.
 
 use std::sync::Arc;
@@ -32,7 +31,7 @@ use sprig_proto_mysql::Persona;
 use sprig_proto_mysql::auth::{AuthPath, AuthVerdict, LoginFlow, Outcome};
 use zeroize::Zeroizing;
 
-/// SCRAM iterations of decoys (chapter 14's default).
+/// SCRAM iterations of decoys (the default for stored verifiers).
 const DECOY_ITERATIONS: u32 = DEFAULT_SCRAM_ITERATIONS;
 
 /// Logins for the Kafka listener.
@@ -65,14 +64,17 @@ impl KafkaIdentity {
                 client_ip: c.peer.ip(),
                 tls: c.tls,
                 client_cert: c.client_cert,
-                client_dn: None,
+                client_dn: c
+                    .client_dn
+                    .clone()
+                    .map(|(subject, issuer)| sprig_auth::mysql::ClientDn { subject, issuer }),
                 can_handle_expired_password: false,
             })
             .await
     }
 }
 
-/// The broker's principal for a login, keeping chapter 14's.
+/// The broker's principal for a login, keeping the login's principal.
 fn principal(p: &AuthPrincipal) -> Principal {
     Principal {
         tenant_id: p.tenant.map_or(0, |t| t.0),

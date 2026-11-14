@@ -1,4 +1,4 @@
-//! Automatic document indexes in chapter 31's catalog (decision S133).
+//! Automatic document indexes in the catalog.
 //!
 //! An automatic index on a collection table (`sprig_advisor::autoindex::doc`)
 //! is built like any other: field columns, then the MariaDB index, on
@@ -18,8 +18,8 @@
 //! all of it in one versioned catalog change, so every gateway reloads it
 //! ```
 //!
-//! The field columns stay when an index is unregistered (chapter 13:
-//! retiring drops only the index); the engine reads them only for paths
+//! The field columns stay when an index is unregistered (retiring drops
+//! only the index); the engine reads them only for paths
 //! some registered index holds.
 
 use std::collections::{BTreeMap, BTreeSet};

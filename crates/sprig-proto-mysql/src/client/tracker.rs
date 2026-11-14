@@ -1,5 +1,4 @@
-//! Session-state tracking on the client side (chapter 05, "Other packets";
-//! chapter 06, "New connections"): what the server reported in the
+//! Session-state tracking on the client side: what the server reported in the
 //! session-state blocks of its OK packets.
 
 use std::collections::BTreeMap;

@@ -97,8 +97,8 @@ impl MyConn {
 
     /// A write the caller ran on [`Self::raw`] succeeded: a held branch
     /// records it (with the connection's affected rows), as [`Self::exec`]
-    /// does. `sql` must carry its values in the text (R8 round 5: the
-    /// graph store's statements).
+    /// does. `sql` must carry its values in the text (as the graph
+    /// store's statements do).
     pub fn note_write(&mut self, sql: &str) {
         self.record(sql);
     }
@@ -601,7 +601,7 @@ impl ClusterAdmin for MyAdmin {
         Ok(out)
     }
 
-    #[allow(clippy::many_single_char_names)] // the book's names: c, d, g, n, r
+    #[allow(clippy::many_single_char_names)] // short names: c, d, g, n, r
     async fn replay_redo(
         &self,
         cluster: &ClusterId,

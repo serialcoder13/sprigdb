@@ -1,5 +1,4 @@
-//! MySQL's functional key parts on port 3306 (chapter 28, "Functional
-//! index parts"; build step 10; R4 round 3).
+//! MySQL's functional key parts on port 3306.
 //!
 //! MySQL 8.4 indexes an expression: `INDEX i ((lower(email)))`. MariaDB
 //! 11.8 can't (MDEV-35853) and fails with 1064; it can index a virtual
@@ -10,11 +9,11 @@
 //! column is `!hidden!i!0!0`). MariaDB 11.8 uses an indexed virtual column
 //! for a condition written over its expression, so queries need nothing.
 //!
-//! Shown as MySQL shows it: `SHOW CREATE TABLE` puts `((e))` back in the
-//! key and leaves the column out ([`super::schema::mysql_functional_parts`]);
-//! `SHOW INDEX` and `information_schema.STATISTICS` give `NULL` as the
-//! column and `e` as `Expression`; chapter 07 already hides `_sprig_`
-//! columns everywhere else.
+//! Shown as MySQL shows it: `SHOW CREATE TABLE` puts `((e))` back in the key
+//! and leaves the column out ([`super::schema::mysql_functional_parts`]); `SHOW
+//! INDEX` and `information_schema.STATISTICS` give `NULL` as the column and `e`
+//! as `Expression`; the name layer already hides `_sprig_` columns everywhere
+//! else.
 //!
 //! The column's type: `CAST(x AS t)` gives `t` (`CHAR(n)` as `VARCHAR(n)`,
 //! `SIGNED` as `BIGINT`, ...); a string function of one column (`lower`,
@@ -326,11 +325,9 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
             "abs" => first_col
                 .filter(|t| is_integer_type(t))
                 .map(|_| "BIGINT".to_owned()),
-            // R4 round 5: string columns and literals, `VARCHAR` of their
-            // lengths' sum, as MySQL types it.
-            // R4 round 5: string columns and literals, `VARCHAR` of their
-            // lengths' sum (`CONCAT_WS`: the separator once between each
-            // pair), as MySQL types it.
+            // String columns and literals, `VARCHAR` of their lengths' sum
+            // (`CONCAT_WS`: the separator once between each pair), as MySQL
+            // types it.
             "concat" | "concat_ws" => {
                 let mut lens = Vec::new();
                 for &(x, y) in &args {
@@ -347,12 +344,12 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
             _ => None,
         };
     }
-    // R4 round 5: `CASE ... END`, the type its results share (strings:
+    // `CASE ... END`, the type its results share (strings:
     // the longest).
     if s.word(a, b"CASE") && s.word(b, b"END") {
         return case_type(s, a, b, cols);
     }
-    // R4 round 5: a comparison at the top level is 0, 1 or NULL.
+    // A comparison at the top level is 0, 1 or NULL.
     {
         let mut d = 0i32;
         for k in a..=b {
@@ -374,7 +371,7 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
             }
         }
     }
-    // `c COLLATE x` over a string column (R4 round 4): the column's type
+    // `c COLLATE x` over a string column: the column's type
     // with that collation.
     if b == a + 2 && s.word(a + 1, b"COLLATE") && s.t[a + 2].kind.is_ident_like() {
         let t = col_type(a)?.clone();
@@ -385,8 +382,8 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
         return Some(format!("{base} COLLATE {}", s.text(a + 2, a + 2)));
     }
     // Arithmetic over numeric columns and literals: integers alone give
-    // `BIGINT`; a `/`, a decimal literal or a non-integer column (R4
-    // round 4) gives `DOUBLE`.
+    // `BIGINT`; a `/`, a decimal literal or a non-integer column gives
+    // `DOUBLE`.
     let mut any_col = false;
     let mut real = false;
     for k in a..=b {
@@ -557,10 +554,9 @@ fn apply(sql: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
     out
 }
 
-/// A cheap test on the bytes: a functional part opens with `(` right
-/// after the part list's `(` or a `,`, once whitespace is gone (R4 round
-/// 5: Django's mixed lists, `(author_id DESC, (LOWER(title)) ASC)`, have
-/// no `((`).
+/// A cheap test on the bytes: a functional part opens with `(` right after the
+/// part list's `(` or a `,`, once whitespace is gone (Django's mixed lists,
+/// `(author_id DESC, (LOWER(title)) ASC)`, have no `((`).
 fn maybe_functional(sql: &[u8]) -> bool {
     let mut last = 0u8;
     for &b in sql {
@@ -585,7 +581,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
 /// The table whose column types a `CREATE INDEX` or `ALTER TABLE ... ADD
 /// INDEX` with functional parts needs (its text as written, perhaps
 /// qualified), when [`rewrite`] can't type a part from the statement
-/// alone (R4 round 4: the gateway reads them from `information_schema`
+/// alone (the gateway reads them from `information_schema`
 /// and calls [`rewrite_with`]).
 #[must_use]
 pub fn needs_types(sql: &[u8], opts: &LexOptions) -> Option<String> {
@@ -749,7 +745,7 @@ pub fn rewrite_with(
 
 /// `DROP INDEX i ON t` or `ALTER TABLE t DROP {INDEX | KEY} i` alone
 /// (Django's `remove_index` and `remove_constraint`): the table as
-/// written and the index's name (R4 round 5, [`fk_indexes_kept`]).
+/// written and the index's name (see [`fk_indexes_kept`]).
 #[must_use]
 pub fn drop_index_target(sql: &[u8], opts: &LexOptions) -> Option<(String, String)> {
     if sql.len() > 4096 || !sql.windows(4).any(|w| w.eq_ignore_ascii_case(b"DROP")) {
@@ -801,7 +797,7 @@ pub struct IndexPart {
 }
 
 /// The foreign keys MySQL would still back with their own index once
-/// `dropping` is gone (R4 round 5; Django's `test_composed_desc_func_index_with_fk`).
+/// `dropping` is gone (Django's `test_composed_desc_func_index_with_fk`).
 ///
 /// Both servers create an index for a foreign key and drop it silently
 /// when a later index can serve the key. MySQL never counts an index whose
@@ -911,7 +907,7 @@ mod tests {
 
     #[test]
     fn concat_and_comparisons() {
-        // R4 round 5: MySQL indexes these; the hidden column needs a type.
+        // MySQL indexes these; the hidden column needs a type.
         let out = rw("CREATE TABLE fx (id INT PRIMARY KEY, a INT, s VARCHAR(20), KEY k2 ((CONCAT(s, 'x'))), KEY k3 ((a BETWEEN 1 AND 5)), KEY k4 ((a = 1)))").unwrap();
         assert!(
             out.contains("` VARCHAR(21) GENERATED ALWAYS AS (CONCAT(s, 'x'))"),
@@ -946,7 +942,7 @@ mod tests {
     fn mixed_part_lists() {
         // Django's Index(F("author").desc(), Lower("title").asc(), "pub_date")
         // and UniqueConstraint(F("height").desc(), "uuid", Lower("name").asc()):
-        // no `((` anywhere (R4 round 5).
+        // no `((` anywhere.
         let o = LexOptions::mysql84();
         let known: BTreeMap<String, String> = [("title".to_owned(), "varchar(100)".to_owned())]
             .into_iter()

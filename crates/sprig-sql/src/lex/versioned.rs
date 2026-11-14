@@ -1,5 +1,5 @@
 //! Executable comments: `/*!NNNNN ... */` and MariaDB's `/*M!NNNNNN ... */`
-//! (chapter 07, "Lexing per persona"; chapter 28, "One statement").
+//! per persona.
 //!
 //! The rules:
 //!
@@ -17,7 +17,7 @@
 //! names. [`neutralize_edits`] finds such comments and turns each into a
 //! plain comment by blanking its `!`. A comment the persona runs and the
 //! backend skips is left alone here: the gateway did rewrite its body, and
-//! whether MariaDB should run it is the translator's business (chapter 28).
+//! whether MariaDB should run it is the translator's business.
 
 use sprig_proto_mysql::packets::Persona;
 
@@ -104,7 +104,7 @@ pub fn neutralize_edits(src: &[u8], tokens: &[Token], backend_version: u32) -> V
 }
 
 /// A MySQL-only executable comment's body MariaDB understands, spelled
-/// MariaDB's way (chapter 28 build step 1, the R0 subset of the DDL rules):
+/// MariaDB's way (the core of the DDL rules):
 /// `mysqldump` and `SHOW CREATE TABLE` on MySQL 8.4 write
 /// `/*!80000 INVISIBLE */` after an invisible index (MariaDB's `IGNORED`),
 /// `/*!80023 INVISIBLE */` after an invisible column (the same word on
@@ -128,13 +128,13 @@ fn mariadb_body(version: u32, words: &[&[u8]]) -> Option<String> {
     }
 }
 
-/// On the MySQL persona: rewrites each executable comment the persona runs
-/// but MariaDB (at `backend_version`) would skip, when its body is one
-/// MariaDB understands with the same meaning (see [`mariadb_body`]); the
-/// comment becomes that text, so the backend applies it. Other such
-/// comments stay, and MariaDB skips them, as before: the R4 rules cover
-/// the rest (`DEFAULT ENCRYPTION`, `SET` of MySQL-only variables). `None`
-/// when nothing changes.
+/// On the MySQL persona: rewrites each executable comment the persona runs but
+/// MariaDB (at `backend_version`) would skip, when its body is one MariaDB
+/// understands with the same meaning (see [`mariadb_body`]); the comment
+/// becomes that text, so the backend applies it. Other such comments stay, and
+/// MariaDB skips them, as before: other translator rules cover the rest
+/// (`DEFAULT ENCRYPTION`, `SET` of MySQL-only variables). `None` when nothing
+/// changes.
 #[must_use]
 pub fn expand_for_mariadb(src: &[u8], tokens: &[Token], backend_version: u32) -> Option<Vec<u8>> {
     let mut edits: Vec<(usize, usize, String)> = Vec::new();

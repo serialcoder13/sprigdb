@@ -10,35 +10,35 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-# Chapter 13's sprig_advisor_autoindex_* metrics.
+# The sprig_advisor_autoindex_* metrics.
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Chapter 08: owners' crates depend on sprig-catalog, never the reverse
+# Owners' crates depend on sprig-catalog, never the reverse
 # (both layer 2). The automatic-indexing tables are this crate's migration
 # module.
 sprig-catalog.workspace = true
 sprig-common.workspace = true
-# Validation (chapter 13 steps 7-9) connects to the validation node with
+# Validation connects to the validation node with
 # sprig-cluster's probe sessions and reads its profile types.
 sprig-cluster.workspace = true
 sprig-settings.workspace = true
-# Chapter 15's keys, groups, shard maps and `_sprig_rk` (chapter 16's
-# first design creates groups and back-fills hashes).
+# Keys, groups, shard maps and `_sprig_rk` (the advisor's first design
+# creates groups and back-fills hashes).
 sprig-shard.workspace = true
-# The shapes candidates are generated from (chapter 12, `sprig-workload::shape`).
+# The shapes candidates are generated from (`sprig-workload::shape`).
 sprig-workload.workspace = true
-# Document candidates (chapter 13 "Other models", R5; S131): the field
-# columns and class codes of chapter 31's doc indexes, so an automatic
-# index is built exactly as `createIndexes` builds one.
+# Document candidates: the field columns and class codes of document
+# indexes, so an automatic index is built exactly as `createIndexes` builds
+# one.
 sprig-doc = { path = "../sprig-doc" }
-# Which tables stored code names (chapter 16, bugfix-31): the lexer and
+# Which tables stored code names: the lexer and
 # the row-level security swap's table positions.
 sprig-sql.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-# xxh3_64 for automatic index names and definition hashes (chapter 13).
+# xxh3_64 for automatic index names and definition hashes.
 twox-hash.workspace = true
 
 [dev-dependencies]

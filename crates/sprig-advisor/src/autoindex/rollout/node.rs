@@ -327,7 +327,7 @@ pub(crate) fn galera_unfit(s: &WsrepState, min_size: u32) -> Option<String> {
 
 /// Whether `info` is DDL on `schema.table` from someone other than
 /// automatic indexing. `db` is the thread's default database. Statements
-/// naming `sprig_auto_` are ours (users can't use the name, chapter 13).
+/// naming `sprig_auto_` are ours (users can't use the name).
 #[must_use]
 pub fn is_user_ddl(info: &str, db: Option<&str>, schema: &str, table: &str) -> bool {
     let lower = info.to_ascii_lowercase();

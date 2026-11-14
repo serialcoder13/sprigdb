@@ -1,4 +1,4 @@
-//! Galera builds until the mover's copy-and-swap exists (M0.6). See the
+//! Galera builds until the mover's copy-and-swap exists. See the
 //! module docs of [`rollout`](super) and [`GaleraSwitch`](super::GaleraSwitch).
 //!
 //! **Rolling RSU** ([`build_rsu`]), node by node, the writer last:
@@ -21,7 +21,7 @@
 //! `sql_log_bin = 0` because an RSU statement in the binary log would be a
 //! GTID of this node alone, diverging the nodes' binary logs (MariaDB
 //! refuses it under `wsrep_mode = DISALLOW_LOCAL_GTID`); the cost is that
-//! asynchronous replicas of a Galera node don't get the index (none in R0).
+//! asynchronous replicas of a Galera node don't get the index (none yet).
 //! An index on some nodes only, after an abort, is harmless for row-based
 //! write sets; the next attempt skips the nodes that have it.
 //!
@@ -253,7 +253,7 @@ async fn prepare(
     Ok((w, nodes.clone(), wi))
 }
 
-/// A field-column definition's columns (R6 round 6), added on the writer
+/// A field-column definition's columns, added on the writer
 /// in TOI (instant, so every node gets them at once) before any index
 /// build; the column signature is taken again after.
 async fn add_fields(

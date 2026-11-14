@@ -1,12 +1,11 @@
-//! Brokers and coordinator leases (chapter 45, "Brokers and metadata",
-//! "Consumer groups").
+//! Brokers and coordinator leases.
 //!
 //! - **Brokers** are the DC's ready gateways that run the `kafka` listener,
-//!   from their registry records (chapter 04), read at most once a second.
+//!   from their registry records, read at most once a second.
 //!   The broker id is the gateway's slot: unique among live gateways of a
 //!   DC, and a small integer as Kafka needs. The host is the gateway's
 //!   own `[gateway] kafka_advertise_host` from its record when set (one
-//!   public name per VM; hardening round 3), else, for this gateway,
+//!   public name per VM), else, for this gateway,
 //!   `kafka.advertised_host` when set, else the gateway's advertised
 //!   address.
 //! - **Coordinator leases** are etcd keys
@@ -61,7 +60,7 @@ pub struct GatewayCluster {
     dc: DcId,
     held: tokio::sync::Mutex<Held>,
     /// Serializes granting the coordinator lease; `held` is never kept
-    /// across an etcd call (r9more: a slow etcd answer held every group's
+    /// across an etcd call (a slow etcd answer would hold every group's
     /// heartbeat, join and timer behind one group's lease request).
     granting: tokio::sync::Mutex<()>,
     brokers: Mutex<Option<(Instant, Vec<BrokerNode>)>>,

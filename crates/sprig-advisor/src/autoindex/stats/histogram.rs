@@ -1,4 +1,4 @@
-//! MariaDB's `JSON_HB` histograms (chapter 13, "Statistics").
+//! MariaDB's `JSON_HB` histograms.
 //!
 //! From 11.0 `ANALYZE ... PERSISTENT` stores, in `mysql.column_stats.histogram`
 //! with `hist_type = 'JSON_HB'`, a height-balanced histogram as JSON.

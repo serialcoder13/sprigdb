@@ -53,7 +53,7 @@ fn example_1_generates_both_variants() {
     let ub = usage(&b.def.parts, &acc, &t).unwrap();
     assert!(ub.delivers_order);
     assert!((ub.entries - 20.0 / 0.07).abs() < 0.5, "{}", ub.entries);
-    // A reads 28 rows, under the 50 of add_covering, so the chapter's A'
+    // A reads 28 rows, under the 50 of add_covering, so the covering A'
     // isn't generated here (see cost tests, which build it).
     assert!(
         !cands
@@ -361,7 +361,7 @@ proptest! {
     }
 }
 
-/// R6 round 3: spatial and vector candidates (chapter 13, "Other models").
+/// Spatial and vector candidates.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn spatial_and_vector_candidates() {

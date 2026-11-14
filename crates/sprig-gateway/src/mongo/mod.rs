@@ -1,9 +1,9 @@
-//! The MongoDB front end (chapter 30, R5): the gateway answers on the
-//! `mongo` listener as the `mongos` of a MongoDB 8.0 sharded cluster.
+//! The MongoDB front end: the gateway answers on the `mongo` listener as
+//! the `mongos` of a MongoDB 8.0 sharded cluster.
 //!
 //! - [`conn`]: framing, the handshake (`hello`, legacy `isMaster` over
 //!   `OP_QUERY`, compression, client metadata, the data center from
-//!   `appName`), SCRAM-SHA-256 against chapter 14's verifiers (also
+//!   `appName`), SCRAM-SHA-256 against the users' verifiers (also
 //!   speculative), and command dispatch;
 //! - [`commands`]: the command handlers over `sprig-doc`'s engine;
 //! - [`cursors`]: the cursor table;
@@ -15,12 +15,12 @@
 //! - [`catalog`]: collections in the tenant catalog;
 //! - [`publish`]: the publication wait for new array paths;
 //! - [`changes`]: change streams over the change feed;
-//! - [`users`]: user and role commands over chapter 29's accounts.
-//! - [`logic`]: `sprigCall`, logic-layer functions (chapter 41, R7).
-//! - [`snapshot`]: snapshot reads outside transactions (R5 round 4).
+//! - [`users`]: user and role commands over the tenant's accounts.
+//! - [`logic`]: `sprigCall`, logic-layer functions.
+//! - [`snapshot`]: snapshot reads outside transactions.
 //!
-//! Interim scope (R5 interim, `decisions/r5-interim.md`): transactions on one executor
-//! session per `lsid`, and no `$clusterTime` signing.
+//! Scope: transactions on one executor session per `lsid`, and no
+//! `$clusterTime` signing.
 
 pub mod catalog;
 pub mod changes;
@@ -143,7 +143,7 @@ key!(
 key!(
     /// `mongo.max_operation_memory_bytes`: memory one command's in-gateway
     /// stages may hold (MongoDB 9.0's per-operation limit); past it, 146
-    /// `ExceededMemoryLimit` (M3, decision S99). 0 turns it off.
+    /// `ExceededMemoryLimit`. 0 turns it off.
     MAX_OPERATION_MEMORY_BYTES: u64 = "mongo.max_operation_memory_bytes", 1_073_741_824, HardBounds::range(0, 1_099_511_627_776),
     "Memory one MongoDB command may hold in the gateway"
 );
@@ -229,7 +229,7 @@ impl Default for MongoSettings {
 
 /// What the front end is built from.
 pub struct MongoDeps {
-    /// Logins (chapter 14).
+    /// Logins.
     pub login: Arc<LoginService>,
     /// The shared executor.
     pub executor: SharedExecutor,
@@ -273,10 +273,10 @@ pub struct Shared {
     pub(crate) conn_ids: std::sync::atomic::AtomicI32,
     pub(crate) started: std::time::Instant,
     /// The two settings every command reads, with the settings snapshot
-    /// they were resolved in (R5 round 8: resolving them per command was
-    /// about 1% of a point read's gateway CPU).
+    /// they were resolved in (resolving them per command was about 1% of a
+    /// point read's gateway CPU).
     pub(crate) per_command: std::sync::Mutex<Option<(sprig_settings::watch::Snapshot, PerCommand)>>,
-    /// [`Shared::settings`], kept per settings snapshot (perf1, S145).
+    /// [`Shared::settings`], kept per settings snapshot.
     pub(crate) settings_memo:
         std::sync::RwLock<Option<(sprig_settings::watch::Snapshot, Arc<MongoSettings>)>>,
 }
@@ -328,9 +328,9 @@ impl Shared {
         self.per_command().large_request_bytes
     }
 
-    /// The settings now: read again only when the settings snapshot
-    /// changed (perf1, S145: resolving all twelve on every command cost
-    /// about 5% of a point read's gateway CPU).
+    /// The settings now: read again only when the settings snapshot changed
+    /// (resolving all twelve on every command cost about 5% of a point
+    /// read's gateway CPU).
     #[must_use]
     pub fn settings(&self) -> Arc<MongoSettings> {
         let Some((l, dc)) = &self.d.live else {
@@ -367,8 +367,7 @@ impl std::fmt::Debug for MongoFrontend {
 }
 
 impl MongoFrontend {
-    /// The shared state, for `Sql.Query`'s `language: mongo` (chapter 37,
-    /// tui T2; added by bugfix4).
+    /// The shared state, for `Sql.Query`'s `language: mongo`.
     #[must_use]
     pub fn shared(&self) -> &Arc<Shared> {
         &self.shared
@@ -378,7 +377,7 @@ impl MongoFrontend {
     /// which stops on `stop`.
     #[must_use]
     pub fn start(d: MongoDeps, stop: CancellationToken) -> Self {
-        // The publication wait (chapter 31's check_flags) needs the DC
+        // The publication wait (check_flags) needs the DC
         // tier, where gateways acknowledge catalog versions.
         let publisher = match (&d.tenants, &d.dc_store) {
             (Some(t), Some(dc)) => {
@@ -423,7 +422,7 @@ impl MongoFrontend {
             records: retry::Records::default(),
             failpoints: failpoint::FailPoints::default(),
             engine: match &docs {
-                // Chapter 39: text and search indexes through the
+                // Text and search indexes through the
                 // gateway's search service.
                 Some(c) => sprig_doc::engine::Engine::with_catalog(
                     spill::engine_config(d.live.as_ref()),

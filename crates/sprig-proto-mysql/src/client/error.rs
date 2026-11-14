@@ -42,7 +42,7 @@ pub enum ClientError {
     #[error("timed out: {0}")]
     Timeout(&'static str),
     /// The server sent a packet that doesn't fit the protocol state
-    /// (chapter 05: 39012 if the client awaits a response).
+    /// (39012 if the client awaits a response).
     #[error("unexpected packet: {0}")]
     Unexpected(String),
     /// The server closed the connection.

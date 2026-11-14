@@ -252,7 +252,7 @@ async fn probing_records_get_a_grace_period_and_guards_hold() {
     let _ = &f.global;
 }
 
-/// Chapter 09, "Publishing": a pass in which no node answered (a loaded
+/// Publishing: a pass in which no node answered (a loaded
 /// host's timeouts) publishes nothing; the record keeps XA and the binlog
 /// facts, a new term schedules a deep probe one sustain period after it
 /// takes the profile over, and a deep probe whose active probes didn't run

@@ -1,4 +1,4 @@
-//! The packet codec (chapter 05, "Framing" and "Compression").
+//! The packet codec: framing and compression.
 //!
 //! [`PacketCodec`] turns a byte stream into logical [`Packet`]s and back. It
 //! splits payloads of 16 MiB - 1 bytes or more into chunks, reassembles them
@@ -37,10 +37,10 @@ pub const MIN_COMPRESS_LENGTH: usize = 50;
 /// The default `max_packet`: 64 MiB, MySQL 8.4's `max_allowed_packet`.
 pub const DEFAULT_MAX_PACKET: usize = 64 << 20;
 
-/// The default zlib level (chapter 05).
+/// The default zlib level.
 pub const DEFAULT_ZLIB_LEVEL: u32 = 6;
 
-/// The default zstd level when the client names none (chapter 05).
+/// The default zstd level when the client names none.
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
 const HEADER: usize = 4;

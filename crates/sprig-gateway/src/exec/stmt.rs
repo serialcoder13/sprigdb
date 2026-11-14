@@ -1,5 +1,4 @@
-//! Prepared statements on pooled backend connections (chapter 05,
-//! "Prepared statements"; build step 8).
+//! Prepared statements on pooled backend connections.
 //!
 //! The front end maps the client's statement ids to [`StmtRef`]s; this
 //! module keeps what each [`StmtRef`] needs to run on whichever backend
@@ -71,25 +70,24 @@ pub(crate) struct Stmt {
     /// again at each execute. Never prepared on a backend.
     pub deferred: Option<Bytes>,
     /// Tenant sessions: the client's text (logical names), which workload
-    /// capture fingerprints (chapter 12).
+    /// capture fingerprints.
     pub logical: Option<Bytes>,
     /// Tenant sessions: what the statement's privileges were checked with
-    /// at prepare, checked again at execute (chapter 29).
+    /// at prepare, checked again at execute.
     pub recheck: Option<crate::tenant::authz::Recheck>,
     /// Tenant sessions: the client's text as it came, before any rewrite
-    /// (chapter 29, RL15: prepared again when its row-level security
-    /// predicates change).
+    /// (prepared again when its row-level security predicates change).
     pub client: Option<Bytes>,
-    /// Tenant sessions (chapter 39, R5 round 6): `deferred` holds a text
+    /// Tenant sessions: `deferred` holds a text
     /// with placeholders (`MATCH ... AGAINST (?)` on a search index), run
     /// at each execute with the bound values as literals.
     pub deferred_params: bool,
-    /// Tenant sessions (chapter 43, R8 round 7, decision G63): `deferred`
+    /// Tenant sessions: `deferred`
     /// holds a statement with `GRAPH_TABLE` and `?` placeholders, run at
     /// each execute with the bound values written in (SQL literals
     /// outside the calls, Cypher literals inside them).
     pub graph_params: bool,
-    /// Tenant sessions (R5 round 8): the fingerprint workload capture made
+    /// Tenant sessions: the fingerprint workload capture made
     /// of `logical`, with what it was made under; the next execute under
     /// the same reuses it instead of normalizing the text again.
     pub fp: Option<(

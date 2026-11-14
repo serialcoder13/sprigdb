@@ -1,13 +1,13 @@
-//! Chapter 12's workload store as the `auto_index` loop reads it: trigger
+//! The workload store as the `auto_index` loop reads it: trigger
 //! evaluation's window ([`StoreSource`]), the observer's latencies and
 //! usage samples ([`ObserveSource`]), and the binding of a sealed sample
 //! into a statement in the shards' physical names ([`bind_sample`]), which
 //! validation replays.
 //!
-//! **Watching.** Chapter 13 asks chapter 12 to watch every qualifying
-//! fingerprint (probe rows examined, capture samples). The recorder lives
-//! in each gateway and the controller has no channel to it yet, so
-//! [`StoreSource::watch`] only logs. Gateways watch on their own every
+//! **Watching.** Trigger evaluation asks the workload recorder to watch
+//! every qualifying fingerprint (probe rows examined, capture samples). The
+//! recorder lives in each gateway and the controller has no channel to it
+//! yet, so [`StoreSource::watch`] only logs. Gateways watch on their own every
 //! fingerprint whose p95 is above `workload.watch_p95_ms` (50 ms), which
 //! covers the slow trigger (p95 above `auto_index.p95_threshold_ms`, 100
 //! ms); a fingerprint qualifying only through the top-N or fast trigger
@@ -16,10 +16,10 @@
 //!
 //! **Names.** A fingerprint's text is in logical names with tables
 //! qualified by their logical database; a sample's context holds the
-//! session's logical database. Both are mapped with chapter 07's rewriter
-//! over the tenant's [`NameMap`] (built from the catalog snapshot the way
-//! the gateway builds it): R0 has one shard per database, so a database
-//! stands for its first shard schema.
+//! session's logical database. Both are mapped with the SQL rewriter over
+//! the tenant's [`NameMap`] (built from the catalog snapshot the way the
+//! gateway builds it), where a database stands for its first shard
+//! schema.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -176,7 +176,7 @@ pub fn bind_sample(
 }
 
 /// [`bind_sample`] for a statement already written with its values (a
-/// MongoDB sample's replay, S132): only rewritten to physical names.
+/// MongoDB sample's replay): only rewritten to physical names.
 #[must_use]
 pub fn bind_text(
     map: &dyn NameMap,
@@ -257,7 +257,7 @@ pub async fn statements(
         let Some(row) = rows.get(fp) else { continue };
         let text = &row.text.to_string();
         if row.kind == FpKind::Mongo {
-            // A MongoDB sample is its condition values (S132): replayed as
+            // A MongoDB sample is its condition values: replayed as
             // the statement the engine sends under the document index.
             let Some(def) = doc.filter(|d| sprig_advisor::autoindex::doc::is_doc(d)) else {
                 continue;
@@ -283,9 +283,9 @@ pub async fn statements(
     Ok(out)
 }
 
-/// Trigger evaluation's [`qualify::WorkloadSource`] over chapter 12's
+/// Trigger evaluation's [`qualify::WorkloadSource`] over the workload
 /// store (`CatalogWorkloadStore::window`). Every run is a client run:
-/// Studio (chapter 44) doesn't exist yet.
+/// Studio doesn't exist yet.
 pub struct StoreSource {
     store: Arc<dyn WorkloadStore>,
 }
@@ -317,7 +317,7 @@ impl qualify::WorkloadSource for StoreSource {
             .window(tenant, from, to)
             .await?
             .into_iter()
-            // Studio's runs (`caller = studio`, chapter 12) are their own
+            // Studio's runs (`caller = studio`) are their own
             // bucket: they count only with auto_index.include_studio.
             .map(|w| {
                 if w.caller.is_some_and(|c| c.is_studio()) {
@@ -335,7 +335,7 @@ impl qualify::WorkloadSource for StoreSource {
     }
 }
 
-/// The observer's [`observe::WorkloadSource`] over chapter 12's store and
+/// The observer's [`observe::WorkloadSource`] over the workload store and
 /// the tenant's catalog (for names), with the sample keys for usage
 /// `EXPLAIN`s.
 pub struct ObserveSource {
@@ -442,7 +442,7 @@ impl observe::WorkloadSource for ObserveSource {
             .into_iter()
             .filter(|w| on_object(w, object) && w.shape.writes.is_none())
             .collect();
-        // The most-run first: the usage ratio counts runs (decision O1).
+        // The most-run first: the usage ratio counts runs.
         w.sort_by(|a, b| b.runs().cmp(&a.runs()).then(a.id.cmp(&b.id)));
         w.truncate(n);
         let cat = tenant_catalog(&*self.locator, tenant).await?;

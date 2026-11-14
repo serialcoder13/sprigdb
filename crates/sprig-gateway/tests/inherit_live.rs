@@ -1,5 +1,5 @@
-//! `FOR EACH TENANT` through a live private deployment (chapter 42,
-//! "Inherited messaging objects"; chapters 45 and 41; R9, r9fet).
+//! `FOR EACH TENANT` messaging objects (streams, queues, triggers, sinks)
+//! through a live private deployment.
 //!
 //! ```sh
 //! export SPRIG_TEST_INHERIT_GATEWAY=127.0.0.1:28306     # MySQL wire
@@ -32,7 +32,7 @@
 //! sprigctl settings set sink.destination_allowlist '["127.0.0.1:<SPRIG_TEST_INHERIT_HOOK_PORT>"]' --scope global ...
 //! ```
 //!
-//! Clean-up (R9, r9last): each test first drops what an earlier run left
+//! Clean-up: each test first drops what an earlier run left
 //! in its declaring tenant's databases (every `FOR EACH TENANT` definition
 //! there, by the exact names `SHOW INHERITED DEFINITIONS` lists, then the
 //! database), and a failing test does the same before it ends and starts
@@ -46,7 +46,7 @@
 //! With `SPRIG_TEST_INHERIT_LATE=x`, each test creates its own late member
 //! (`x`, `xa`, `xs`, `xq`, `xk`, `xb1`, `xb2`, `xfi`, `xg`), so use a new `x` per run.
 //!
-//! Every tenant has the user `app` (password `sprig-dev-app`). Kiran's
+//! Every tenant has the user `app` (password `sprig-dev-app`). The main
 //! case: the system tenant declares `security.user_events FOR EACH TENANT`
 //! and two triggers on it, `sync_users` (JavaScript) and `sync_users_appb`
 //! (Lua), with `GRANTS`; it publishes "user added" for each client with
@@ -298,7 +298,7 @@ async fn for_each_tenant_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["security"]);
     let mut members = Vec::new();
     for m in &e.members {
@@ -599,9 +599,9 @@ async fn for_each_tenant_end_to_end() {
                 ),
             )
             .await;
-            // The Lua trigger runs on its own: wait for it too (r9fanin: it
-            // was counted once, the moment the JavaScript one was done, and
-            // was 2 behind under load).
+            // The Lua trigger runs on its own: wait for it too (counted once,
+            // the moment the JavaScript one was done, it could be 2 behind
+            // under load).
             let b = wait_count(
                 c,
                 &format!(
@@ -679,7 +679,7 @@ async fn for_each_tenant_end_to_end() {
     }
 }
 
-/// Chapter 45's platform stream: a client publishes up into the system
+/// The platform stream: a client publishes up into the system
 /// tenant's ordinary stream only with the owner's consent, keyed by its
 /// own name.
 #[tokio::test]
@@ -688,7 +688,7 @@ async fn in_tenant_publish_up() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["platform"]);
     let (m0, m1) = (e.members[0].clone(), e.members[1].clone());
     let mut c0 = conn(&e.addr, &m0).await;
@@ -758,7 +758,7 @@ async fn in_tenant_publish_up() {
     ok(&mut sys, "DROP DATABASE platform").await;
 }
 
-/// Chapter 42's cross-tenant outbox: `FOR TENANT` and `IN TENANT` inside a
+/// The cross-tenant outbox: `FOR TENANT` and `IN TENANT` inside a
 /// transaction land exactly once if it commits, never if it rolls back.
 #[tokio::test]
 async fn cross_tenant_publishes_in_transactions() {
@@ -766,7 +766,7 @@ async fn cross_tenant_publishes_in_transactions() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["platform", "security"]);
     let m0 = e.members[0].clone();
     let mut c0 = conn(&e.addr, &m0).await;
@@ -859,7 +859,7 @@ async fn cross_tenant_publishes_in_transactions() {
 }
 
 // ---------------------------------------------------------------------------
-// Round 3 (r9fet3): DROP DATABASE and the outbox, inherited exchanges, queues
+// DROP DATABASE and the outbox, inherited exchanges, queues
 // and bindings, broadcast.
 //
 //   SPRIG_TEST_INHERIT_AMQP=127.0.0.1:29672      # the gateway's AMQP listener
@@ -967,7 +967,7 @@ async fn drop_database_forwards_the_outbox_first() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["obx"]);
     let m0 = e.members[0].clone();
     let mut c0 = conn(&e.addr, &m0).await;
@@ -1110,7 +1110,7 @@ async fn drop_database_forwards_the_outbox_first() {
     ))
     .await
     .unwrap();
-    // R9 next: the outbox is empty, but the definition lives in obx (39895,
+    // The outbox is empty, but the definition lives in obx (39895,
     // naming it) until it is dropped.
     let (code, msg) = sql(&mut sys, "DROP DATABASE obx").await.unwrap_err();
     assert_eq!(code, 39895, "{msg}");
@@ -1156,7 +1156,7 @@ async fn inherited_queues_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9mq"]);
     let mut ms = Vec::new();
     for m in &e.members {
@@ -1470,7 +1470,7 @@ async fn broadcast_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["security"]);
     let mut ms = Vec::new();
     for m in &e.members {
@@ -1707,7 +1707,7 @@ async fn detach_and_the_end_of_the_drop_grace() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["dt"]);
     let (m0, m1) = (e.members[0].clone(), e.members[1].clone());
     let mut c0 = conn(&e.addr, &m0).await;
@@ -1802,7 +1802,7 @@ async fn detach_and_the_end_of_the_drop_grace() {
     ok(&mut sys, "DROP DATABASE dt").await;
 }
 
-/// R9 next (r9next): a member whose broadcast delivery fails gets it later,
+/// A member whose broadcast delivery fails gets it later,
 /// once and in order, from the saved retry list; and `DROP DATABASE` of a
 /// declarer's database is refused while live definitions are in it.
 #[tokio::test]
@@ -1815,7 +1815,7 @@ async fn broadcast_retry_and_the_drop_database_guard() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9nguard", "security"]);
     let mut ms = Vec::new();
     for m in &e.members {
@@ -2045,7 +2045,7 @@ async fn publish_fi(c: &mut Conn, tenant: &str, from: u64, to: u64) {
     }
 }
 
-/// R9 next (r9next): a `FAN IN` trigger in the declaring tenant runs once
+/// A `FAN IN` trigger in the declaring tenant runs once
 /// per record of every member's instance (those made after it from their
 /// start, those before it from then on), with its own positions per
 /// instance, through a `kill -9` of the worker; a member created later
@@ -2056,7 +2056,7 @@ async fn fan_in_trigger_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9naudit", "security"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP TRIGGER r9naudit.fi_audit").await;
@@ -2189,7 +2189,7 @@ export default function (ctx) {
 }
 $$";
 
-/// RC11 (r9next): dead letters of a trigger on a stream are replayed with
+/// Dead letters of a trigger on a stream are replayed with
 /// `sprigctl logic dead-letters replay`, in order, once each (a second
 /// replay of the same ones runs nothing), outside the trigger's position.
 #[tokio::test]
@@ -2203,7 +2203,7 @@ async fn stream_trigger_dead_letter_replay() {
     };
     let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9ndl"]);
     clean_db(&mut sys, "r9ndl").await;
     ok(&mut sys, "CREATE DATABASE r9ndl").await;
@@ -2320,7 +2320,7 @@ async fn stream_trigger_dead_letter_replay() {
 }
 
 // ---------------------------------------------------------------------------
-// R9 final (r9final): AMQP fan-in consumers and the ready index.
+// AMQP fan-in consumers and the ready index.
 // ---------------------------------------------------------------------------
 
 fn delivery_header(d: &lapin::message::Delivery, k: &str) -> Option<String> {
@@ -2386,7 +2386,7 @@ async fn amqp_fan_in_consumer() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9fq"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP QUEUE r9fq.work IMMEDIATE CASCADE").await;
@@ -2589,7 +2589,7 @@ async fn amqp_fan_in_consumer() {
 }
 
 // ---------------------------------------------------------------------------
-// R9 final (r9final): fan-in sinks.
+// Fan-in sinks.
 //
 //   SPRIG_TEST_INHERIT_HOOK_PORT=29881   # a webhook receiver the test runs
 // ---------------------------------------------------------------------------
@@ -2743,7 +2743,7 @@ async fn fan_in_sink_end_to_end() {
     };
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9fsink", "security"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP SINK r9fsink.audit").await;
@@ -2972,8 +2972,8 @@ async fn fan_in_sink_end_to_end() {
     // The sink's task starts only after the three records are in the
     // stream: the controller, which submits sink tasks, is down meanwhile
     // (the worker's sequencer keeps running). START AT LATEST counts from
-    // the sink's creation, so they still come (r9fanin: it counted from the
-    // task's first start, seconds later under load, and this step got
+    // the sink's creation, so they still come (counting from the task's
+    // first start, seconds later under load, this step would get
     // nothing).
     ok(
         &mut sys,
@@ -3020,8 +3020,8 @@ async fn fan_in_sink_end_to_end() {
     .await;
     println!("DEAD LETTER TO STREAM: {n} dead letter(s): {dl:?}");
     if n != 1 {
-        // What the step saw, for the report (r9cluster's runs ended here
-        // with nothing to go on).
+        // What the step saw, for the report (a failure here otherwise
+        // leaves nothing to go on).
         let sinks = sql(&mut sys, "SHOW SINKS FROM r9fsink").await;
         let ev = sql(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev").await;
         let vals: Vec<String> = received(&got).into_iter().map(|(_, v, _)| v).collect();
@@ -3052,7 +3052,7 @@ export default function (ctx) {
 }
 $$";
 
-/// RC11 for queue triggers (r9final): a queue trigger's dead letters are
+/// Dead-letter replay for queue triggers: a queue trigger's dead letters are
 /// replayed with `sprigctl logic dead-letters replay`, in order, once each
 /// (marking them again runs nothing), while new messages keep flowing.
 #[tokio::test]
@@ -3072,7 +3072,7 @@ async fn queue_trigger_dead_letter_replay() {
     };
     let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9fqdl"]);
     let _ = sql(&mut sys, "DROP TRIGGER r9fqdl.on_job").await;
     clean_db(&mut sys, "r9fqdl").await;
@@ -3219,8 +3219,7 @@ fn arrived(r: &[(String, String, String)], m: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Queue sources for inherited sinks (R9, r9fanin; chapter 51,
-/// "Inherited sinks and connections"): `CREATE SINK ... FOR EACH TENANT
+/// Queue sources for inherited sinks: `CREATE SINK ... FOR EACH TENANT
 /// FROM QUEUE q` gives each member its own sink over its own instance of
 /// the `FOR EACH TENANT` queue, deployed when that instance is made (as
 /// for streams), here with `ordering = 'queue'`: every member's messages
@@ -3238,7 +3237,7 @@ async fn inherited_queue_sink_end_to_end() {
     };
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9fqs"]);
     let _ = sql(&mut sys, "DROP SINK r9fqs.out").await;
     let _ = sql(&mut sys, "DROP CONNECTION r9fqs.hook").await;
@@ -3304,7 +3303,7 @@ async fn inherited_queue_sink_end_to_end() {
             "{m}: once each, in queue order"
         );
     }
-    // Least privilege (R9, r9last): each member's sprig_inherited holds
+    // Least privilege: each member's sprig_inherited holds
     // SELECT, DELETE on the queue, nothing on the database.
     for (m, c) in &mut cs {
         let g: Vec<String> = ok(c, "SHOW GRANTS FOR sprig_inherited")
@@ -3351,9 +3350,9 @@ async fn inherited_queue_sink_end_to_end() {
         );
         assert_eq!(arrived(&received(&got), &late), (0..10).collect::<Vec<_>>());
     }
-    // Dropping the definition drops every member's sink (R9, r9last:
-    // a queue-sourced definition left them running, and in the next run
-    // the old task took a member's first messages from its new queue).
+    // Dropping the definition drops every member's sink (left running,
+    // the old task would take a member's first messages from its new
+    // queue in the next run).
     ok(&mut sys, "DROP SINK r9fqs.out").await;
     let t = Instant::now();
     for m in &e.members {
@@ -3450,10 +3449,9 @@ async fn wait_fan_in_tasks(
     }
 }
 
-/// Grouped fan-in tasks (R9, r9last; chapter 51, "Fan-in sinks", item
-/// 110.1): with `fanin_instances_per_task = 1` and one partition per
-/// instance, a fan-in sink over three members' instances runs three
-/// tasks, each reading its members only (every record arrives once); a
+/// Grouped fan-in tasks: with `fanin_instances_per_task = 1` and one
+/// partition per instance, a fan-in sink over three members' instances runs
+/// three tasks, each reading its members only (every record arrives once); a
 /// member created later grows it to four tasks (the old ones stop before
 /// the new ones start), and nothing is lost through the regrouping.
 #[tokio::test]
@@ -3467,7 +3465,7 @@ async fn grouped_fan_in_sink_end_to_end() {
     };
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9grp"]);
     let ms = e.members.clone();
     let clean = [
@@ -3608,7 +3606,7 @@ async fn grouped_fan_in_sink_end_to_end() {
 }
 
 /// A process the test stopped (the controller, a killed worker): started
-/// again by its command if the test fails before it does (R9, r9last), so
+/// again by its command if the test fails before it does, so
 /// one failure doesn't leave the later tests without it.
 struct Restart(Option<String>);
 
@@ -3630,7 +3628,7 @@ impl Drop for Restart {
     }
 }
 
-/// A failed test's leftovers (R9, r9last): statements run as `tenant.app`
+/// A failed test's leftovers: statements run as `tenant.app`
 /// when the test panics, so one failure doesn't fail later tests with
 /// "database exists" or definitions still live. Each runs on its own
 /// thread and runtime (the test's is unwinding); errors are ignored.
@@ -3699,7 +3697,7 @@ impl Drop for Leftovers {
 /// Drops every `FOR EACH TENANT` definition the connection's tenant
 /// declared in `db`, by the exact names `SHOW INHERITED DEFINITIONS` lists
 /// (sinks and triggers first, then connections, then streams, queues and
-/// exchanges with their instances), then the database (R9, r9last). A
+/// exchanges with their instances), then the database. A
 /// failed earlier run's definitions otherwise refuse `DROP DATABASE`
 /// (39895), and the next test fails with "database exists".
 async fn clean_db(c: &mut Conn, db: &str) {
@@ -3744,7 +3742,7 @@ async fn publish_fq(c: &mut Conn, m: &str, from: u64, to: u64) {
     }
 }
 
-/// Lease tags for fan-in queue sinks (R9, r9last; item 110.3): a fan-in
+/// Lease tags for fan-in queue sinks: a fan-in
 /// sink over three members' queue instances, its worker killed with
 /// `kill -9` mid-stream and started again 2 s later. The new task gives
 /// back what the dead one held in each member at once (its lease tag), so
@@ -3765,7 +3763,7 @@ async fn fan_in_queue_sink_after_a_crash() {
     }
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
-    // A failure drops what the test declared (R9, r9last).
+    // A failure drops what the test declared.
     let _leftovers = Leftovers::dbs(&e, &["r9fiq"]);
     clean_db(&mut sys, "r9fiq").await;
     ok(&mut sys, "CREATE DATABASE r9fiq").await;

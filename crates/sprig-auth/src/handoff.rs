@@ -98,6 +98,14 @@ pub struct HandoffStart {
     pub tls: bool,
     /// A verified client certificate at the source.
     pub client_cert: bool,
+    /// Its subject and issuer (`REQUIRE SUBJECT`, `ISSUER`; authfix2).
+    /// Absent from a source that predates them, which then hands off as
+    /// it did: such accounts are refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_subject: Option<String>,
+    /// See [`Self::client_subject`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_issuer: Option<String>,
     /// `CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS`.
     pub can_handle_expired_password: bool,
     /// The source DC, for the target's audit event.
@@ -127,7 +135,13 @@ impl HandoffStart {
             client_ip: self.client_ip,
             tls: self.tls,
             client_cert: self.client_cert,
-            client_dn: None,
+            client_dn: match (&self.client_subject, &self.client_issuer) {
+                (Some(subject), Some(issuer)) => Some(crate::mysql::ClientDn {
+                    subject: subject.clone(),
+                    issuer: issuer.clone(),
+                }),
+                _ => None,
+            },
             can_handle_expired_password: self.can_handle_expired_password,
         }
     }
@@ -143,6 +157,8 @@ impl HandoffStart {
             client_ip: req.client_ip,
             tls: req.tls,
             client_cert: req.client_cert,
+            client_subject: req.client_dn.as_ref().map(|d| d.subject.clone()),
+            client_issuer: req.client_dn.as_ref().map(|d| d.issuer.clone()),
             can_handle_expired_password: req.can_handle_expired_password,
             source_dc,
         }
@@ -767,6 +783,29 @@ mod tests {
         assert_eq!(route(Some(&pin), &nyc, true), Route::Deny);
         assert_eq!(route(Some(&pin), &nyc, false), Route::HandOff(pin.to_vec()));
         assert_eq!(remote_access_denied(Persona::MySql84).code, 39302);
+    }
+
+    #[test]
+    fn a_handoff_keeps_the_certificate_names() {
+        let mut req = crate::mysql::tests::req("acme.alice");
+        req.client_cert = true;
+        req.client_dn = Some(crate::mysql::ClientDn {
+            subject: "/O=Acme/CN=alice".into(),
+            issuer: "/CN=Acme CA".into(),
+        });
+        let start = HandoffStart::of(&req, dc("nyc1"));
+        let wire = serde_json::to_string(&start).unwrap();
+        let back: HandoffStart = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.request(), req);
+        // A source from before authfix2 sends no names: the target reads
+        // none, and a SUBJECT/ISSUER account is refused there.
+        let old = wire
+            .replace(",\"client_subject\":\"/O=Acme/CN=alice\"", "")
+            .replace(",\"client_issuer\":\"/CN=Acme CA\"", "");
+        assert!(!old.contains("client_subject"), "{old}");
+        let back: HandoffStart = serde_json::from_str(&old).unwrap();
+        assert_eq!(back.request().client_dn, None);
+        assert!(back.request().client_cert);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

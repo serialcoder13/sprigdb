@@ -1,5 +1,4 @@
-//! Retryable writes, exactly once (chapter 30, "Retryable writes, exactly
-//! once"; build step 7).
+//! Retryable writes, exactly once.
 //!
 //! A write command that carries `lsid` and `txnNumber` outside a
 //! transaction runs in one MariaDB transaction on the connection's own
@@ -95,7 +94,7 @@ impl Records {
     }
 }
 
-/// The `uid` of chapter 30: SHA-256 of the authenticated identity, so one
+/// The record's `uid`: SHA-256 of the authenticated identity, so one
 /// user can never read or continue another's records.
 #[must_use]
 pub fn uid_of(o: &Owner) -> [u8; 32] {
@@ -108,7 +107,7 @@ pub fn uid_of(o: &Owner) -> [u8; 32] {
     out
 }
 
-/// The drivers' retryable codes (chapter 30, "Error codes and labels").
+/// The drivers' retryable codes.
 #[must_use]
 pub fn retryable_code(c: i32) -> bool {
     matches!(
@@ -302,11 +301,10 @@ async fn run_inner(
             .reply);
     }
     let cfg = c.shared.settings();
-    // READ COMMITTED for the write and its record (R5 round 4): the
-    // record's locking read of a session's first write takes no gap lock,
-    // so concurrent first writes of many sessions don't deadlock on the
-    // records table; the document's own read-modify-write is checked by
-    // `_v` either way.
+    // READ COMMITTED for the write and its record: the record's locking
+    // read of a session's first write takes no gap lock, so concurrent
+    // first writes of many sessions don't deadlock on the records table;
+    // the document's own read-modify-write is checked by `_v` either way.
     s.read_committed().await;
     let mut attempt = 0u32;
     let mut recreated = false;
@@ -333,11 +331,10 @@ async fn run_inner(
                 continue;
             }
             Err(e) if matches!(e.errno, Some(1142 | 1143 | 1044)) => {
-                // Every writer of a database reaches its records table
-                // (chapter 29's backend grants and the gateway's check,
-                // decisions/r5-interim.md D12). Should a grant still be
-                // missing, the write is refused rather than run without
-                // its record, which a retry could run twice.
+                // Every writer of a database reaches its records table (the
+                // backend grants and the gateway's check). Should a grant
+                // still be missing, the write is refused rather than run
+                // without its record, which a retry could run twice.
                 rollback(s).await;
                 metrics::counter!("sprig_mongo_retryable_unrecorded_total", "command" => name.to_owned())
                     .increment(1);

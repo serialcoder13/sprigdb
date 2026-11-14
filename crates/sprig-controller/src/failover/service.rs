@@ -1,10 +1,8 @@
 //! The controller's internal failover services: `Permits.Renew`,
-//! `Peer.Ping` and `Observer.ObserveDc` (chapter 25, "Interfaces"; chapter
-//! 23, "Internal services").
+//! `Peer.Ping` and `Observer.ObserveDc`.
 //!
-//! **Where it differs from the book.** The book serves these as
-//! `sprig.internal.v1` gRPC on port 7400 over mTLS. Until that port exists
-//! they are JSON over HTTP/1.1 on the controller's `[controller]
+//! **Transport.** These are meant to be `sprig.internal.v1` gRPC on port
+//! 7400 over mTLS. Until that port exists they are JSON over HTTP/1.1 on the controller's `[controller]
 //! internal_addr`, the same messages:
 //!
 //! | Route | Message |
@@ -126,7 +124,7 @@ async fn renew(State(s): State<Arc<Internal>>, body: Bytes) -> Response {
     // A controller that hasn't read the DC lease yet (it just started)
     // would answer a refusal it hasn't checked, and a refusal ends a
     // holder's permit at once: answer 503 so the holder asks another
-    // controller instead (hardening round 2).
+    // controller instead.
     if !s.lease.settled() {
         return Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)

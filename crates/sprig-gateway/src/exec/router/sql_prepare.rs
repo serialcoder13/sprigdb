@@ -1,5 +1,5 @@
 //! SQL-level prepared statements of tenants with sharded or reference
-//! tables (chapter 17, "Prepared statements"; bugfix prepfix): `PREPARE
+//! tables: `PREPARE
 //! name FROM 'text' | @var | expr`, `EXECUTE name [USING ...]`, `EXECUTE
 //! IMMEDIATE ...` and `{DEALLOCATE | DROP} PREPARE name`.
 //!
@@ -25,8 +25,9 @@
 //! DEALLOCATE n         forgets n
 //! ```
 //!
-//! A name the gateway doesn't hold goes to the backend as before (1243
-//! there). Tenants without sharded or reference tables keep MariaDB's own
+//! A name the gateway doesn't hold gets 1243 from the gateway: sent to the
+//! backend, the command would pin the session's connection for good.
+//! Tenants without sharded or reference tables keep MariaDB's own
 //! statements.
 //!
 //! Differences from MariaDB: an expression with a parameter in the
@@ -44,9 +45,7 @@ use sprig_proto_mysql::packets::OkPacket;
 use sprig_proto_mysql::resultset::column_type as ct;
 use sprig_router::ParamLit;
 use sprig_sql::lex::{LexOptions, Token, TokenKind, lex, string_value};
-use sprig_sql::names::{NameMap, ResultMapper};
 
-use super::{Ran, Slot};
 use crate::exec::PassSession;
 use crate::exec::tenant::Step;
 use crate::pipeline::{ExecCtx, ResultSink, RowFormat};
@@ -114,10 +113,11 @@ fn punct(src: &[u8], t: &Token, c: u8) -> bool {
     t.kind == TokenKind::Punct && t.bytes(src) == [c]
 }
 
-/// A statement name, folded (names are case-insensitive).
-fn name_of(src: &[u8], t: &Token) -> Option<String> {
-    let b = t.bytes(src);
-    let s = match t.kind {
+/// A statement name as written, unquoted (callers fold it: names are
+/// case-insensitive).
+fn name_of(src: &[u8], tok: &Token) -> Option<String> {
+    let b = tok.bytes(src);
+    let s = match tok.kind {
         TokenKind::Word => String::from_utf8_lossy(b).into_owned(),
         TokenKind::QuotedIdent if b.len() >= 2 => {
             let q = b[0];
@@ -136,11 +136,11 @@ fn name_of(src: &[u8], t: &Token) -> Option<String> {
         }
         _ => return None,
     };
-    Some(s.to_lowercase())
+    Some(s)
 }
 
 /// The operand spanning significant tokens `toks` of `src`.
-fn src_of(src: &[u8], toks: &[Token], lex: &LexOptions) -> Option<Src> {
+fn src_of(src: &[u8], toks: &[Token], lex: LexOptions) -> Option<Src> {
     let (first, last) = (toks.first()?, toks.last()?);
     let text = src.get(first.start as usize..last.end as usize)?.to_vec();
     let lit = match toks {
@@ -158,7 +158,7 @@ fn src_of(src: &[u8], toks: &[Token], lex: &LexOptions) -> Option<Src> {
 
 /// `toks` split at the commas outside parentheses; `None` for an empty
 /// item.
-fn items(src: &[u8], toks: &[Token], lex: &LexOptions) -> Option<Vec<Src>> {
+fn items(src: &[u8], toks: &[Token], lex: LexOptions) -> Option<Vec<Src>> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut from = 0;
@@ -202,11 +202,11 @@ pub(crate) fn candidate(text: &[u8]) -> bool {
 /// Reads one SQL-level prepared-statement command; `None` for any other
 /// statement (or one written in a way this doesn't read, such as inside
 /// an executable comment: it goes on as before).
-pub(crate) fn parse(text: &[u8], opts: &LexOptions) -> Option<SqlPs> {
+pub(crate) fn parse(text: &[u8], opts: LexOptions) -> Option<SqlPs> {
     if !candidate(text) {
         return None;
     }
-    let all = lex(text, opts).ok()?;
+    let all = lex(text, &opts).ok()?;
     if all
         .iter()
         .any(|t| matches!(t.kind, TokenKind::ExecOpen | TokenKind::Unterminated))
@@ -257,8 +257,8 @@ pub(crate) fn parse(text: &[u8], opts: &LexOptions) -> Option<SqlPs> {
 }
 
 /// The `?` placeholders of `text`.
-pub(crate) fn param_count(text: &[u8], opts: &LexOptions) -> usize {
-    lex(text, opts)
+pub(crate) fn param_count(text: &[u8], opts: LexOptions) -> usize {
+    lex(text, &opts)
         .map(|t| t.iter().filter(|t| t.kind == TokenKind::Param).count())
         .unwrap_or(0)
 }
@@ -282,10 +282,10 @@ const LIST_END: &[&str] = &[
 ];
 
 /// `text` with its `?` placeholders replaced by `params` in order; a
-/// select-list item that is only a `?` keeps MariaDB's name for it (`AS
-/// `?``). `None` when the counts differ.
-pub(crate) fn render(text: &[u8], params: &[ParamLit], opts: &LexOptions) -> Option<Vec<u8>> {
-    let toks = lex(text, opts).ok()?;
+/// select-list item that is only a `?` keeps MariaDB's name for it (an
+/// alias of a backquoted question mark). `None` when the counts differ.
+pub(crate) fn render(text: &[u8], params: &[ParamLit], opts: LexOptions) -> Option<Vec<u8>> {
+    let toks = lex(text, &opts).ok()?;
     let sig: Vec<usize> = (0..toks.len())
         .filter(|&i| significant(toks[i].kind))
         .collect();
@@ -368,7 +368,7 @@ fn lit_param(l: &Lit, charset: &str) -> ParamLit {
 }
 
 fn unhex(h: &[u8]) -> Option<Vec<u8>> {
-    if h.len() % 2 != 0 {
+    if !h.len().is_multiple_of(2) {
         return None;
     }
     h.chunks(2)
@@ -417,6 +417,18 @@ pub(crate) fn value_param(
             }
         }
     }
+}
+
+/// 1243, as MariaDB answers a name it doesn't hold. The gateway answers it
+/// itself: sent to the backend, the command would pin the session's
+/// connection (SQL-level prepared statements are untracked state), and a
+/// pinned session loses gathered reads among other things.
+fn unknown(name: &str, cmd: &str) -> SprigError {
+    SprigError::standard(
+        1243,
+        *b"HY000",
+        format!("Unknown prepared statement handler ({name}) given to {cmd}"),
+    )
 }
 
 /// 1210, as MariaDB answers a wrong number of `USING` values.
@@ -503,7 +515,7 @@ impl PassSession {
         }
         let (lex, _) = self.lex_opts();
         Ok(Held {
-            params: param_count(&text, &lex),
+            params: param_count(&text, lex),
             text,
             db: self.current_logical(),
         })
@@ -532,7 +544,7 @@ impl PassSession {
             }
         };
         let (lex, _) = self.lex_opts();
-        let Some(text) = render(&held.text, &params, &lex) else {
+        let Some(text) = render(&held.text, &params, lex) else {
             return self.fail(out, &wrong_arguments()).await;
         };
         // Names bind in the database of the PREPARE, as in MariaDB.
@@ -579,30 +591,26 @@ impl PassSession {
 
     /// A SQL-level prepared-statement command of a tenant session (see the
     /// module docs): `None` when it isn't one, or goes on as before.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn sql_prepared(
         &mut self,
         cx: &mut ExecCtx<'_>,
-        sql: &[u8],
         original: &[u8],
         more: bool,
         format: RowFormat,
-        mapper: &ResultMapper,
-        map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Option<Step>> {
         if !candidate(original) {
             return Ok(None);
         }
         let (lex, _) = self.lex_opts();
-        let Some(ps) = parse(original, &lex) else {
+        let Some(ps) = parse(original, lex) else {
             return Ok(None);
         };
         let sharded = self.router_layout().await.is_some();
         let step = match ps {
             SqlPs::Prepare { name, src } => {
                 // MariaDB drops the old statement first, whatever comes.
-                self.router.sql_ps.remove(&name);
+                self.router.sql_ps.remove(&name.to_lowercase());
                 if !sharded {
                     return Ok(None);
                 }
@@ -612,7 +620,7 @@ impl PassSession {
                 };
                 match held {
                     Ok(h) => {
-                        self.router.sql_ps.insert(name, h);
+                        self.router.sql_ps.insert(name.to_lowercase(), h);
                         self.ps_ok(out, more, "Statement prepared").await?
                     }
                     Err(e) => {
@@ -622,12 +630,11 @@ impl PassSession {
                 }
             }
             SqlPs::Execute { name, using } => {
-                let Some(held) = self.router.sql_ps.get(&name).cloned() else {
-                    return self
-                        .ps_backend(cx, sql, original, more, format, mapper, map, out, sharded)
-                        .await;
-                };
-                self.run_held(cx, &held, &using, more, format, out).await?
+                match self.router.sql_ps.get(&name.to_lowercase()).cloned() {
+                    Some(held) => self.run_held(cx, &held, &using, more, format, out).await?,
+                    None if sharded => self.fail(out, &unknown(&name, "EXECUTE")).await?,
+                    None => return Ok(None),
+                }
             }
             SqlPs::Immediate { src, using } => {
                 if !sharded {
@@ -646,55 +653,17 @@ impl PassSession {
                 }
             }
             SqlPs::Deallocate { name } => {
-                if self.router.sql_ps.remove(&name).is_none() {
-                    return self
-                        .ps_backend(cx, sql, original, more, format, mapper, map, out, sharded)
-                        .await;
+                if self.router.sql_ps.remove(&name.to_lowercase()).is_some() {
+                    self.ps_ok(out, more, "").await?
+                } else if sharded {
+                    self.fail(out, &unknown(&name, "DEALLOCATE PREPARE"))
+                        .await?
+                } else {
+                    return Ok(None);
                 }
-                self.ps_ok(out, more, "").await?
             }
         };
         Ok(Some(step))
-    }
-
-    /// A name the gateway doesn't hold: the backend's (a statement
-    /// prepared before the tenant had shards, or 1243), on the session's
-    /// own connection. Without shards, the usual path.
-    #[allow(clippy::too_many_arguments)]
-    async fn ps_backend(
-        &mut self,
-        cx: &mut ExecCtx<'_>,
-        sql: &[u8],
-        original: &[u8],
-        more: bool,
-        format: RowFormat,
-        mapper: &ResultMapper,
-        map: &dyn NameMap,
-        out: &mut dyn ResultSink,
-        sharded: bool,
-    ) -> Result<Option<Step>> {
-        if !sharded {
-            return Ok(None);
-        }
-        let ran = Box::pin(self.forward_on(
-            cx,
-            Slot::Main,
-            false,
-            Bytes::copy_from_slice(sql),
-            original,
-            more,
-            format,
-            mapper.clone(),
-            map,
-            out,
-        ))
-        .await?;
-        Ok(Some(match ran {
-            Ran::Done(step) => step,
-            Ran::Stale(e) | Ran::ColumnGone(e) | Ran::Collision(e) | Ran::Regather(e, _) => {
-                self.fail_mapped(out, e, map).await?
-            }
-        }))
     }
 }
 
@@ -707,7 +676,7 @@ mod tests {
     }
 
     fn p(s: &str) -> Option<SqlPs> {
-        parse(s.as_bytes(), &lx())
+        parse(s.as_bytes(), lx())
     }
 
     fn text(s: &Src) -> String {
@@ -728,7 +697,7 @@ mod tests {
         let Some(SqlPs::Prepare { name, src }) = p("prepare `My S` from @q;") else {
             panic!()
         };
-        assert_eq!(name, "my s");
+        assert_eq!(name, "My S");
         assert_eq!(text(&src), "@q");
         assert_eq!(src.lit, None);
         let Some(SqlPs::Prepare { src, .. }) = p("PREPARE s FROM CONCAT('SELECT ', @c)") else {
@@ -745,7 +714,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(name, "s1");
+        assert_eq!(name, "S1");
         let t: Vec<String> = using.iter().map(text).collect();
         assert_eq!(t, ["@a", "5", "'x'", "NULL", "f(1, 2)"]);
         assert_eq!(using[0].lit, None);
@@ -804,7 +773,7 @@ mod tests {
     }
 
     fn r(s: &str, params: &[ParamLit]) -> Option<String> {
-        render(s.as_bytes(), params, &lx()).map(|v| String::from_utf8(v).unwrap())
+        render(s.as_bytes(), params, lx()).map(|v| String::from_utf8(v).unwrap())
     }
 
     #[test]
@@ -936,7 +905,7 @@ mod tests {
     #[test]
     fn counts_placeholders_outside_strings_and_comments() {
         assert_eq!(
-            param_count(b"SELECT ?, '?', `?` /* ? */ FROM t WHERE a = ?", &lx()),
+            param_count(b"SELECT ?, '?', `?` /* ? */ FROM t WHERE a = ?", lx()),
             2
         );
     }

@@ -1,5 +1,4 @@
-//! Workload capture in the gateway (chapter 12; chapter 04, "Dispatch into
-//! the layers"; milestone M0.4): the real [`WorkloadHook`].
+//! Workload capture in the gateway: the real [`WorkloadHook`].
 //!
 //! [`GatewayWorkload`] is built once in [`crate::run`] with the recorder,
 //! the fingerprinter, the sample outbox and the keyring, and its flusher
@@ -22,12 +21,12 @@
 //! where the executor knows the statement (its logical text, the tenant's
 //! catalog, its backend connection and rows).
 //!
-//! Only tenant sessions are captured: accounts-file logins (M0.2) have no
+//! Only tenant sessions are captured: accounts-file logins have no
 //! tenant catalog to write to. Statements the gateway answers itself (DDL
 //! through the catalog, settings, local answers) are not fingerprinted
 //! yet *(choice: they never reach MariaDB, so they say nothing about
 //! indexes)*. Statements of a client multi-statement packet are counted
-//! but never probed (chapter 12).
+//! but never probed.
 //!
 //! **Gateway id** *(choice)*: `workload_stats.gateway_id` is
 //! `xxh3_64(node id ‖ process start time)` cut to 32 bits, so a restarted
@@ -58,7 +57,7 @@ use crate::session::Session;
 tokio::task_local! {
     /// The workload caller of statements run in this task: `caller =
     /// studio` while the HTTP engine runs a Studio session's statement
-    /// (chapter 12; chapter 44: Studio's runs are kept apart and count
+    /// (Studio's runs are kept apart and count
     /// toward automatic indexing only with `auto_index.include_studio`).
     pub static CALLER: Option<sprig_workload::fingerprint::Caller>;
 }
@@ -133,7 +132,7 @@ struct Inner {
     /// Live: replaced when a `workload.*` key changes.
     settings: arc_swap::ArcSwap<CaptureSettings>,
     /// Weights of writes inside compound statements not yet counted as a
-    /// run, by tenant and fingerprint (decision A4).
+    /// run, by tenant and fingerprint.
     compound_weights: std::sync::Mutex<std::collections::HashMap<(TenantId, u64), f64>>,
 }
 
@@ -453,7 +452,7 @@ impl SessionCapture {
             });
         }
 
-        // Transaction footprints (chapter 12, build step 7), from the
+        // Transaction footprints, from the
         // backend's transaction state after each statement.
         let now = Instant::now();
         let was_open = self.txn.is_open();
@@ -518,14 +517,14 @@ impl SessionCapture {
         }
     }
 
-    /// One write statement inside a compound statement that ran (R6
-    /// round 6, decision A4: chapter 40's guarded batches), recorded as if
+    /// One write statement inside a compound statement that ran (such as a
+    /// Redis guarded batch), recorded as if
     /// it had been sent alone: a run each time its `weight`s (the share of
     /// the compound's runs it is expected to run in,
     /// `sprig_workload::fingerprint::compound`) add up to a whole one; one
     /// row, no time of its own (the compound has the time), no sample and
-    /// no transaction footprint. What it adds is the write load chapter
-    /// 13's cost model reads.
+    /// no transaction footprint. What it adds is the write load the
+    /// automatic indexing cost model reads.
     pub fn record_inner(&self, tenant: TenantId, conn: ConnId, fp: &Fingerprint, weight: f64) {
         let runs = {
             let mut m = self
@@ -596,7 +595,7 @@ impl<'a> CatalogResolver<'a> {
         }
     }
 
-    /// The table group of a database (R0: its default group).
+    /// The table group of a database: its default group.
     #[must_use]
     pub fn group_of(&self, db: DbId) -> Option<GroupId> {
         self.cat?.databases.get(db).map(|d| d.default_group_id)
@@ -624,9 +623,13 @@ impl TableResolver for CatalogResolver<'_> {
             physical,
         })
     }
+
+    fn database(&self, db: &str, _table: &str) -> Option<DbId> {
+        Some(self.cat?.database(&self.key(db))?.db_id)
+    }
 }
 
-/// The groups and tables a statement writes, by its shape (R0: each
+/// The groups and tables a statement writes, by its shape (each
 /// database's default group).
 #[must_use]
 pub fn writes_of(fp: &Fingerprint, r: &CatalogResolver<'_>) -> (Vec<GroupRef>, Vec<ObjectId>) {
@@ -719,7 +722,7 @@ pub fn sample_value(v: &sprig_proto_mysql::Value, no_backslash_escapes: bool) ->
 /// task (it flushes once more at shutdown).
 pub type Started = (Arc<dyn WorkloadHook>, Option<tokio::task::JoinHandle<()>>);
 
-/// Builds the gateway's workload capture (chapter 12) from the process
+/// Builds the gateway's workload capture from the process
 /// configuration and the live settings, and starts its flusher. Tenant
 /// sessions only: without tenant services (accounts-file logins), or with
 /// `[gateway] workload_capture_off`, the hook records nothing.

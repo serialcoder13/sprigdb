@@ -1,18 +1,16 @@
 //! Per-object settings, budgets at each scope, bound tightening and the
-//! churn dampers (chapter 13, "Settings scopes and budgets" and "Observing
-//! and dropping"; build step 16).
+//! churn dampers.
 //!
 //! **Resolution.** Every `auto_index.*` key resolves through
 //! `sprig-settings` for the object a candidate indexes (object, database,
 //! tenant, ancestors, cluster, dc, global, default: nearest first), with
-//! every wider scope's bounds applied and values clamped at read time
-//! (chapter 08).
+//! every wider scope's bounds applied and values clamped at read time.
 //! [`ObjectPolicy::resolve`] reads them all at once and keeps where each
 //! came from, for the decision log.
 //!
 //! - **Per object**: mode, trigger thresholds, `max_per_table`,
 //!   `max_storage_pct`, the improvement and regression limits, the observe
-//!   period, and decision O1's usage rule (`usage_sample_reads`,
+//!   period, and the usage rule (`usage_sample_reads`,
 //!   `min_usage_ratio`, `retire_user_indexes`). A table with `mode = off` gets nothing even when its
 //!   tenant is `on`.
 //! - **Shared cluster resources** ([`SharedLimits`]):
@@ -28,8 +26,8 @@
 //!   next selection ([`select`](super::cost::select)) sees the table over
 //!   budget and retires one index per evaluation.
 //!
-//! **Churn dampers** ([`Dampers`]), against chapter 47's index-churn
-//! thrash loop: a definition dropped for `no_gain`, `regression` or
+//! **Churn dampers** ([`Dampers`]), against the index-churn thrash
+//! loop: a definition dropped for `no_gain`, `regression` or
 //! `write_cost` can't be proposed again for `recreate_block_days`; a
 //! fingerprint decided within `cooldown_hours` isn't re-decided; creations
 //! per day are capped; and every creation of a definition dropped within
@@ -105,7 +103,7 @@ pub enum Mode {
     On,
     /// Run everything up to validation; stop at `recommended`.
     Recommend,
-    /// As `Recommend`, and the row waits in chapter 52's approvals inbox;
+    /// As `Recommend`, and the row waits in the approvals inbox;
     /// an approval rolls it out.
     Approve,
     /// No evaluation; existing automatic indexes are kept as they are.
@@ -137,8 +135,8 @@ pub struct Used {
     pub clamped: bool,
 }
 
-/// The trigger thresholds of one object (consumed by trigger evaluation,
-/// step 2).
+/// The trigger thresholds of one object (consumed by trigger
+/// evaluation).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TriggerThresholds {
     /// `auto_index.window_hours`.
@@ -181,7 +179,7 @@ pub struct ObserveRules {
     /// `auto_index.recreate_block_days`.
     pub recreate_block_days: u32,
     /// `auto_index.usage_sample_reads`: reads per usage judgement and per
-    /// `IGNORED` watch (decision O1).
+    /// `IGNORED` watch.
     pub usage_sample_reads: u64,
     /// `auto_index.min_usage_ratio`, a fraction (0.05).
     pub min_usage_ratio: f64,
@@ -216,7 +214,7 @@ pub struct ObjectPolicy {
     /// `auto_index.recommend_ttl_days`.
     pub recommend_ttl_days: u32,
     /// `auto_index.vector_ann`: whether vector (ANN) candidates are built
-    /// (`on`) or only recommended (R6 round 3).
+    /// (`on`) or only recommended.
     pub vector_ann: Mode,
     /// Every value read, by key, with its source: the decision log's
     /// "resolved values they used".
@@ -389,7 +387,7 @@ impl Route {
     }
 }
 
-/// Chapter 13's routing: `recommend` mode, and a fast-trigger candidate
+/// The routing: `recommend` mode, and a fast-trigger candidate
 /// on a table above `scan_recommend_above_gb` (`advise`), validate only
 /// when `recommend_validate` is on and a validation node exists, then stop
 /// at `recommended`.
@@ -680,8 +678,7 @@ impl Damped {
     }
 }
 
-/// The window in which a re-creation counts as churn (chapter 13: 30
-/// days).
+/// The window in which a re-creation counts as churn (30 days).
 pub const CHURN_WINDOW: Duration = Duration::from_secs(30 * 86_400);
 
 /// The churn dampers of one evaluation.
@@ -739,7 +736,7 @@ impl Dampers {
 
 /// Whether creating `def` now re-creates a definition dropped within
 /// [`CHURN_WINDOW`]; if so it is counted in
-/// `sprig_advisor_autoindex_churn_total` (chapter 47's index-churn signal).
+/// `sprig_advisor_autoindex_churn_total`.
 #[must_use]
 pub fn record_churn(def: &IndexDef, dropped: &[AutoIndexRow], now: SystemTime) -> bool {
     let name = def.name();

@@ -1,5 +1,5 @@
-//! The `logic` loop (chapter 41, "After-commit triggers" and "Scheduled
-//! jobs"; R7 order 5), on the DC leader, every second:
+//! The `logic` loop (after-commit triggers and scheduled jobs), on the DC
+//! leader, every second:
 //!
 //! ```text
 //! triggers: each active feed subscription of kind `logic` (logic:b<binding>)
@@ -12,7 +12,7 @@
 //!   module, schema, run); the index follows next_fire_at
 //! ```
 //!
-//! triggers on streams and queues (R9): each index entry
+//! triggers on streams and queues: each index entry
 //!   logic/msg/<tenant>/<binding> without a live `logic_stream_trigger` or
 //!   `logic_queue_trigger` job → submit one (spec: tenant, binding), in the
 //!   `consumer` job class; the job removes the entry when its stream or

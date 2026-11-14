@@ -1,5 +1,5 @@
 //! Live validation tests on the development Compose topologies
-//! (`deploy/compose`), chapter 13 build steps 6 to 9. Each test is skipped
+//! (`deploy/compose`): replay and the validators. Each test is skipped
 //! unless its variable is set to a comma-separated list of node URLs, the
 //! writer first (the same variables as `sprig-cluster`'s compose tests):
 //!
@@ -847,7 +847,7 @@ async fn automatic_on(ep: &NodeEndpoint, schema: &str) -> String {
     .unwrap_or_default()
 }
 
-/// bugfix-61: a replica validation cut off mid-way (its future dropped, as
+/// A replica validation cut off mid-way (its future dropped, as
 /// a controller restart drops it) leaves its index on the replica, since
 /// MariaDB finishes the `ALTER` without its client. The next validation of
 /// the same candidate then aborted with `index_exists` for good; now the
@@ -1018,7 +1018,7 @@ async fn replica_validation_after_a_cut_off_one() {
     wait_caught_up(primary, replicas, schema, true).await;
 }
 
-/// bugfix-61 on Galera: a leftover index on a node that isn't the writer
+/// On Galera: a leftover index on a node that isn't the writer
 /// (as a cut-off RSU validation leaves it) is dropped in RSU with the
 /// binary log off; the node is Synced again and no other node changed.
 #[tokio::test]

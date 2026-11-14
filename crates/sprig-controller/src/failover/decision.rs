@@ -1,5 +1,5 @@
-//! The pure parts of the global failover decision (chapter 25, "The global
-//! failover decision", steps 3, 5 and 7).
+//! The pure parts of the global failover decision: steps 3, 5 and 7 of the
+//! outline in [`super::global`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -104,7 +104,7 @@ pub struct TenantCandidate {
     pub writers: Vec<String>,
     /// Pinned to the lost DC (`sprigctl tenant pin`): never moved.
     pub pinned: bool,
-    /// The tenant's allowed DCs (chapter 26); `None`: unrestricted.
+    /// The tenant's allowed DCs (residency); `None`: unrestricted.
     pub allowed_dcs: Option<BTreeSet<DcId>>,
 }
 
@@ -146,7 +146,7 @@ pub fn plan_tenant(
     }
     let mut why = Vec::new();
     for dc in &t.standby_dcs {
-        // Residency (chapter 26): a standby outside the allowed DCs is
+        // Residency: a standby outside the allowed DCs is
         // never promoted, whatever its lag.
         if let Some(a) = &t.allowed_dcs
             && !a.contains(dc)

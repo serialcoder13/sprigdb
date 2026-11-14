@@ -197,6 +197,18 @@ pub trait Watermarks: Send + Sync {
     async fn publish(&self, epoch: LeaderEpoch, marks: &BTreeMap<PartitionNo, Offset>);
 }
 
+/// A sequencer's feed as the shared pump reads it (`sprig_feed::pump`:
+/// a task of its own, so the run loop's deadlines can't cancel a read
+/// half-way; decision r9-131).
+#[async_trait::async_trait]
+impl sprig_feed::pump::Source for Box<dyn FeedSource> {
+    type Item = FeedItem;
+
+    async fn next(&mut self) -> Result<FeedItem> {
+        FeedSource::next(self.as_mut()).await
+    }
+}
+
 /// Watermarks that go nowhere.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoWatermarks;
@@ -486,7 +498,15 @@ impl Sequencer {
         };
         let epoch = acq.epoch;
         tracing::info!(epoch = epoch.0, start = ?acq.start, "stream sequencer acquired its log shard");
-        let mut feed = self.feed.open(&acq.start).await?;
+        // Read in a task of its own: a feed's `next` isn't cancel-safe (a
+        // tail takes a group from its source, then awaits catalog lookups),
+        // and the deadlines below would drop it half-way, losing the group
+        // (R9, r9feed: new instances lost their first record).
+        let mut feed = sprig_feed::pump::Pump::start(
+            self.feed.open(&acq.start).await?,
+            sprig_feed::pump::Pump::<FeedItem>::AHEAD,
+            "stream sequencer",
+        );
         let kind = match self.filter {
             Filter::Outbox { .. } => "events",
             Filter::Changes { .. } => "changes",

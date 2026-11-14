@@ -1,5 +1,4 @@
-//! MySQL's JSON operators on port 3306 (chapter 28, "Queries and
-//! expressions"; R4 round 5).
+//! MySQL's JSON operators on port 3306.
 //!
 //! - **`c->'$.p'` and `c->>'$.p'`.** MariaDB before 13.1 has neither and
 //!   fails with 1064. In MySQL the left side is always a column (perhaps

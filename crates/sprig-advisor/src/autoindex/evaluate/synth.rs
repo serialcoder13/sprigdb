@@ -1,4 +1,4 @@
-//! Synthetic chapter 12 windows for the trigger and evaluation tests: a
+//! Synthetic workload windows for the trigger and evaluation tests: a
 //! fingerprint's runs, latency, probes, scans and samples, built directly
 //! into [`FpWindowStats`].
 
@@ -109,7 +109,7 @@ fn value(p: &Param) -> SampleValue {
     }
 }
 
-/// A sample in chapter 12's form from the generator's literal list.
+/// A sample in the workload store's form from the generator's literal list.
 pub(crate) fn sampled(lits: &[Literal]) -> SampledLiterals {
     SampledLiterals {
         slots: lits

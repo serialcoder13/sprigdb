@@ -158,3 +158,63 @@ fn server_config_honours_the_minimum_version() {
     assert!(server_config(b.clone(), TlsVersion::V1_2).is_ok());
     assert!(server_config(b, TlsVersion::V1_3).is_ok());
 }
+
+fn pem(der: &[u8]) -> String {
+    use base64::Engine as _;
+    let b = base64::engine::general_purpose::STANDARD.encode(der);
+    let lines: Vec<&str> = b
+        .as_bytes()
+        .chunks(64)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect();
+    format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        lines.join("\n")
+    )
+}
+
+/// A changed client CA file is loaded on the second poll that
+/// sees it, as server certificates are, by every listener's verifier; a
+/// file that doesn't load keeps the old CAs.
+#[test]
+fn client_ca_files_are_reloaded_when_they_change() {
+    let (one, two, dir) = (TestCa::new(), TestCa::new(), TempDir::new());
+    let path = dir.path().join("client-ca.pem");
+    std::fs::write(&path, pem(&one.der)).unwrap();
+    let store = CertStore::new(clock());
+    let ca = store.client_ca(&path).unwrap();
+    assert!(Arc::ptr_eq(&ca, &store.client_ca(&path).unwrap()));
+    let verifier = LiveClientVerifier {
+        ca: Arc::clone(&ca),
+        required: true,
+    };
+    let from_two = two.leaf("alice", FAR);
+    let now = rustls::pki_types::UnixTime::now();
+    assert!(
+        verifier
+            .verify_client_cert(&from_two.der, &[], now)
+            .is_err()
+    );
+    let from_one = one.leaf("bob", FAR);
+    assert!(verifier.verify_client_cert(&from_one.der, &[], now).is_ok());
+
+    // A file that isn't a CA is rejected once it settles; the old CAs stay.
+    std::fs::write(&path, "not a certificate").unwrap();
+    let outcomes = |s: &CertStore| s.poll().into_iter().map(|(_, o)| o).collect::<Vec<_>>();
+    assert!(matches!(outcomes(&store)[..], [PollOutcome::Pending]));
+    assert!(matches!(outcomes(&store)[..], [PollOutcome::Rejected(_)]));
+    assert!(verifier.verify_client_cert(&from_one.der, &[], now).is_ok());
+
+    // The new CA: loaded on the second poll, used at the next handshake.
+    std::fs::write(&path, pem(&two.der)).unwrap();
+    assert!(matches!(outcomes(&store)[..], [PollOutcome::Pending]));
+    assert!(matches!(outcomes(&store)[..], [PollOutcome::Rotated]));
+    assert!(verifier.verify_client_cert(&from_two.der, &[], now).is_ok());
+    assert!(
+        verifier
+            .verify_client_cert(&from_one.der, &[], now)
+            .is_err()
+    );
+    assert!(verifier.client_auth_mandatory());
+    assert!(matches!(outcomes(&store)[..], [PollOutcome::Unchanged]));
+}

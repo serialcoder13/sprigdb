@@ -1,5 +1,4 @@
-//! Logic functions through a live gateway (chapter 41, "Calling code";
-//! chapter 37, "Logic functions as endpoints"; R7 order 6): the same
+//! Logic functions through a live gateway: the same
 //! function written in KIRun (compiled into MariaDB), JavaScript (QuickJS)
 //! and Lua (Lua 5.1) called with `CALL`, `SELECT f(...)`, REST and gRPC;
 //! transactions; exposure; the caller's rights; budgets and the sandbox.

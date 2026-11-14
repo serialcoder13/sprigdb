@@ -422,7 +422,7 @@ async fn a_new_leader_waits_three_ttls_before_acting_on_a_missing_lease() {
     assert_eq!(ended(&out[0]).state, FailoverState::Done);
 }
 
-/// Chapter 52: approvals over `w`'s tiers with `failover.mode = approve`
+/// Approvals over `w`'s tiers with `failover.mode = approve`
 /// set at the global scope.
 async fn approvals_over(w: &World) -> Arc<crate::approvals::ControllerApprovals> {
     let ams = TierView::over(&w.store, Tier::Dc(dc("ams1")));

@@ -1,10 +1,9 @@
 # sprig-sql fuzz targets
 
-cargo-fuzz targets for the SQL layer (chapter 46 step 4): the persona-aware
-lexer, chapter 07's name rewriter and plan, and chapter 28's R0 rewrites.
-The wire codec's targets are in `../../sprig-proto-mysql/fuzz`. The oracle is
-chapter 46's (no panic, no hang, bounded memory) plus each layer's invariants,
-listed in `src/lib.rs`.
+cargo-fuzz targets for the SQL layer: the persona-aware lexer, the name
+rewriter and plan, and the translator's core rewrites. The wire codec's targets
+are in `../../sprig-proto-mysql/fuzz`. The oracle is no panic, no hang and
+bounded memory, plus each layer's invariants, listed in `src/lib.rs`.
 
 | Target | What it feeds |
 |---|---|

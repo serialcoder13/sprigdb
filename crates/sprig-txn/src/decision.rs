@@ -1,5 +1,4 @@
-//! Decision records: the `__sprig_dtx` table (chapter 18, "Decision
-//! table").
+//! Decision records: the `__sprig_dtx` table.
 //!
 //! Exactly one outcome is recorded per distributed transaction, by
 //! whichever insert of its dtid commits first ("Deciding by insert race").
@@ -13,7 +12,7 @@ use crate::xid::{AnchorRef, Dtid, bqual};
 /// The decision table's name inside every shard schema.
 pub const DTX_TABLE: &str = sprig_catalog::ddl::DTX_TABLE;
 
-/// `CREATE TABLE` for the decision table (chapter 08's `CREATE DATABASE`
+/// `CREATE TABLE` for the decision table (`CREATE DATABASE`
 /// creates it with every database schema, and split, merge and move copy
 /// it into every child shard; the coordinator's tests and the resolver
 /// create it when missing). The text is the catalog's.
@@ -70,7 +69,7 @@ pub enum ParticipantKind {
     Xa,
     /// The last resource: committed with the decision row.
     Last,
-    /// A held branch (Sprig 2PC, R3): redo rows, finished in phase 2 or
+    /// A held branch (Sprig 2PC): redo rows, finished in phase 2 or
     /// replayed by the resolver.
     Held,
 }

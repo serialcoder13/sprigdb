@@ -1,19 +1,18 @@
 //! MongoDB's `explain` for `find`, `aggregate`, `count`, `distinct`,
-//! `update` and `delete` (chapter 31, "Interfaces"; R5 round 8, after
-//! decision S25 covered the searches).
+//! `update` and `delete` (searches have their own).
 //!
 //! The command runs through the engine as usual, on a [`Recorder`] around
 //! the caller's session: every statement the engine sends to the
 //! collection's table is noted, and nothing is written. Reads of the table
-//! run for `executionStats` and `allPlansExecution` (so the counts are
-//! real) and are answered with no rows for `queryPlanner`, which then shows
-//! the first statement of each step without reading. Writes to the table
-//! (an `UPDATE`, a `DELETE`) are noted and not sent; an update is planned as
-//! the read that finds its documents plus the write the engine would send
-//! for each. Each noted statement then goes to MariaDB as `EXPLAIN
-//! FORMAT=JSON` through the same session, so chapter 29's privileges and
-//! row policies apply: a caller a row policy binds gets MariaDB's plan
-//! refused (RL26), as SQL `EXPLAIN` is, and sees the refusal in its place.
+//! run for `executionStats` and `allPlansExecution` (so the counts are real)
+//! and are answered with no rows for `queryPlanner`, which then shows the
+//! first statement of each step without reading. Writes to the table (an
+//! `UPDATE`, a `DELETE`) are noted and not sent; an update is planned as the
+//! read that finds its documents plus the write the engine would send for
+//! each. Each noted statement then goes to MariaDB as `EXPLAIN FORMAT=JSON`
+//! through the same session, so the caller's privileges and row policies
+//! apply: a caller a row policy binds gets MariaDB's plan refused, as SQL
+//! `EXPLAIN` is, and sees the refusal in its place.
 //!
 //! The reply has MongoDB's shape. `queryPlanner.winningPlan` is a stage tree
 //! made from MariaDB's plan of the main read (`EXPRESS_IXSCAN` for a point
@@ -166,7 +165,7 @@ struct Ran {
     planned: Vec<String>,
     /// Extra `executionStats` fields (`nMatched`, `nWouldDelete`).
     stats: Document,
-    /// What an aggregation's stages spilled (M5).
+    /// What an aggregation's stages spilled.
     spills: Vec<sprig_doc::spill::StageSpill>,
 }
 
@@ -333,7 +332,7 @@ pub(super) async fn explain(
             cursor.insert("executionStats", s);
         }
         let mut stages = vec![Bson::Document(doc! {"$cursor": cursor})];
-        // M5: MongoDB 8.2's spill fields on each stage (executionStats).
+        // MongoDB 8.2's spill fields on each stage (executionStats).
         let all = cmd.get_array("pipeline").map_or(0, Vec::len);
         let rest = pipeline_rest(cmd);
         let first = all - rest.len();
@@ -468,7 +467,7 @@ async fn run(
                 .await?;
                 ran.gateway.push("$out / $merge not run by explain".into());
             } else {
-                // M5: the command's `allowDiskUse`, and what it spilled.
+                // The command's `allowDiskUse`, and what it spilled.
                 let ctx = super::spill::ctx_for(cmd, "aggregate", rec.tenant(), None)?;
                 let seen = ctx.clone();
                 ran.n = sprig_doc::spill::scope(ctx, Box::pin(engine.aggregate(rec, ns, &pipeline)))

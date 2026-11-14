@@ -4659,7 +4659,42 @@ async fn explicit_vs_blocks(e: &Env, w: &World, second: &str, tally: &mut Tally)
             .iter()
             .filter(|(_, _, h)| Some(h) != me.as_ref())
             .max_by_key(|(a, _, _)| *a);
-        let top = blocks.iter().map(|(_, z, _)| *z).max().unwrap_or(0);
+        // Past every block means past the sequence's next value too: with
+        // no live block (leases all ended, say after the server's clock
+        // stepped forward) `top` alone would be 0, and the same explicit
+        // value would go to several shards (an id that isn't the shard key
+        // and has no unique lookup is only unique per shard; chapter 19).
+        let next: i64 = cat
+            .exec_first::<String, _, _>(
+                "SELECT CAST(next_value AS CHAR) FROM sequences WHERE seq_id = ?",
+                (seq,),
+            )
+            .await
+            .unwrap()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if blocks.is_empty() {
+            let all: Vec<(String, String, String, String, String)> = cat
+                .exec(
+                    "SELECT CAST(start_value AS CHAR), CAST(end_value AS CHAR), holder, \
+                     CAST(lease_until AS CHAR), CAST(UTC_TIMESTAMP(6) AS CHAR) \
+                     FROM sequence_blocks WHERE seq_id = ?",
+                    (seq,),
+                )
+                .await
+                .unwrap();
+            println!(
+                "explicit vs blocks: round {i}: no live block of {t} (seq {seq}, next {next}, \
+                 this gateway's last value {mine}); all rows: {all:?}; host {:?}",
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+            );
+        }
+        let top = blocks
+            .iter()
+            .map(|(_, z, _)| *z)
+            .max()
+            .unwrap_or(0)
+            .max(next);
         // Odd rounds of four: past every block; else inside the other
         // gateway's newest block, at its last value (most likely unused).
         let (v, inside) = match foreign {
@@ -5077,6 +5112,19 @@ async fn sql_ps_phase(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -
             )),
         }
     }
+    // The session still gathers reads: an EXECUTE or DEALLOCATE that
+    // reached the backend would have pinned its connection, and a pinned
+    // session can't gather (found by the full suite).
+    let g = "SELECT cid FROM customers INTERSECT SELECT cid FROM orders";
+    let (a, b) = (run(sut, g).await, run(reference, g).await);
+    if let Outcome::Err(39420, m) = &a {
+        tally.compared += 1;
+        tally
+            .mismatches
+            .push(format!("NO GATHERED READ AFTER SQL PREPARE {g}: {m}"));
+    } else {
+        tally.check(g, Cmp::Bag, &a, &b);
+    }
     for c in [&mut *sut, &mut *reference] {
         c.query_drop("DROP TABLE IF EXISTS ps_plain").await.unwrap();
     }
@@ -5313,8 +5361,13 @@ async fn differential_against_one_unsharded_mariadb() {
         .await;
     }
     // bugfix prepfix: SQL-level PREPARE / EXECUTE.
-    let sql_ps_line = sql_ps_phase(&mut sut, &mut reference, &mut tally).await;
-    println!("{sql_ps_line}");
+    // `SPRIG_TEST_R1_NO_SQL_PS` leaves these phases out (a run as before
+    // them, to tell their effect apart).
+    let sql_ps = env("SPRIG_TEST_R1_NO_SQL_PS").is_none();
+    if sql_ps {
+        let sql_ps_line = sql_ps_phase(&mut sut, &mut reference, &mut tally).await;
+        println!("{sql_ps_line}");
+    }
     let prepared_done = tally.compared;
     for (s, table) in dml(&mut r) {
         let a = run(&mut sut, &s).await;
@@ -5372,7 +5425,9 @@ async fn differential_against_one_unsharded_mariadb() {
     )
     .await;
     let txn_done = tally.compared;
-    sql_ps_before_move(&mut sut, &mut reference, &mut tally).await;
+    if sql_ps {
+        sql_ps_before_move(&mut sut, &mut reference, &mut tally).await;
+    }
     // The map changes mid-run: a split onto the other cluster.
     let reads = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
     // The first split holds long enough for reads to wait it out; the
@@ -5418,8 +5473,10 @@ async fn differential_against_one_unsharded_mariadb() {
         let b = run_exec(&mut reference, s, p).await;
         tally.check(s, mode, &a, &b);
     }
-    let sql_ps_after = sql_ps_after_move(&mut sut, &mut reference, &mut tally).await;
-    println!("{sql_ps_after}");
+    if sql_ps {
+        let sql_ps_after = sql_ps_after_move(&mut sut, &mut reference, &mut tally).await;
+        println!("{sql_ps_after}");
+    }
     let mut r3_after = R3Stats::default();
     r3_reads(
         &mut sut,

@@ -99,7 +99,7 @@ fn statement_ranges_keep_the_executable_comments_they_open() {
     }
 }
 
-/// Chapter 07 step 12: account functions and `DATABASE()` in a table's
+/// Account functions and `DATABASE()` in a table's
 /// definition would run inside MariaDB as the backend account; no lookup
 /// can replace them there (no subqueries in defaults), so they fail.
 #[test]
@@ -130,7 +130,7 @@ fn account_functions_in_table_definitions_fail() {
 
 #[test]
 fn only_the_rls_subtree_view_of_sprig_sys_passes() {
-    // Chapter 29 (RL58): the rewrite's subtree subquery stays as written;
+    // Row-level security: the rewrite's subtree subquery stays as written;
     // every other `__sprig_sys` name is still unknown.
     let m = MemoryNameMap::new(TenantId(1)).with_db(1, "d", 1, 1);
     let ctx = RewriteCtx::new(&m, Persona::MySql84);

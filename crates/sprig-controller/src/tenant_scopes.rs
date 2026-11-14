@@ -1,5 +1,4 @@
-//! Tenant, database and object scopes for controllers and workers
-//! (chapter 08, "Setting resolution"; decision RF3, r2last).
+//! Tenant, database and object scopes for controllers and workers.
 //!
 //! Gateways resolve settings over their catalog cache, which holds every
 //! tenant's setting rows. Controllers and workers mirror only the etcd
@@ -24,9 +23,8 @@
 //! Resolution layers the rows over the process's etcd snapshot
 //! ([`get`]), exactly as gateways do (`TenantSettings::resolve`): the
 //! narrowest scope wins and every wider scope's bounds apply. Tenant-wide
-//! controller decisions resolve at the home DC (chapter 08: "`ctx.dc` is
-//! the evaluating process's DC; tenant-wide controller decisions use the
-//! home DC").
+//! controller decisions resolve at the home DC, whatever DC the
+//! evaluating process is in (`ctx.dc` is otherwise that process's DC).
 //!
 //! A tenant whose catalog can't be read (a lost DC, two-tier mode where
 //! another DC's tier isn't reachable from here) resolves over the etcd
@@ -53,7 +51,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(1);
 /// Cached tenants per process; the cache is cleared when it is full.
 pub const MAX_TENANTS: usize = 10_000;
 
-/// The internal key holding the ancestry (chapter 08).
+/// The internal key holding the ancestry.
 const ANCESTRY_KEY: &str = "sprig.ancestry";
 /// The internal key holding the committed catalog version.
 const CATALOG_VERSION_KEY: &str = "sprig.catalog_version";
@@ -216,7 +214,7 @@ impl TenantScopes {
     /// The rows of `tenant` as of now: the directory is asked whatever the
     /// cached copy's age (one linearizable etcd read), so a change committed
     /// a moment ago is seen. For rare decisions that must not act on a
-    /// stale mode (chapter 52's vector gate; approvals round 3).
+    /// stale mode (the approvals' vector gate).
     pub async fn get_fresh(&self, tenant: TenantId) -> Option<Arc<TenantSettings>> {
         match self.refresh(tenant).await {
             Ok(r) => r,

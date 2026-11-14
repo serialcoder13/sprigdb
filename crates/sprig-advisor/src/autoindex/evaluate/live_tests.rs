@@ -89,7 +89,7 @@ where
 
 /// 20,000 orders: 500 customers (40 rows each), status `paid` 95%,
 /// `open` 4%, `hold` 1%, one a minute from 2026-01-01; a user index on
-/// `created_at`, as in worked example 1. A 300-byte `note` gives the rows
+/// `created_at`, as in example 1. A 300-byte `note` gives the rows
 /// a realistic width: a new index must fit in 20% of the table.
 const TABLE: &str = "CREATE TABLE orders (
   id          INT PRIMARY KEY AUTO_INCREMENT,
@@ -283,7 +283,7 @@ async fn live_evaluation_proposes_the_expected_index() {
     .await;
 }
 
-/// Chapter 33's hash view over a namespace `cache` (R6 round 5): the
+/// The key-value hash view over a namespace `cache`: the
 /// directory maps the view object to its element table.
 struct KvDirectory {
     metas: BTreeMap<ObjectId, ObjectMeta>,
@@ -317,7 +317,7 @@ async fn live_hash_field_lookup_gets_an_element_table_index() {
             c.query_drop(format!("USE {}", quote(&schema)))
                 .await
                 .unwrap();
-            // Chapter 33's tables and hash view for namespace `cache`, as
+            // The key-value tables and hash view for namespace `cache`, as
             // `sprig_kv::layout` and `sprig_kv::api::view_ddl` make them.
             for s in [
                 "CREATE TABLE cache (k VARBINARY(1024) NOT NULL, \

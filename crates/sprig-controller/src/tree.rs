@@ -1,5 +1,4 @@
-//! The tenant tree in the directory (chapter 23, "The tenant tree" and
-//! "Global tier"; build step 16, the parts tenant bootstrap needs).
+//! The tenant tree in the directory (the parts tenant bootstrap needs).
 //!
 //! A directory entry `/sprig/g/tenants/<tenant_id>` holds the tenant's
 //! name, state, home DC, versions and tree fields; `tenant-names/<name>`
@@ -15,17 +14,17 @@
 //!      then [put tenant-names/<name>; put tenants/<id> {parent_tenant_id: p,
 //!            path: P.path + id + "/", depth: P.depth + 1, state: creating, ...};
 //!            put tenants/<p> with child_count + 1; put ids/tenant + 1]
-//!    then chapter 08's bootstrap in the home DC
+//!    then the tenant's bootstrap in the home DC
 //!
-//! delete_tenant(t):    child_count = 0 and state active, else 39362 (chapter 29); the
+//! delete_tenant(t):    child_count = 0 and state active, else 39362; the
 //!    tombstone and the parent's child_count - 1 commit in one txn guarded by both ModRevs
 //! ```
 //!
-//! Where this differs from the book, for now:
-//! - Chapter 23 makes the global leader the directory's only writer
-//!   (`Global.CreateTenant`, R2). In R0's single-etcd mode the DC leader
-//!   writes the entries directly, as chapter 08's catalog writers already
-//!   compare-and-swap the version fields; every write is a transaction
+//! Implementation notes, for now:
+//! - The global leader isn't the directory's only writer
+//!   (`Global.CreateTenant`): in single-etcd mode the DC leader writes the
+//!   entries directly, as the catalog writers already compare-and-swap the
+//!   version fields; every write is a transaction
 //!   guarded by the mod revisions it read, so concurrent writers can't
 //!   corrupt the tree.
 //! - The tombstone of a deleted tenant is the entry in state `deleting`;
@@ -33,15 +32,14 @@
 //!   dropped (`sprig-controller::tenants`), so a name is reusable only
 //!   after cleanup.
 //! - An entry may carry `placement_hint`, the `--cluster` asked for at
-//!   create, until bootstrap records the catalog's shard map (interim
-//!   placement until chapter 11's, M0.6).
+//!   create, until bootstrap records the catalog's shard map.
 //!
 //! Suspension ([`Directory::set_suspended`], `sprigctl tenant suspend` and
 //! `resume`): the entry's `suspended` flag with its reason and time; logins
 //! in the subtree refuse with 39303, and the suspension's auth change
 //! closes open sessions (`sprig-controller::users`).
 //!
-//! Not yet: `MoveTenantTree` and `tree-moves/` (with the rest of step 16),
+//! Not yet: `MoveTenantTree` and `tree-moves/` (subtree moves),
 //! and the path index in the controllers' mirrors (the `tree_settings`
 //! loop scans its mirror).
 
@@ -62,8 +60,8 @@ use crate::admin::invalid;
 /// Attempts at a directory write whose compare failed.
 const WRITE_ATTEMPTS: usize = 20;
 
-/// A tenant's state in the directory (chapter 23; `failed` is chapter 08's
-/// end of a bootstrap past its deadline).
+/// A tenant's state in the directory (`failed` is the end of a bootstrap
+/// past its deadline).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantState {
@@ -71,11 +69,11 @@ pub enum TenantState {
     Creating,
     /// Serving.
     Active,
-    /// Moving to another home DC (chapter 24).
+    /// Moving to another home DC.
     Migrating,
-    /// Its home DC is failing over (chapter 25).
+    /// Its home DC is failing over.
     FailingOver,
-    /// Fenced (chapter 25).
+    /// Fenced by a DC failover.
     Fenced,
     /// Deleted; cleanup is running.
     Deleting,
@@ -105,7 +103,7 @@ impl std::fmt::Display for TenantState {
     }
 }
 
-/// A directory entry, `/sprig/g/tenants/<tenant_id>` (chapter 23). Fields
+/// A directory entry, `/sprig/g/tenants/<tenant_id>`. Fields
 /// this build doesn't know (`pinned_dc`, `residency`, ...) are kept by the
 /// record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,10 +119,10 @@ pub struct DirectoryEntry {
     /// Raised on every home change.
     #[serde(default)]
     pub epoch: u64,
-    /// The last allocated catalog version (chapter 08).
+    /// The last allocated catalog version.
     #[serde(default)]
     pub catalog_version: u64,
-    /// The last allocated auth version (chapter 14).
+    /// The last allocated auth version.
     #[serde(default)]
     pub auth_version: u64,
     /// The catalog version of the last tenant-scope settings change, which
@@ -157,7 +155,7 @@ pub struct DirectoryEntry {
     /// The `move_id` of an open subtree move.
     #[serde(default)]
     pub tree_lock: Option<String>,
-    /// Interim: the cluster `--cluster` asked for, until bootstrap writes
+    /// The cluster `--cluster` asked for, until bootstrap writes
     /// the catalog's shard map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_hint: Option<ClusterId>,
@@ -502,7 +500,7 @@ impl Directory {
 
     /// The ancestry of `entry` from the parent links, root first, parent
     /// last, each with its `settings_version`. Parent links are the truth
-    /// (chapter 23: paths may lag during a move).
+    /// (paths may lag during a move).
     ///
     /// # Errors
     /// 39072 if an ancestor's entry is missing; `Internal` for a cycle.
@@ -527,7 +525,7 @@ impl Directory {
         Ok(out)
     }
 
-    /// Chapter 23's `create_tenant`: allocates the id and writes the name,
+    /// `create_tenant`: allocates the id and writes the name,
     /// the entry (state `creating`) and the parent's child count in one
     /// transaction.
     ///
@@ -643,7 +641,7 @@ impl Directory {
 
     /// Raises `ids/tenant` so the next id is above `used`, the highest id
     /// found in use elsewhere (a catalog schema on a cluster). Never lowers
-    /// it. Ids are never reused (chapter 23), even when the counter was
+    /// it. Ids are never reused, even when the counter was
     /// lost while an earlier tenant's schemas stayed on a cluster.
     ///
     /// # Errors
@@ -689,7 +687,8 @@ impl Directory {
         ))
     }
 
-    /// Chapter 23's step 1 and 2 checks on a parent.
+    /// The checks on a parent (steps 1 and 2 of `create_tenant` in the
+    /// module docs).
     async fn parent_for_child(&self, p: TenantId, max_depth: u32) -> Result<StoredEntry> {
         let parent = self.get(p).await?.ok_or_else(|| unknown(p))?;
         let pb = parent.body();
@@ -777,8 +776,8 @@ impl Directory {
     }
 
     /// Suspends (`Some(reason)`) or resumes (`None`) tenant `id`: its
-    /// entry's `suspended` flag, with the reason and the time (chapter 23;
-    /// chapter 29's `ALTER TENANT ... SUSPEND | RESUME`). Logins in the
+    /// entry's `suspended` flag, with the reason and the time (`ALTER
+    /// TENANT ... SUSPEND | RESUME`). Logins in the
     /// whole subtree read the flag on the entry or any ancestor.
     ///
     /// # Errors
@@ -818,7 +817,7 @@ impl Directory {
         .await
     }
 
-    /// Chapter 23's `delete_tenant`: the entry becomes `deleting` and the
+    /// `delete_tenant`: the entry becomes `deleting` and the
     /// parent's child count drops, in one transaction guarded by both mod
     /// revisions. A tenant already `deleting` is returned as is.
     ///

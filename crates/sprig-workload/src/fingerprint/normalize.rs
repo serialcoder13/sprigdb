@@ -51,6 +51,10 @@ pub struct Normalized {
     pub unparsed: bool,
     /// The longest collapsed `IN` list, in elements.
     pub in_list_max: u32,
+    /// The first table the statement names (CTEs aside), when it is
+    /// written with its database (`retail.orders`). Computed even without
+    /// the table list: it decides the database part of the id.
+    pub qualified_first: Option<TableName>,
 }
 
 impl Normalized {
@@ -79,6 +83,7 @@ impl Normalized {
             sensitive: false,
             unparsed: true,
             in_list_max: 0,
+            qualified_first: None,
         }
     }
 }
@@ -150,6 +155,11 @@ pub(crate) fn normalize_with(
     } = w;
     let outs = collapse(sql, outs);
     let r = render(sql, &outs, &mut lits, current_db, lower_case_table_names);
+    let qualified_first = tables
+        .iter()
+        .find(|t| !t.cte)
+        .filter(|t| t.db.is_some())
+        .map(|t| t.finish(sql, None, lower_case_table_names));
     let tables = if want_tables {
         tables
             .into_iter()
@@ -168,6 +178,7 @@ pub(crate) fn normalize_with(
         sensitive,
         unparsed,
         in_list_max: r.in_list_max,
+        qualified_first,
     }
 }
 
@@ -303,6 +314,7 @@ fn bytes(src: &[u8], s: Src) -> &[u8] {
 }
 
 /// A table reference while walking.
+#[derive(Clone, Copy)]
 struct RawTable {
     db: Option<Src>,
     name: Src,

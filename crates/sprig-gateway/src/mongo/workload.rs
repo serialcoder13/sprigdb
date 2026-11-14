@@ -1,5 +1,4 @@
-//! MongoDB commands in chapter 12's workload store (`Fingerprinter::mongo`,
-//! chapter 12 build step 8; decision S130).
+//! MongoDB commands in the workload store (`Fingerprinter::mongo`).
 //!
 //! ```text
 //! find, aggregate ($match first), count, distinct, update, delete,
@@ -10,7 +9,7 @@
 //!           plan := recorder.plan(tenant, fp)       probe? sample?
 //!   run:    the command's statements run under FRONT_RUN: when the plan
 //!           probes, every statement reads Handler_read_* before and after
-//!           (chapter 12's probe), and the rows examined are summed
+//!           (the workload probe), and the rows examined are summed
 //!   after:  recorder.record(tenant, fp, summary): time, error, documents
 //!           returned or changed, rows examined when probed, one shard
 //!           [sample] the values by slot, sealed like a SQL sample
@@ -19,7 +18,7 @@
 //! The engine's own SQL statements are still fingerprinted as SQL, as
 //! before; the MongoDB fingerprint adds the command's view: its whole time,
 //! the documents it returned and the field paths it filters and sorts on,
-//! which chapter 13's document candidates read.
+//! which the automatic-index advisor's document candidates read.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -278,7 +277,7 @@ pub async fn start(
     let db_id = cap.table.as_ref().map_or(DbId(0), |t| t.db_id);
     let object_id = cap.table.as_ref().map(|t| t.object_id);
     let max_text_bytes = cap.workload.max_text_bytes();
-    // A point find's fingerprint depends only on its key (S147): reused
+    // A point find's fingerprint depends only on its key: reused
     // while the key stays the same; its values are this command's.
     let pk = point_key(
         name,
@@ -340,10 +339,10 @@ pub async fn start(
     })
 }
 
-/// What a point find's fingerprint depends on (perf1, S147): a `find` that
-/// the point-read path answers (filter `{_id: <scalar>}`, no sort,
-/// projection, hint or collation), so its shape is the `_id` value's type
-/// and which of `skip`, `limit` and `singleBatch` it carries.
+/// What a point find's fingerprint depends on: a `find` that the point-read
+/// path answers (filter `{_id: <scalar>}`, no sort, projection, hint or
+/// collation), so its shape is the `_id` value's type and which of `skip`,
+/// `limit` and `singleBatch` it carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointKey {
     db: String,
@@ -597,7 +596,7 @@ mod tests {
         assert_eq!(t, r#"{"filter":{"a":{"$eq":"?number"}}}"#);
     }
 
-    /// S147: point finds with the same key get the same fingerprint when
+    /// Point finds with the same key get the same fingerprint when
     /// computed afresh (so reusing it is exact), and the key changes with
     /// anything their shape reads; other finds have no key.
     #[test]

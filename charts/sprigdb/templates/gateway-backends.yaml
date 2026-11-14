@@ -11,10 +11,20 @@ metadata:
   annotations:
     helm.sh/resource-policy: keep
 type: Opaque
+{{- /* With TLS, MariaDB's certificates come from the DC's CA, not a
+     public one: the per-user connections check them against the CA bundle
+     every gateway mounts. A secret made before ca_file was written gets it
+     added; its password stays. */}}
+{{- $ca := "/etc/sprigdb/ca/ca.crt" }}
 data:
   {{- if $old }}
-  backends.toml: {{ index $old.data "backends.toml" }}
+  {{- $text := index $old.data "backends.toml" | b64dec }}
+  {{- if and .Values.tls.enabled (not (contains "ca_file" $text)) (contains "tls = \"verify\"\n" $text) }}
+  {{- $text = replace "tls = \"verify\"\n" (printf "tls = \"verify\"\nca_file = \"%s\"\n" $ca) $text }}
+  {{- end }}
+  backends.toml: {{ $text | b64enc }}
+  {{- else if .Values.tls.enabled }}
+  backends.toml: {{ printf "[per_user]\nsecret = \"file:backends.toml#backend_secret\"\ntls = \"verify\"\nca_file = \"%s\"\n[backend_secret]\npassword = \"%s\"\n" $ca (randAlphaNum 48) | b64enc }}
   {{- else }}
-  {{- $tls := ternary "verify" "skip_verify" .Values.tls.enabled }}
-  backends.toml: {{ printf "[per_user]\nsecret = \"file:backends.toml#backend_secret\"\ntls = \"%s\"\n[backend_secret]\npassword = \"%s\"\n" $tls (randAlphaNum 48) | b64enc }}
+  backends.toml: {{ printf "[per_user]\nsecret = \"file:backends.toml#backend_secret\"\ntls = \"skip_verify\"\n[backend_secret]\npassword = \"%s\"\n" (randAlphaNum 48) | b64enc }}
   {{- end }}

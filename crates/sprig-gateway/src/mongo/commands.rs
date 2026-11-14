@@ -1,4 +1,4 @@
-//! Command handlers (chapter 30, "Dispatch"; build steps 4-8 in part).
+//! Command handlers.
 //!
 //! Each handler parses the command, runs `sprig-doc`'s engine over a
 //! [`SqlRunner`] and builds the reply. Outside transactions the runner is
@@ -88,7 +88,7 @@ impl TxnTable {
         }
     }
 
-    /// Open transactions other than session `except`'s (M3: 9.0's
+    /// Open transactions other than session `except`'s (for 9.0's
     /// `TooManyOpenTransactions`); an entry in use counts as open.
     async fn open_count(&self, except: &[u8]) -> usize {
         let entries: Vec<Arc<tokio::sync::Mutex<TxnEntry>>> = self
@@ -188,9 +188,9 @@ pub(super) fn docs_of(body: &Document, k: &str) -> Vec<Document> {
         .unwrap_or_default()
 }
 
-/// The command with its `let` variables bound (chapter 31, R5 round 4):
-/// each `$$name` the command's filters, pipelines and pipeline updates
-/// read becomes the value's `$literal`. `None` when it has no `let`.
+/// The command with its `let` variables bound: each `$$name` the command's
+/// filters, pipelines and pipeline updates read becomes the value's
+/// `$literal`. `None` when it has no `let`.
 ///
 /// # Errors
 /// The `let` expressions' own.
@@ -262,11 +262,11 @@ pub(super) fn bind_lets(name: &str, body: &Document) -> Result<Option<Document>,
 pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, MongoError> {
     let bound = bind_lets(name, body)?;
     let body = bound.as_ref().unwrap_or(body);
-    // The command's collation (chapter 31): every comparison it makes.
+    // The command's collation: every comparison it makes.
     // Writes carry theirs per statement (`writes`).
     let coll = sprig_doc::collation::Collation::of(body)?;
-    // Server-side JavaScript (M4, decision S110): its scope, and the
-    // first error its code met, which the command answers with.
+    // Server-side JavaScript: its scope, and the first error its code met,
+    // which the command answers with.
     let js = super::serverjs::scope_for(c, name, body).await;
     let r = Box::pin(sprig_doc::serverjs::scope(
         js.clone(),
@@ -289,7 +289,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             format!("API version must be \"1\" but got \"{api}\""),
         ));
     }
-    // User and role commands (chapter 29).
+    // User and role commands.
     if super::users::handles(name) {
         if c.sql.is_none() {
             c.sql()?;
@@ -306,7 +306,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 doc! {"version": v.clone(), "versionArray": [parts.first().copied().unwrap_or(8), parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0), 0], "gitVersion": "sprigdb", "bits": 64, "maxBsonObjectSize": 16_777_216, "sprig": {"gateway": c.shared.d.gateway_id.clone()}, "ok": 1.0},
             );
         }
-        // M4 (S116): with MongoDB 8.1's `authInfo.UUID`.
+        // With MongoDB 8.1's `authInfo.UUID`.
         "connectionStatus" => return Ok(super::status::connection_status(c)),
         "getParameter" => {
             let mut d = Document::new();
@@ -323,7 +323,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 doc! {"system": {"hostname": c.shared.d.gateway_id.clone()}, "os": {}, "extra": {}, "ok": 1.0},
             );
         }
-        // M4 (S116): `none: 1` and change-stream metrics.
+        // `none: 1` and change-stream metrics.
         "serverStatus" => return Ok(super::status::server_status(c, body)),
         "whatsmyuri" => return Ok(doc! {"you": c.peer.to_string(), "ok": 1.0}),
         "getLog" => return Ok(doc! {"totalLinesWritten": 0, "log": [], "ok": 1.0}),
@@ -411,8 +411,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     let lsid = lsid_of(body);
     let autocommit_false = body.get_bool("autocommit") == Ok(false);
     // Snapshot reads outside transactions: one point in time across
-    // commands (`atClusterTime`), kept by `snapshot` (chapter 30, "Read
-    // preference, write concern, read concern").
+    // commands (`atClusterTime`), kept by `snapshot`.
     if !autocommit_false
         && body
             .get_document("readConcern")
@@ -449,7 +448,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                     (1, true) | (2, false) => return Ok(doc! {"ok": 1.0}),
                     (0, _) => {
                         let mut s = g.sql.take().ok_or_else(no_txn)?;
-                        // The outcome commits with the writes (D17).
+                        // The outcome commits with the writes.
                         let r = if commit {
                             match super::txn::commit_records(&mut s, &g.dbs, l, &uid, n).await {
                                 Ok(()) => s.exec("COMMIT").await.map(|_| ()).map_err(|e| {
@@ -521,7 +520,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                     ));
                 }
             }
-            // MongoDB 9.0's limit on open transactions (M3).
+            // MongoDB 9.0's limit on open transactions.
             let limit = c.shared.settings().max_open_transactions;
             if c.shared.txns.open_count(&l).await >= limit {
                 metrics::counter!("sprig_mongo_transactions_total", "outcome" => "refused")
@@ -555,8 +554,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 .and_then(|r| r.get_str("level").ok())
                 == Some("snapshot");
             // Conflicts fail fast inside transactions, as in MongoDB
-            // (`mongo.txn_lock_wait_seconds`, chapter 30): 1205 becomes
-            // 112 WriteConflict with TransientTransactionError.
+            // (`mongo.txn_lock_wait_seconds`): 1205 becomes 112
+            // WriteConflict with TransientTransactionError.
             if let Err(e) = s.exec("SET SESSION innodb_lock_wait_timeout = 1").await {
                 tracing::debug!(error = %e.message, "lock wait for a transaction not set");
             }
@@ -612,7 +611,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 return Ok(doc! {"ok": 1.0});
             }
         }
-        // M7: as MongoDB 8.0, no writes to capped collections inside
+        // As MongoDB 8.0, no writes to capped collections inside
         // transactions.
         if matches!(
             name,
@@ -653,7 +652,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             }
         }
         // The records tables of the databases it writes, for its
-        // outcome (D17); DDL, so before the statement, outside it.
+        // outcome; DDL, so before the statement, outside it.
         let wdbs = super::writes::target_dbs(name, body, &db);
         let shared = Arc::clone(&c.shared);
         let tenant = owner(c).tenant;
@@ -686,7 +685,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         .sql
         .take()
         .ok_or_else(|| MongoError::new(code::INTERNAL_ERROR, "no session"))?;
-    // Query settings (M3, S96-S99): a rejected shape stops here; a
+    // Query settings: a rejected shape stops here; a
     // per-shape maxTimeMS bounds the command's statements.
     let tenant = owner(c).tenant;
     let applied = match super::qsettings::before(&mut s, tenant, name, body, &db).await {
@@ -696,7 +695,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             return Err(e);
         }
     };
-    // The command's own `maxTimeMS` (S134) and 9.0's per-shape one: the
+    // The command's own `maxTimeMS` and 9.0's per-shape one: the
     // smaller bounds every statement; past its own, the command answers
     // 50 even when its statements finished.
     let own_max = super::qsettings::own_max_time(name, body);
@@ -710,7 +709,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         c.sql = Some(s);
         return Err(e);
     }
-    // Index hints (S135): the command's `hint`, else query settings'
+    // Index hints: the command's `hint`, else query settings'
     // first usable `indexHints` entry, as MariaDB's FORCE INDEX.
     let engine = c.shared.engine.clone();
     let hint = match hint_for(&engine, &mut s, name, body, &db, &applied).await {
@@ -723,10 +722,10 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             return Err(e);
         }
     };
-    // Chapter 12's workload store (`Fingerprinter::mongo`, S130).
+    // The workload store (`Fingerprinter::mongo`).
     let wl = super::workload::start(&c.shared.engine, &mut s, tenant, name, body, &db).await;
     let started = Instant::now();
-    // Retryable writes (chapter 30 step 7): the writes and their record
+    // Retryable writes: the writes and their record
     // in one MariaDB transaction.
     let mut tries = 0u64;
     let r = super::workload::scoped(
@@ -738,7 +737,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                         super::retry::run(c, &mut s, name, body, &db, l, n).await
                     }
                     _ => {
-                        // MongoDB 9.0's per-operation memory limit (M3, S99).
+                        // MongoDB 9.0's per-operation memory limit.
                         let mem = c.shared.settings().max_operation_memory_bytes;
                         sprig_doc::opmem::scope(
                             mem,
@@ -749,7 +748,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 };
                 // Concurrent first writes to a new database: another session
                 // created it a moment ago, and this one's names may not show it
-                // yet (chapter 07's name map follows the catalog's watch).
+                // yet (the name map follows the catalog's watch).
                 match &r {
                     Err(e)
                         if e.code == code::NAMESPACE_NOT_FOUND
@@ -788,7 +787,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     if let Some(st) = wl {
         super::workload::finish(&st, &r, raw_n, name);
     }
-    // `$queryStats` (M3, S98).
+    // `$queryStats`.
     if let Ok(d) = &r {
         super::qsettings::record(
             tenant,
@@ -801,14 +800,14 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             raw_n,
         );
     }
-    // `$collStats.latencyStats` (M5, S79).
+    // `$collStats.latencyStats`.
     super::diag::record_latency(tenant, name, body, &db, started.elapsed());
     r
 }
 
-/// The MariaDB index a command is hinted onto (S135): its own `hint`
-/// (`find`, `count`, `distinct`, `aggregate`; an unknown index fails with
-/// 2), else the first of query settings' `indexHints` that exists.
+/// The MariaDB index a command is hinted onto: its own `hint` (`find`,
+/// `count`, `distinct`, `aggregate`; an unknown index fails with 2), else
+/// the first of query settings' `indexHints` that exists.
 async fn hint_for(
     engine: &sprig_doc::engine::Engine,
     s: &mut super::sql::SqlSession,
@@ -894,7 +893,7 @@ async fn snapshot_read(
     Ok(d)
 }
 
-/// `find`'s sort, or a `{$natural: ±1}` hint as one (M7).
+/// `find`'s sort, or a `{$natural: ±1}` hint as one.
 fn sort_or_natural_hint(body: &Document) -> Option<Document> {
     body.get_document("sort")
         .ok()
@@ -908,10 +907,10 @@ fn sort_or_natural_hint(body: &Document) -> Option<Document> {
         })
 }
 
-/// `find` with `tailable` (M7, decision S84): MongoDB 8.0's checks, then a
-/// cursor in the capped collection's insertion order that stays open at
-/// the end. A cursor that read no row (an empty collection) closes after
-/// its first batch, as MongoDB's does.
+/// `find` with `tailable`: MongoDB 8.0's checks, then a cursor in the
+/// capped collection's insertion order that stays open at the end. A cursor
+/// that read no row (an empty collection) closes after its first batch, as
+/// MongoDB's does.
 async fn find_tailable(
     c: &mut Conn,
     sql: &mut SqlSession,
@@ -1007,7 +1006,7 @@ async fn find_tailable(
     Ok(cursor_reply(id, &reply_ns, batch, true))
 }
 
-/// A tailable cursor's next batch (M7): its position checked (136 when
+/// A tailable cursor's next batch: its position checked (136 when
 /// its row is gone), then the rows after it; while there are none, waits
 /// up to `wait` for inserts (signalled on this gateway, polled every
 /// 100 ms for inserts through other gateways).
@@ -1084,7 +1083,7 @@ async fn open_cursor(
     Ok(cursor_reply(id, &ns, batch, true))
 }
 
-/// `aggregate` with `$changeStream` (chapter 30 step 9).
+/// `aggregate` with `$changeStream`.
 async fn open_change_stream(
     c: &mut Conn,
     sql: &mut SqlSession,
@@ -1148,9 +1147,9 @@ async fn open_change_stream(
         }
     }
     let visibility = sql.row_policy_docs();
-    // Chapters 29 and 38: a stream needs WATCH (MongoDB's `changeStream`)
-    // on what it watches, besides `find`; a database or deployment stream
-    // leaves out the collections without it (their events are hidden).
+    // A stream needs WATCH (MongoDB's `changeStream`) on what it watches,
+    // besides `find`; a database or deployment stream leaves out the
+    // collections without it (their events are hidden).
     if let (Some(v), Some((_, t))) = (&visibility, &coll_spec)
         && v.unwatched.contains(&(db.to_lowercase(), t.to_lowercase()))
     {
@@ -1162,8 +1161,8 @@ async fn open_change_stream(
             ),
         ));
     }
-    // Chapter 29 (RL34): a collection whose binding policies have no
-    // MongoDB form (written in SQL) can't be evaluated per event.
+    // A collection whose binding policies have no MongoDB form (written in
+    // SQL) can't be evaluated per event.
     if let (Some(v), Some((_, t))) = (&visibility, &coll_spec)
         && matches!(
             v.tables.get(&(db.to_lowercase(), t.to_lowercase())),
@@ -1215,7 +1214,7 @@ async fn open_change_stream(
         bs,
         c.shared.settings().max_cursors,
     )?;
-    // MongoDB 9.0's option counters (bugfix-60).
+    // MongoDB 9.0's option counters.
     super::status::stream_options(stage, body);
     Ok(
         doc! {"cursor": {"firstBatch": [], "postBatchResumeToken": token_doc(&token), "id": id, "ns": ns}, "ok": 1.0},
@@ -1253,9 +1252,9 @@ pub(super) const POINT_FIND_KEYS: [&str; 18] = [
     "apiDeprecationErrors",
 ];
 
-/// R5 round 8 (the rest of decision D35): a find whose filter is `_id`
-/// alone, with no projection, sort, skip, collation or `let`, outside
-/// transactions and snapshot reads, is answered by
+/// A find whose filter is `_id` alone, with no projection, sort, skip,
+/// collation or `let`, outside transactions and snapshot reads, is answered
+/// by
 /// [`sprig_doc::engine::Engine::find_point_raw`]: the document's BSON is
 /// written straight from its stored JSON into the reply, which goes into
 /// `c.raw` (`true`). The reply is the one the general path gives: the
@@ -1442,7 +1441,7 @@ async fn exec(
                 .await?;
             Ok(doc! {"ok": 1.0})
         }
-        // M7: capped collections from existing ones.
+        // Capped collections from existing ones.
         "convertToCapped" => {
             let ns = ns_of("convertToCapped")?;
             engine.convert_to_capped(sql, &ns, body.get("size")).await?;
@@ -1471,8 +1470,8 @@ async fn exec(
                     format!("ns does not exist: {ns}"),
                 ));
             };
-            // Options kept with the collection (chapter 31): change
-            // streams' pre- and post-images (R5 round 4).
+            // Options kept with the collection: change
+            // streams' pre- and post-images.
             if let Some(v) = body.get("changeStreamPreAndPostImages") {
                 let Some(enabled) = v.as_document().and_then(|d| d.get_bool("enabled").ok()) else {
                     return Err(bad(
@@ -1490,12 +1489,12 @@ async fn exec(
                 reply = sprig_doc::engine::ttl::coll_mod_index(&mut m, &ns, ix)?;
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
-            // M7: `cappedSize` and `cappedMax`.
+            // `cappedSize` and `cappedMax`.
             if let Some(o) = sprig_doc::engine::capped::coll_mod(&m.options, body)? {
                 m.options = o;
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
-            // Schema validation (M3, decisions S90-S92).
+            // Schema validation.
             if let Some(o) = Box::pin(sprig_doc::validate::coll_mod(
                 &engine, sql, &ns, &m.options, body,
             ))
@@ -1528,11 +1527,11 @@ async fn exec(
             let ns = ns_of("find")?;
             let limit = i64_of(body, "limit").unwrap_or(0);
             let single = body.get_bool("singleBatch").unwrap_or(false) || limit < 0;
-            // M7: tailable cursors on capped collections.
+            // Tailable cursors on capped collections.
             if body.get_bool("tailable").unwrap_or(false) || body.contains_key("awaitData") {
                 return find_tailable(c, sql, &ns, body, lsid).await;
             }
-            // R5 round 8 (D35): a find by `_id` alone answers from the
+            // A find by `_id` alone answers from the
             // stored JSON as BSON bytes (`Conn::raw`).
             if find_point(c, sql, &ns, body, limit, single).await? {
                 return Ok(Document::new());
@@ -1544,7 +1543,7 @@ async fn exec(
                 skip: u64::try_from(i64_of(body, "skip").unwrap_or(0).max(0)).unwrap_or(0),
                 limit: limit.unsigned_abs(),
             };
-            // M7: `allowDiskUse` lets a sort past `doc.max_sort_bytes`
+            // `allowDiskUse` lets a sort past `doc.max_sort_bytes`
             // spill (as MongoDB 8.0's find, true by default).
             let ctx =
                 super::spill::ctx_for(body, "find", owner(c).tenant, c.shared.d.live.as_ref())?;
@@ -1566,7 +1565,7 @@ async fn exec(
             )
             .await
         }
-        // MongoDB's `explain` of searches (decision S25).
+        // MongoDB's `explain` of searches.
         "explain" => {
             let cmd = body.get_document("explain").map_err(|_| {
                 MongoError::new(code::FAILED_TO_PARSE, "explain needs a command document")
@@ -1623,11 +1622,11 @@ async fn exec(
                 let opened_with = st.policies;
                 let ns = cursor.ns.clone();
                 drop(g);
-                // Chapter 29 (RL41): when the watcher's policies, roles or
-                // grants changed since the stream opened, this batch was
-                // filtered by the old ones: it is dropped and the stream ends
-                // with a resumable error, so the driver resumes after the
-                // last token it returned, under the new policies.
+                // When the watcher's policies, roles or grants changed since
+                // the stream opened, this batch was filtered by the old ones:
+                // it is dropped and the stream ends with a resumable error,
+                // so the driver resumes after the last token it returned,
+                // under the new policies.
                 let _ = sql.query("SELECT 1").await;
                 let now =
                     crate::tenant::rls::DocViews::fingerprint(sql.row_policy_docs().as_deref());
@@ -1674,7 +1673,7 @@ async fn exec(
                 .or(cursor.batch_size)
                 .unwrap_or(1_000_000);
             let batch = if cursor.plan.is_tailable() {
-                // M7: a tailable cursor reads on from its position; with
+                // A tailable cursor reads on from its position; with
                 // awaitData it waits up to maxTimeMS (1 s by default).
                 let wait = if cursor.await_data {
                     Duration::from_millis(
@@ -1765,7 +1764,7 @@ async fn exec(
                 }
             };
             let pipeline = docs_of(body, "pipeline");
-            // M4 (decision S110): `$where` is refused in aggregation.
+            // `$where` is refused in aggregation.
             if let Ok(p) = body.get_array("pipeline") {
                 sprig_doc::serverjs::check_pipeline(p)?;
                 sprig_doc::engine::fusion::check_nested(p)?;
@@ -1793,9 +1792,9 @@ async fn exec(
                     .first()
                     .is_some_and(super::qsettings::handles_stage)
             {
-                // `$querySettings` and `$queryStats` (M3), then the
+                // `$querySettings` and `$queryStats`, then the
                 // in-gateway stages.
-                // `$queryStats` adds the workload store's shapes (S137).
+                // `$queryStats` adds the workload store's shapes.
                 let stored = match (&c.shared.docs, pipeline[0].contains_key("$queryStats")) {
                     (Some(d), true) => {
                         let d = Arc::clone(d);
@@ -1829,10 +1828,10 @@ async fn exec(
                 body,
                 pipeline.first(),
                 lsid.map(<[u8]>::to_vec),
-                // M5 (S78): `allUsers` needs `PROCESS`.
+                // `allUsers` needs `PROCESS`.
                 process,
             )? {
-                // `$currentOp` and `$listSessions` (M2), then the
+                // `$currentOp` and `$listSessions`, then the
                 // in-gateway stages.
                 let lim = sprig_doc::agg::AggLimits {
                     stage_bytes: engine.cfg.agg_stage_bytes,
@@ -1869,14 +1868,14 @@ async fn exec(
                 }
                 docs
             } else {
-                // M5: `allowDiskUse` (S72–S76); the result may be on disk.
+                // `allowDiskUse`: the result may be on disk.
                 let ctx = super::spill::ctx_for(
                     body,
                     "aggregate",
                     owner(c).tenant,
                     c.shared.d.live.as_ref(),
                 )?;
-                // `$out`/`$merge` with `bypassDocumentValidation` (M3).
+                // `$out`/`$merge` with `bypassDocumentValidation`.
                 spilled = Some(
                     sprig_doc::validate::bypass(
                         body.get_bool("bypassDocumentValidation").unwrap_or(false),
@@ -1933,7 +1932,7 @@ async fn exec(
         }
         "listIndexes" => {
             let ns = ns_of("listIndexes")?;
-            // Automatic indexes only when asked (chapter 13, S131).
+            // Automatic indexes only when asked.
             let show_auto = body.get_bool("showAutoIndexes").unwrap_or(false);
             let Some(list) = engine.list_indexes_with(sql, &ns, show_auto).await? else {
                 return Err(MongoError::new(
@@ -1969,7 +1968,7 @@ async fn exec(
         "collStats" => {
             let ns = ns_of("collStats")?;
             let n = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
-            // M7: a capped collection's size, `max` and `maxSize`.
+            // A capped collection's size, `max` and `maxSize`.
             if let Some((_, count, bytes)) = engine.capped_stats(sql, &ns).await? {
                 let o = engine
                     .meta(sql, &ns)
@@ -1984,13 +1983,13 @@ async fn exec(
                 doc! {"ns": ns.to_string(), "count": n(engine.count(sql, &ns, &doc! {}, 0, 0).await?), "size": 0i64, "capped": false, "ok": 1.0},
             )
         }
-        // Chapter 41 (R7): a logic-layer function exposed to `mongo`.
+        // A logic-layer function exposed to `mongo`.
         "sprigCall" => super::logic::sprig_call(sql, body, db).await,
-        // Chapter 29 (R5, RL33): row-level security on collections.
+        // Row-level security on collections.
         n if super::rls::handles(n) => super::rls::command(&engine, sql, n, body, db).await,
-        // Chapter 34 (R6 round 3): Atlas's vector search index commands.
+        // Atlas's vector search index commands.
         n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
-        // Query settings (M3, decisions S96-S99).
+        // Query settings.
         n if super::qsettings::handles(n) => {
             Box::pin(super::qsettings::command(
                 &engine,
@@ -2009,7 +2008,8 @@ async fn exec(
     }
 }
 
-/// `explain` of a command (decision S25): searches only in this release.
+/// `explain` of a command: searches here, the other reads and the writes
+/// in [`super::explain`].
 async fn explain(
     engine: &sprig_doc::engine::Engine,
     sql: &mut SqlSession,
@@ -2020,7 +2020,7 @@ async fn explain(
     if let Some(d) = engine.explain_search(sql, db, cmd, verbosity).await? {
         return Ok(d);
     }
-    // R5 round 8: the other reads and the writes.
+    // The other reads and the writes.
     match super::explain::explain(engine, sql, cmd, db, verbosity).await? {
         Some(d) => Ok(d),
         None => Err(MongoError::new(

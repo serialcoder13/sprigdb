@@ -1,4 +1,4 @@
-//! Chapter 18's resolver on the DC leader (build step 6): finishes
+//! The in-doubt transaction resolver on the DC leader: finishes
 //! distributed transactions left in doubt on this DC's clusters, and
 //! deletes decision rows that are no longer needed.
 //!
@@ -32,10 +32,10 @@
 //! `sprig_txn_rollbacks_total{reason="resolver"}`) plus the runtime's loop
 //! metrics with `loop="txn_resolver"`.
 //!
-//! Where this differs from the book, for now: the maps are read in this
-//! DC's tier, so tenants homed in another DC aren't located until the relay
-//! (R2) carries their maps; a branch owned by a stalled gateway's live
-//! connection is retried on every pass, never killed (decision X5).
+//! Limits, for now: the maps are read in this DC's tier, so tenants homed
+//! in another DC aren't located until the relay carries their maps; a
+//! branch owned by a stalled gateway's live connection is retried on every
+//! pass, never killed.
 
 use std::sync::Arc;
 
@@ -236,7 +236,7 @@ impl Reconciler for ResolverLoop {
         } else if scan.listed > 0 {
             tracing::debug!(cluster = %key, ?scan, "resolver scan");
         }
-        // Sprig 2PC (R3): held branches whose transaction was lost.
+        // Sprig 2PC: held branches whose transaction was lost.
         match self.resolver.scan_redo(key).await {
             Ok(r) if r.replayed + r.dropped + r.hazards + r.unresolved > 0 => {
                 tracing::info!(cluster = %key, ?r, "resolver redo scan");
