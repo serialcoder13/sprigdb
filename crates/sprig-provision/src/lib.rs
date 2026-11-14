@@ -23,6 +23,8 @@
 //! lives in `sprig-operator`, next to its client.
 
 pub mod credentials;
+// The docs-reader account.
+pub mod docs_account;
 pub mod external;
 pub mod gw_account;
 pub mod mycnf;

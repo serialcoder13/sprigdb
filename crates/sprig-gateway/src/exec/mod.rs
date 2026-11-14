@@ -29,6 +29,8 @@ mod compat_sink;
 mod dc;
 // A dropped database's sinks and logic modules go with it.
 mod dropdb;
+// The read-only `sprig_docs` database.
+mod docs;
 mod fence;
 // A mover's fence never reaches clients as 1146 or 1049.
 mod fence_retry;

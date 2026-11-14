@@ -68,6 +68,8 @@ pub mod backend;
 // The Bolt listener on 7687.
 pub mod bolt;
 pub mod dc;
+// Docs search and the sprig_docs database.
+pub mod docs;
 pub mod exec;
 pub mod failover;
 pub mod frontend;
@@ -378,6 +380,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     });
     // SQL's SPRIG APPROVE|IGNORE|SNOOZE RECOMMENDATION.
     tenant::rec_sql::install(Arc::clone(&core.admin));
+    // Docs search (REST and the sprig_docs database).
+    if let Some(t) = &tenants {
+        docs::install(Arc::new(docs::DocsService::new(
+            Arc::clone(t),
+            Some((live.clone(), dc.clone())),
+        )?));
+    }
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092: catalog logins only, since topics are
     // a tenant's streams.

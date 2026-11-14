@@ -38,7 +38,7 @@ pub const GW_USER: &str = "sprig_gw";
 /// What the gateway's checks read; it needs `SLAVE MONITOR`.
 const CHECK_SQL: &str = "SELECT COUNT(*) FROM information_schema.SLAVE_STATUS";
 
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const B: usize = 64;
     let mut k = [0u8; B];
     if key.len() > B {

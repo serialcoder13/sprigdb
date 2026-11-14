@@ -181,6 +181,9 @@ sprig-docs = { path = "crates/sprig-docs" }
 sprig-embed = { path = "crates/sprig-embed" }
 ciborium = "=0.2.2"
 half = "2.7"
+# The docs query embedding's thread pool (sprig-gateway); already in the
+# tree through candle.
+rayon = "1.11"
 frostem = { version = "1.20260821", default-features = false, features = ["english"] }
 candle-core = "=0.11.1"
 candle-nn = "=0.11.1"

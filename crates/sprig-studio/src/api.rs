@@ -41,7 +41,20 @@ pub fn paths() -> Value {
     if let (Value::Object(m), Value::Object(r)) = (&mut v, round4_paths()) {
         m.extend(r);
     }
+    if let (Value::Object(m), Value::Object(r)) = (&mut v, docs_paths()) {
+        m.extend(r);
+    }
     v
+}
+
+/// Docs search over the release's documentation.
+fn docs_paths() -> Value {
+    json!({
+        "/v1/docs:search": {"post": op("Docs.Search", "sprig.v1.Docs",
+            "Searches the product documentation of this release (any signed-in user): full-text and \
+             embedding hits fused, at most two per page ({query, audience, limit, version})",
+            Some("DocsSearchRequest"), "DocsSearchReply")},
+    })
 }
 
 /// Studio round 4 (chapter 44 steps 18, 26, 28–31): the logic editors'
@@ -320,6 +333,18 @@ pub fn schemas() -> Value {
             "refresh_transport": {"type": "string", "enum": ["cookie", "body"]}}), &[]),
         "ImpersonateRequest": s(json!({"tenant": string, "user": string, "host": string,
             "reason": string, "minutes": int}), &["user", "reason"]),
+        "DocsSearchRequest": s(json!({"query": string,
+            "audience": {"type": "string", "enum": ["user", "dba", "operator"]},
+            "limit": int, "version": string}), &["query"]),
+        "DocsSearchHit": s(json!({"chunk_id": string, "page": string, "title": string,
+            "heading_path": string, "audience": {"type": "array", "items": string}, "text": string,
+            "score": {"type": "number"}, "bm25_rank": {"type": "integer", "nullable": true},
+            "vector_rank": {"type": "integer", "nullable": true}}),
+            &["chunk_id", "page", "title", "heading_path", "audience", "text", "score"]),
+        "DocsSearchReply": s(json!({"version": string,
+            "mode": {"type": "string", "enum": ["hybrid", "keyword"]},
+            "hits": {"type": "array", "items": {"$ref": "#/components/schemas/DocsSearchHit"}}}),
+            &["version", "mode", "hits"]),
     })
 }
 

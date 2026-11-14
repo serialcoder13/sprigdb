@@ -36,6 +36,8 @@ sprig-balancer.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# The docs pack, its rows and the docs.* settings (docs_loader).
+sprig-docs.workspace = true
 # The logic loop: trigger jobs and schedules.
 sprig-feed.workspace = true
 sprig-logic = { path = "../sprig-logic" }
