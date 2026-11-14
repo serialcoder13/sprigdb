@@ -18,6 +18,7 @@
 //! | `/v1/ops/...` | Operator mode: the Admin API for logins in `studio.operator_logins` ([`ops`]) |
 //! | `/v1/library`, `/v1/library/saved[:delete]`, `/v1/library/history[:clear]` | The caller's saved queries and history ([`library`]) |
 //! | `GET /v1/shards`, `/v1/shards/advisor[/{run}]` | The shards view: table groups, keys, maps, advisor runs ([`shards`]) |
+//! | `/v1/ai/...` | The AI assistants: chat (NDJSON), conversations, feedback, glossary ([`ai`]) |
 //! | `GET /v1/openapi.json` | The data API's document with these routes added |
 //!
 //! Anything else goes on to the REST router. Every call runs with the
@@ -32,6 +33,8 @@
 //! are signed tokens ([`session`]): any gateway accepts them.
 
 pub mod accounts;
+// The AI assistants' chat, conversations, feedback and glossary.
+pub mod ai;
 pub mod catalog;
 pub mod cursors;
 pub mod exports;
@@ -885,6 +888,7 @@ pub async fn handle(
         (_, p) if logic::is_logic_path(p) => logic::route(core, info, req).await,
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
         (_, p) if library::is_library_path(p) => library::route(core, info, req).await,
+        (_, p) if ai::is_ai_path(p) => ai::route(core, info, req).await,
         ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,
         ("POST", crate::docs::http::PATH) => {
             return Ok(crate::docs::http::search(core, info, req).await);

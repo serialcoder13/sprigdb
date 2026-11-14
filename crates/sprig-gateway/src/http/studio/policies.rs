@@ -156,7 +156,6 @@ pub fn read_only(sql: &str) -> Result<(), SprigError> {
 ///
 /// # Errors
 /// As the module docs say.
-#[allow(clippy::too_many_lines)] // the checks in the module docs' order, then the run
 pub async fn test_as(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -166,6 +165,23 @@ pub async fn test_as(
     super::mfa::not_impersonating(auth.as_deref(), "test as another user")?;
     let caller = core.caller(info, auth, None, hdr(&req, "host")).await?;
     let b = parse_json(&read_body(req).await?)?;
+    Ok(json_response(200, &run_as(core, &caller, &b).await?))
+}
+
+/// The tester's checks and run for `caller` with the request body `b`:
+/// what `POST /v1/policies:testAs` answers (the assistants' `test_policy`
+/// tool calls it too).
+///
+/// # Errors
+/// As the module docs say.
+#[allow(clippy::too_many_lines)] // the checks in the module docs' order, then the run
+pub(super) async fn run_as(
+    core: &Arc<Core>,
+    caller: &Caller,
+    b: &Value,
+) -> Result<Value, SprigError> {
+    super::mfa::not_impersonating(caller.authorization.as_deref(), "test as another user")?;
+    let b = b.clone();
     let me = caller.principal.clone();
     let home = me.tenant_name.clone().unwrap_or_default();
     let tenant = Some(text(&b, "tenant"))
@@ -181,7 +197,7 @@ pub async fn test_as(
         return Err(invalid("user is required"));
     }
     read_only(&sql)?;
-    let grants = grant_lines(core, &caller).await?;
+    let grants = grant_lines(core, caller).await?;
     if !super::grants::Privileges::of(&grants).tenant_admin {
         return Err(denied(
             "the tester needs SPRIG_TENANT_ADMIN over the user's tenant",
@@ -217,8 +233,8 @@ pub async fn test_as(
         cl,
         &tenant,
         AccountRef::Name(&user, (!host.is_empty()).then_some(host.as_str())),
-        info.peer.ip(),
-        info.tls.is_some(),
+        caller.peer.ip(),
+        caller.tls.is_some(),
         SystemTime::now(),
     )
     .await?;
@@ -273,7 +289,7 @@ pub async fn test_as(
     let r = collect(
         rx,
         core.engine.settings().max_buffered,
-        core.engine.charge(&caller),
+        core.engine.charge(caller),
     )
     .await?;
     let first = r.results.iter().find(|x| !x.columns.is_empty());
@@ -301,17 +317,14 @@ pub async fn test_as(
             json!({"table": table, "policy": policy, "mode": mode, "predicate": predicate})
         })
         .collect();
-    Ok(json_response(
-        200,
-        &json!({
-            "as": format!("{tenant}.{}", target.user),
-            "columns": columns,
-            "rows": rows,
-            "truncated": truncated,
-            "max_rows": max_rows,
-            "policies": policies,
-        }),
-    ))
+    Ok(json!({
+        "as": format!("{tenant}.{}", target.user),
+        "columns": columns,
+        "rows": rows,
+        "truncated": truncated,
+        "max_rows": max_rows,
+        "policies": policies,
+    }))
 }
 
 async fn grant_lines(core: &Arc<Core>, caller: &Caller) -> Result<Vec<String>, SprigError> {

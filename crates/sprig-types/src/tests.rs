@@ -154,13 +154,14 @@ async fn inserts_write_each_level() {
     run("INSERT INTO vehicle VALUES (9, 'V', 4, 'VIN')", &mut f)
         .await
         .unwrap();
-    assert_eq!(f.log[0], "SAVEPOINT sprig_types");
+    let log = numbered(&f.log);
+    assert_eq!(log[0], "SAVEPOINT sprig_types_N");
     assert_eq!(
         f.log[1],
         "INSERT INTO `asset` (`id`, `name`, `site_id`, `_type`, `_type_path`) VALUES (9, 'V', 4, \
          'vehicle', '/asset/vehicle/')"
     );
-    assert_eq!(f.log.last().unwrap(), "RELEASE SAVEPOINT sprig_types");
+    assert_eq!(log.last().unwrap(), "RELEASE SAVEPOINT sprig_types_N");
     assert!(
         !f.log
             .iter()
@@ -183,8 +184,9 @@ async fn nested_plans_turn_snapshot_isolation_off() {
         .await
         .unwrap();
     assert_eq!(f.log[0], "SET SESSION innodb_snapshot_isolation = OFF");
-    assert_eq!(f.log[1], "SAVEPOINT sprig_types");
-    assert_eq!(f.log[f.log.len() - 2], "RELEASE SAVEPOINT sprig_types");
+    let log = numbered(&f.log);
+    assert_eq!(log[1], "SAVEPOINT sprig_types_N");
+    assert_eq!(log[log.len() - 2], "RELEASE SAVEPOINT sprig_types_N");
     assert_eq!(
         f.log.last().unwrap(),
         "SET SESSION innodb_snapshot_isolation = ON"
@@ -210,11 +212,11 @@ async fn nested_plans_turn_snapshot_isolation_off() {
         .unwrap_err();
     assert_eq!(e.protocol().mysql_errno, 1062);
     assert_eq!(
-        f.log,
+        numbered(&f.log),
         [
             "SET SESSION innodb_snapshot_isolation = OFF",
-            "SAVEPOINT sprig_types",
-            "ROLLBACK TO SAVEPOINT sprig_types",
+            "SAVEPOINT sprig_types_N",
+            "ROLLBACK TO SAVEPOINT sprig_types_N",
             "SET SESSION innodb_snapshot_isolation = ON",
         ]
     );
@@ -231,6 +233,42 @@ async fn nested_plans_turn_snapshot_isolation_off() {
             .iter()
             .any(|l| l.contains("innodb_snapshot_isolation"))
     );
+}
+
+/// The log with each bracket's savepoint number as `N`.
+fn numbered(log: &[String]) -> Vec<String> {
+    log.iter()
+        .map(|l| match l.find("sprig_types_") {
+            Some(i) => {
+                let head = &l[..i + "sprig_types_".len()];
+                let rest = l[head.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
+                format!("{head}N{rest}")
+            }
+            None => l.clone(),
+        })
+        .collect()
+}
+
+/// RL66: a plan inside another plan's bracket, both inside the client's
+/// transaction, uses its own savepoint, so the inner `RELEASE` leaves the
+/// outer savepoint alone (it failed with 1305 when both had one name).
+#[tokio::test]
+async fn nested_brackets_have_their_own_savepoints() {
+    let mut f = Fake {
+        in_txn: true,
+        ..Fake::default()
+    };
+    let outer = crate::exec::Txn::begin(&mut f).await.unwrap();
+    let inner = crate::exec::Txn::begin(&mut f).await.unwrap();
+    inner.end(&mut f, Ok(())).await.unwrap();
+    outer.end(&mut f, Ok(())).await.unwrap();
+    let name = |l: &str| l.rsplit(' ').next().unwrap_or_default().to_owned();
+    assert_eq!(f.log.len(), 4);
+    assert!(f.log[0].starts_with("SAVEPOINT sprig_types_"));
+    assert!(f.log[1].starts_with("SAVEPOINT sprig_types_"));
+    assert_ne!(name(&f.log[0]), name(&f.log[1]));
+    assert_eq!(f.log[2], format!("RELEASE SAVEPOINT {}", name(&f.log[1])));
+    assert_eq!(f.log[3], format!("RELEASE SAVEPOINT {}", name(&f.log[0])));
 }
 
 #[tokio::test]

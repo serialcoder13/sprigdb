@@ -246,14 +246,56 @@ impl TriggerSpec<'_> {
     /// # Errors
     /// 39364 if a stored expression can't be rendered.
     pub fn statements(&self) -> Result<Vec<String>, SprigError> {
+        self.statements_for(false)
+    }
+
+    /// [`TriggerSpec::statements`] for a table whose rows may be layer
+    /// rows of an inheritable table (`layered`, chapter 42). A layer row
+    /// isn't always a new record: writing an override (`_sprig_state =
+    /// 'ovr'`) is an update of an inherited record, and writing a hide
+    /// marker (`'hide'`) is its delete, so they are checked as such
+    /// (decision RL65):
+    ///
+    /// ```text
+    /// INSERT of an ovr row              → CHECK(UPDATE)(NEW)
+    /// INSERT of a hide row              → USING(DELETE)(NEW)
+    /// UPDATE making a row a hide marker → USING(DELETE)(NEW)
+    /// UPDATE of an ovr row (stays ovr)  → CHECK(UPDATE)(NEW)
+    /// anything else                     → as for any table
+    /// ```
+    ///
+    /// Both kinds of marker carry the merged record's values (the gateway
+    /// writes them so), and the gateway has already applied the `USING`
+    /// of the update to the merged record: an `ovr` row's own old values
+    /// are only a part of the record, so its `OLD` isn't checked.
+    ///
+    /// # Errors
+    /// 39364 if a stored expression can't be rendered.
+    pub fn statements_for(&self, layered: bool) -> Result<Vec<String>, SprigError> {
         let [bi, bu, bd] = names(self.object);
         let v = format!("@{CONTEXT_VAR}");
-        let ins = self.combination(2, Clause::Check, "NEW", &v)?;
-        let upd = format!(
-            "({} AND {})",
+        let ins_check = self.combination(2, Clause::Check, "NEW", &v)?;
+        let upd_check = self.combination(4, Clause::Check, "NEW", &v)?;
+        let upd_full = format!(
+            "({} AND {upd_check})",
             self.combination(4, Clause::Using, "OLD", &v)?,
-            self.combination(4, Clause::Check, "NEW", &v)?
         );
+        let (ins, upd) = if layered {
+            let hide = self.combination(8, Clause::Using, "NEW", &v)?;
+            (
+                format!(
+                    "(CASE NEW.`_sprig_state` WHEN 'ovr' THEN {upd_check} WHEN 'hide' THEN \
+                     {hide} ELSE {ins_check} END)"
+                ),
+                format!(
+                    "(CASE WHEN NEW.`_sprig_state` = 'hide' AND OLD.`_sprig_state` <> 'hide' \
+                     THEN {hide} WHEN OLD.`_sprig_state` = 'ovr' AND NEW.`_sprig_state` = 'ovr' \
+                     THEN {upd_check} ELSE {upd_full} END)"
+                ),
+            )
+        } else {
+            (ins_check, upd_full)
+        };
         let del = self.combination(8, Clause::Using, "OLD", &v)?;
         Ok(vec![
             self.trigger(&bi, "INSERT", &ins),
@@ -519,6 +561,7 @@ mod tests {
         assert!(s[0].contains("LEFT(SUBSTRING_INDEX(USER(), '@', 1), 5) <> 't42_u'"));
         assert!(s[1].contains("OLD.owner") && s[1].contains("NEW.owner"));
         assert!(s[2].contains("BEFORE DELETE") && !s[2].contains("NEW."));
+        assert!(!s.iter().any(|t| t.contains("_sprig_state")));
         let vs = spec.view_statements("`t42_u7`@`%`", &[]).unwrap();
         let v = [vs.function.clone(), vs.views[0].clone()];
         assert!(
@@ -560,6 +603,61 @@ mod tests {
             drops("s", 9)[2],
             "DROP TRIGGER IF EXISTS `s`.`__sprig_rls_bd_9`"
         );
+    }
+
+    /// An inheritable table's triggers: overrides and hide markers are
+    /// checked as the update and the delete they are (RL65).
+    #[test]
+    fn layered_triggers_check_markers_as_updates_and_deletes() {
+        let pols = [
+            TriggerPolicy {
+                id: 3,
+                restrictive: false,
+                commands: 15,
+                using: Some("owner = SPRIG_CLAIM('sub')"),
+                check: None,
+            },
+            TriggerPolicy {
+                id: 4,
+                restrictive: true,
+                commands: 2,
+                using: None,
+                check: Some("amount < 100"),
+            },
+        ];
+        let physical = |s: &str| Ok(s.to_owned());
+        let spec = TriggerSpec {
+            schema: "t42_d1_g1_s1",
+            table: "orders",
+            object: 77,
+            tenant: 42,
+            definer: "`t42_u7`@`%`",
+            policies: &pols,
+            lex: LexOptions::mariadb(),
+            physical: &physical,
+        };
+        let s = spec.statements().unwrap();
+        let l = spec.statements_for(true).unwrap();
+        assert!(
+            l[0].contains("CASE NEW.`_sprig_state` WHEN 'ovr' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
+                && l[0].contains("WHEN 'hide' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
+                && l[0].contains("ELSE (((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner = JSON_VALUE(@sprig_rls, '$.s.claims.\"sub\"')))) AND (NOT JSON_CONTAINS(@sprig_rls, '4', '$.p') OR (NEW.amount < 100))) END"),
+            "{}",
+            l[0]
+        );
+        // The INSERT-only restrictive policy 4 reaches neither marker.
+        let marker = &l[0][..l[0].find(" ELSE ").unwrap()];
+        assert!(!marker.contains("'4'"), "{marker}");
+        assert!(
+            l[1].contains("WHEN NEW.`_sprig_state` = 'hide' AND OLD.`_sprig_state` <> 'hide' THEN")
+                && l[1].contains(
+                    "WHEN OLD.`_sprig_state` = 'ovr' AND NEW.`_sprig_state` = 'ovr' THEN"
+                )
+                && l[1].contains("OLD.owner"),
+            "{}",
+            l[1]
+        );
+        assert_eq!(l[2], s[2]);
     }
 
     #[test]

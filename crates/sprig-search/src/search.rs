@@ -75,7 +75,10 @@ pub fn key_hash(k: &[u8]) -> u64 {
 /// Statistics of one partition for a query's terms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartStats {
-    /// Live documents.
+    /// Documents as Tantivy's BM25 counts them: deleted ones too, until a
+    /// merge drops them, as `doc_freq` counts them (with live documents
+    /// only, a copy holding deleted versions broke Tantivy's
+    /// `doc_count >= doc_freq` assertion).
     pub num_docs: u64,
     /// Tokens per field.
     pub tokens: HashMap<Field, u64>,
@@ -164,7 +167,11 @@ pub fn part_stats(searcher: &Searcher, query: &dyn Query) -> Result<PartStats> {
     let mut terms: Vec<Term> = Vec::new();
     query.query_terms(&mut |t, _| terms.push(t.clone()));
     let mut s = PartStats {
-        num_docs: searcher.num_docs(),
+        num_docs: searcher
+            .segment_readers()
+            .iter()
+            .map(|r| u64::from(r.max_doc()))
+            .sum(),
         ..PartStats::default()
     };
     for t in terms {

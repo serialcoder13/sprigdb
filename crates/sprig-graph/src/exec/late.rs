@@ -30,6 +30,20 @@ use crate::ast::{BinOp, Expr, MapItem};
 use crate::eval::Row;
 use crate::store::{EdgeRow, NodeRow};
 use crate::value::{Node, Rel, Value};
+use sprig_router::graph_route::CmpOp;
+
+/// A need's pseudo-key: the node's labels (`labels(v)`, `v:L`, a label
+/// in a later pattern on bound `v`).
+pub(crate) const LABELS: &str = "\u{1}labels";
+
+/// In an element's [`crate::value::Partial`] keys: its labels weren't
+/// read either (a node a hop bound without reading it, because nothing
+/// was known to need it).
+pub(crate) const NO_LABELS: &str = "\u{1}nolabels";
+
+fn real(k: &str) -> bool {
+    !k.starts_with('\u{1}')
+}
 
 /// What a clause needs of a variable's elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +67,18 @@ impl Need {
 /// Functions that read no property of their arguments: they pass them on
 /// (`collect`, `head`), or read ids, labels or types.
 /// Of those, the ones whose value is (part of) their argument.
-const FORWARDING: &[&str] = &["collect", "head", "last", "tail", "reverse", "coalesce"];
+const FORWARDING: &[&str] = &[
+    "collect",
+    "head",
+    "last",
+    "tail",
+    "reverse",
+    "coalesce",
+    "min",
+    "max",
+    "nodes",
+    "relationships",
+];
 
 const PASSING: &[&str] = &[
     "collect",
@@ -118,7 +143,18 @@ pub(crate) fn needs(e: &Expr, pass: bool, out: &mut HashMap<String, Need>) {
             needs(a, p, out);
             needs(b, p, out);
         }
-        Expr::IsNull(a, _) | Expr::HasLabels(a, _) => needs(a, true, out),
+        Expr::IsNull(a, _) => needs(a, true, out),
+        Expr::HasLabels(a, _) => match &**a {
+            Expr::Var(v) => add(out, v, Need::Keys(BTreeSet::from([LABELS.to_owned()]))),
+            other => needs(other, false, out),
+        },
+        Expr::Func { name, args, .. }
+            if name == "labels" && matches!(args.as_slice(), [Expr::Var(_)]) =>
+        {
+            if let [Expr::Var(v)] = args.as_slice() {
+                add(out, v, Need::Keys(BTreeSet::from([LABELS.to_owned()])));
+            }
+        }
         Expr::Func { name, args, .. } => {
             // `collect`, `head` and the like hand their argument on (as
             // much as the call's own value is); the others read ids,
@@ -296,9 +332,16 @@ fn missing(need: &Need, partial: Option<&Arc<[String]>>) -> Option<Option<BTreeS
     match need {
         Need::All => Some(None),
         Need::Keys(ks) => {
+            let no_labels = have.iter().any(|h| h == NO_LABELS);
             let m: BTreeSet<String> = ks
                 .iter()
-                .filter(|k| !have.iter().any(|h| h == *k))
+                .filter(|k| {
+                    if real(k) {
+                        !have.iter().any(|h| h == *k)
+                    } else {
+                        *k == LABELS && no_labels
+                    }
+                })
                 .cloned()
                 .collect();
             (!m.is_empty()).then_some(Some(m))
@@ -309,13 +352,21 @@ fn missing(need: &Need, partial: Option<&Arc<[String]>>) -> Option<Option<BTreeS
 impl Exec<'_> {
     /// The best-read copy of node `n` this statement has.
     fn best_node(&self, n: &Arc<Node>) -> Arc<Node> {
+        if n.partial.is_none() {
+            return Arc::clone(n);
+        }
         match self.seen_nodes.get(&n.id) {
-            Some(b) if more(b.partial.as_ref(), n.partial.as_ref()) => Arc::clone(b),
+            Some(b) if !Arc::ptr_eq(b, n) && more(b.partial.as_ref(), n.partial.as_ref()) => {
+                Arc::clone(b)
+            }
             _ => Arc::clone(n),
         }
     }
 
     fn best_rel(&self, r: &Arc<Rel>) -> Arc<Rel> {
+        if r.partial.is_none() {
+            return Arc::clone(r);
+        }
         match self.seen_rels.get(&r.id) {
             Some(b) if more(b.partial.as_ref(), r.partial.as_ref()) => Arc::clone(b),
             _ => Arc::clone(r),
@@ -423,9 +474,9 @@ impl Exec<'_> {
                 }
             }
         }
-        let batch = self.b.batch_nodes.max(1);
+        let batch = self.id_batch();
         for (ids, ks) in [(all, None), (keyed, Some(keys))] {
-            let ks: Option<Vec<String>> = ks.map(|s| s.into_iter().collect());
+            let ks: Option<Vec<String>> = ks.map(|s| s.into_iter().filter(|k| real(k)).collect());
             let mut ids = ids;
             ids.sort_unstable();
             for chunk in ids.chunks(batch) {
@@ -465,7 +516,7 @@ impl Exec<'_> {
 
     /// A node read with `keys` (`None`: all), merged with what the
     /// statement already read of it.
-    fn merged_node(&self, r: &NodeRow, keys: Option<&[String]>) -> Arc<Node> {
+    pub(crate) fn merged_node(&self, r: &NodeRow, keys: Option<&[String]>) -> Arc<Node> {
         let fresh = self.node_val(r);
         let Some(keys) = keys else { return fresh };
         let mut n = (*fresh).clone();
@@ -475,7 +526,8 @@ impl Exec<'_> {
                 None => return Arc::clone(old),
                 Some(ok) => {
                     for k in ok.iter() {
-                        if !have.contains(k) {
+                        // Labels come with every read.
+                        if k != NO_LABELS && !have.contains(k) {
                             have.push(k.clone());
                             if let Some(v) = old.props.get(k) {
                                 n.props.insert(k.clone(), v.clone());
@@ -565,16 +617,134 @@ impl Exec<'_> {
                 self.want(x, &Need::All, &mut w);
             }
         }
-        if w.nodes.is_empty() && w.rels.is_empty() {
-            return Ok(());
+        // Copies read since may stand for elements nothing asks to read
+        // now: the rows get the best copies either way.
+        if !w.nodes.is_empty() || !w.rels.is_empty() {
+            self.fetch(w).await?;
         }
-        self.fetch(w).await?;
         for r in rows.iter_mut() {
             for x in r {
                 self.upgrade(x);
             }
         }
         Ok(())
+    }
+
+    /// Ids per statement when reading elements by id.
+    pub(crate) fn id_batch(&self) -> usize {
+        self.b.batch_nodes.max(1).saturating_mul(5)
+    }
+
+    /// Nodes by id for binding to `var`, read late: with the keys the
+    /// clause is known to read of `var` next ([`Exec::prefetch`]), else
+    /// with none (ids, hashes and labels).
+    pub(crate) async fn read_nodes(
+        &mut self,
+        ids: &[u64],
+        var: Option<&String>,
+        extra: Option<&Need>,
+        label: Option<u32>,
+    ) -> Result<HashMap<u64, Arc<Node>>> {
+        let need = self.need_of(var, extra);
+        let only = var.and_then(|v| self.only.get(v)).cloned();
+        let mut out: HashMap<u64, Arc<Node>> = HashMap::new();
+        let mut want: Vec<u64> = Vec::new();
+        for id in ids {
+            if only.as_ref().is_some_and(|o| o.binary_search(id).is_err()) {
+                continue;
+            }
+            match self.seen_nodes.get(id) {
+                Some(n)
+                    if need
+                        .as_ref()
+                        .is_none_or(|nd| missing(nd, n.partial.as_ref()).is_none()) =>
+                {
+                    out.insert(*id, Arc::clone(n));
+                }
+                _ => want.push(*id),
+            }
+        }
+        want.sort_unstable();
+        want.dedup();
+        let keys: Option<Vec<String>> = match &need {
+            None => Some(Vec::new()),
+            Some(Need::All) => None,
+            Some(Need::Keys(ks)) => Some(ks.iter().filter(|k| real(k)).cloned().collect()),
+        };
+        let mut filter = self.filters_for(var);
+        if let Some(l) = label {
+            filter.push((
+                format!("{}{l}", sprig_router::graph_route::LABEL_KEY),
+                CmpOp::Eq,
+                0.0,
+            ));
+        }
+        let batch = self.id_batch();
+        for chunk in want.chunks(batch) {
+            for r in self
+                .store
+                .nodes_where(chunk, keys.as_deref(), &filter)
+                .await?
+            {
+                let n = match keys.as_deref() {
+                    Some([]) => self.bare_node(&r),
+                    k => {
+                        let n = self.merged_node(&r, k);
+                        self.seen_nodes.insert(n.id, Arc::clone(&n));
+                        n
+                    }
+                };
+                out.insert(r.id, n);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The numeric filters a read of `var`'s nodes may apply: the
+    /// `WHERE`'s ([`Exec::push`]), and while a top-k `MATCH` has a bound
+    /// ([`Exec::prune`]) on a numeric first sort key `var.k`, the numbers
+    /// already worse than it (other values and `null`s pass: Cypher orders
+    /// them elsewhere).
+    pub(crate) fn filters_for(&self, var: Option<&String>) -> Vec<(String, CmpOp, f64)> {
+        let Some(v) = var else { return Vec::new() };
+        let mut out = self.push.get(v).cloned().unwrap_or_default();
+        if let Some(p) = &self.prune
+            && p.var == *v
+            && let (Some(bound), Some((Expr::Prop(t, k), asc))) = (&p.bound, p.keys.first())
+            && matches!(&**t, Expr::Var(x) if x == v)
+        {
+            let x = match bound.first() {
+                Some(Value::Int(i)) if i.unsigned_abs() < (1u64 << 52) => {
+                    #[allow(clippy::cast_precision_loss)] // below 2^52: exact
+                    let f = *i as f64;
+                    Some(f)
+                }
+                Some(Value::Float(f)) if f.is_finite() => Some(*f),
+                _ => None,
+            };
+            if let Some(x) = x {
+                let op = if *asc {
+                    CmpOp::NotNumAbove
+                } else {
+                    CmpOp::NotNumBelow
+                };
+                out.push((k.clone(), op, x));
+            }
+        }
+        out
+    }
+
+    /// What reading nodes for `var` brings with them: the clause's
+    /// prefetch for `var` and `extra`.
+    pub(crate) fn need_of(&self, var: Option<&String>, extra: Option<&Need>) -> Option<Need> {
+        let mut need = var.and_then(|v| self.prefetch.get(v)).cloned();
+        if let Some(x) = extra {
+            match &mut need {
+                Some(n) => n.merge(x.clone()),
+                None => need = Some(x.clone()),
+            }
+        }
+        need
     }
 
     /// A far node read without properties: the best copy the statement
@@ -588,17 +758,6 @@ impl Exec<'_> {
         n.partial = Some(Arc::from(Vec::<String>::new()));
         Arc::new(n)
     }
-
-    /// A relationship read without properties, as [`Exec::bare_node`].
-    pub(crate) fn bare_rel(&self, e: &EdgeRow) -> Arc<Rel> {
-        if let Some(r) = self.seen_rels.get(&e.id) {
-            return Arc::clone(r);
-        }
-        let mut r = (*self.rel_val(e)).clone();
-        r.props.clear();
-        r.partial = Some(Arc::from(Vec::<String>::new()));
-        Arc::new(r)
-    }
 }
 
 /// Whether `a` holds more properties than `b`.
@@ -606,6 +765,24 @@ fn more(a: Option<&Arc<[String]>>, b: Option<&Arc<[String]>>) -> bool {
     match (a, b) {
         (_, None) => false,
         (None, Some(_)) => true,
-        (Some(a), Some(b)) => a.len() > b.len() && b.iter().all(|k| a.contains(k)),
+        (Some(a), Some(b)) => {
+            if Arc::ptr_eq(a, b) {
+                return false;
+            }
+            let labels = |p: &Arc<[String]>| !p.iter().any(|k| k == NO_LABELS);
+            let (al, bl) = (labels(a), labels(b));
+            if bl && !al {
+                return false;
+            }
+            let mut bk = 0usize;
+            for k in b.iter().filter(|k| real(k)) {
+                bk += 1;
+                if !a.iter().any(|x| x == k) {
+                    return false;
+                }
+            }
+            let ak = a.iter().filter(|k| real(k)).count();
+            ak > bk || (al && !bl)
+        }
     }
 }

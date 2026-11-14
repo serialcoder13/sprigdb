@@ -1179,6 +1179,27 @@ impl PassSession {
         if let Some(step) = Box::pin(self.tenant_rls_images(cx, text, more, out)).await? {
             return Ok(step);
         }
+        // Data inheritance: a change stream's visibility probe (from this
+        // process only), answered before other layers read its JSON.
+        if super::inherit_probe::parse(text).marked() {
+            let mut deferred = false;
+            if let Some(step) = self
+                .tenant_inherit(
+                    cx,
+                    text,
+                    attrs,
+                    more,
+                    format,
+                    &cat,
+                    out,
+                    false,
+                    &mut deferred,
+                )
+                .await?
+            {
+                return Ok(step);
+            }
+        }
         if let Some(step) = Box::pin(self.tenant_offsets(cx, text, more, out)).await? {
             return Ok(step);
         }

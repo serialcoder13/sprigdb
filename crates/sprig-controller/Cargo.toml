@@ -28,6 +28,8 @@ serde_json.workspace = true
 # The automatic-indexing store behind `sprigctl index` and
 # `sprigctl explain query` (autoindex_admin).
 sprig-advisor.workspace = true
+# AI providers in the Admin API, and the purge of AI payloads.
+sprig-ai.workspace = true
 # Approvals and recommendations.
 sprig-approvals.workspace = true
 sprig-auth.workspace = true

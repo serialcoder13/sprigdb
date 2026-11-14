@@ -964,6 +964,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/docs:search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Searches the product documentation of this release (any signed-in user): full-text and embedding hits fused, at most two per page ({query, audience, limit, version}) */
+        post: operations["Docs.Search"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/exports:ticket": {
         parameters: {
             query?: never;
@@ -1479,6 +1496,30 @@ export interface components {
         DeleteVectorsRequest: Record<string, never>;
         /** @description The DeleteVectorsResponse message as JSON (proto3 mapping) */
         DeleteVectorsResponse: Record<string, never>;
+        DocsSearchHit: {
+            audience: string[];
+            bm25_rank?: number | null;
+            chunk_id: string;
+            heading_path: string;
+            page: string;
+            score: number;
+            text: string;
+            title: string;
+            vector_rank?: number | null;
+        };
+        DocsSearchReply: {
+            hits: components["schemas"]["DocsSearchHit"][];
+            /** @enum {string} */
+            mode: "hybrid" | "keyword";
+            version: string;
+        };
+        DocsSearchRequest: {
+            /** @enum {string} */
+            audience?: "user" | "dba" | "operator";
+            limit?: number;
+            query: string;
+            version?: string;
+        };
         /** @description The DrillRequest message as JSON (proto3 mapping) */
         DrillRequest: Record<string, never>;
         /** @description The DropModelResponse message as JSON (proto3 mapping) */
@@ -3815,6 +3856,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpsertVectorsResponse"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Docs.Search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DocsSearchRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocsSearchReply"];
                 };
             };
             /** @description An error */

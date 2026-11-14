@@ -67,6 +67,9 @@ mod inherit_types;
 mod inherit_msg;
 // FOR EACH TENANT connections and sinks.
 mod inherit_sinks;
+// Change streams: was an inherited record visible before a change
+// (decision RL64).
+pub(crate) mod inherit_probe;
 pub(crate) mod types;
 // Event streams.
 mod streams;
@@ -1181,6 +1184,16 @@ impl SessionExec for PassSession {
     ) -> Result<crate::pipeline::PointRead> {
         self.packet_limit = u64::try_from(cx.proto.max_packet).ok();
         Box::pin(PassSession::point_read(self, cx, stmt, params)).await
+    }
+
+    fn holds_idle(&self) -> bool {
+        self.bs.as_ref().is_some_and(BackendSession::holds_kept)
+    }
+
+    fn release_idle(&mut self) {
+        if let Some(bs) = self.bs.as_mut() {
+            bs.release_kept();
+        }
     }
 
     async fn init_db(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {

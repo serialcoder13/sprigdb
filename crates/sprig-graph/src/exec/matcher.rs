@@ -12,6 +12,7 @@ use crate::ast::{BinOp, Dir, Expr, NodePat, PathKind, PathPattern, RelPat};
 use crate::eval::{Row, eval, path_value};
 use crate::store::{EdgeRow, Link, NodeRow, Reach, Scan};
 use crate::value::{Node, Rel, Value, parse_element_id};
+use sprig_router::graph_route::CmpOp;
 
 const PATH_NODES: &str = " pn";
 const PATH_RELS: &str = " pr";
@@ -188,6 +189,12 @@ impl Exec<'_> {
             })
             .collect();
         let conj: Vec<Expr> = where_.map(scan_conjuncts).unwrap_or_default();
+        if self.late
+            && let Some(w) = where_
+        {
+            self.only = self.only_ids(w, &mut rows).await?;
+            self.only_by_conj(patterns, &conj, &mut rows).await?;
+        }
         for (pi, p) in patterns.iter().enumerate() {
             // Types of the other relationship patterns of the clause, for
             // endpoint mode's uniqueness rule.
@@ -302,6 +309,9 @@ impl Exec<'_> {
         if rows.is_empty() {
             return Ok(HashSet::new());
         }
+        if let Some(hits) = self.meet_in_middle(rows, p).await? {
+            return Ok(hits);
+        }
         let tagged: Vec<Row> = rows
             .iter()
             .enumerate()
@@ -320,6 +330,96 @@ impl Exec<'_> {
                 _ => None,
             })
             .collect())
+    }
+
+    /// A two-hop pattern predicate between two bound nodes through an
+    /// anonymous, unconstrained middle node (LDBC IC10's `(p)-[:HAS_TAG]->
+    /// ()<-[:HAS_INTEREST]-(person)`): one hop from every start, one hop
+    /// back from every end, and a row hits when the two meet on a middle
+    /// node through two different relationships. Expanding from one end
+    /// only went through every person interested in each post's tags.
+    /// `None` when the pattern isn't of that shape.
+    async fn meet_in_middle(
+        &mut self,
+        rows: &[Row],
+        p: &PathPattern,
+    ) -> Result<Option<HashSet<usize>>> {
+        let plain_node = |n: &NodePat| n.labels.is_none() && n.props.is_none();
+        let plain_rel = |r: &RelPat| r.var.is_none() && r.props.is_none() && r.range.is_none();
+        let [(r1, mid), (r2, end)] = p.steps.as_slice() else {
+            return Ok(None);
+        };
+        if p.kind != PathKind::Normal
+            || p.var.is_some()
+            || !plain_node(&p.start)
+            || !plain_node(end)
+            || mid.var.is_some()
+            || !plain_node(mid)
+            || !plain_rel(r1)
+            || !plain_rel(r2)
+        {
+            return Ok(None);
+        }
+        let (Some(sv), Some(ev)) = (&p.start.var, &end.var) else {
+            return Ok(None);
+        };
+        let ends_of = |r: &Row| match (r.get(sv), r.get(ev)) {
+            (Some(Value::Node(a)), Some(Value::Node(b))) => Some((a.id, b.id)),
+            _ => None,
+        };
+        // Both ends bound in every row (else the matcher handles it).
+        if rows.iter().any(|r| {
+            !matches!(
+                (r.get(sv), r.get(ev)),
+                (
+                    Some(Value::Node(_) | Value::Null),
+                    Some(Value::Node(_) | Value::Null)
+                )
+            )
+        }) {
+            return Ok(None);
+        }
+        let (Some(t1), Some(t2)) = (self.type_ids(r1).await?, self.type_ids(r2).await?) else {
+            return Ok(Some(HashSet::new()));
+        };
+        self.plan
+            .push("PatternPredicate: met in the middle from both bound ends".into());
+        let mut starts: Vec<u64> = rows
+            .iter()
+            .filter_map(|r| ends_of(r).map(|x| x.0))
+            .collect();
+        let mut finals: Vec<u64> = rows
+            .iter()
+            .filter_map(|r| ends_of(r).map(|x| x.1))
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        finals.sort_unstable();
+        finals.dedup();
+        let mut links = HashMap::new();
+        let left = self
+            .level_links(&starts, &t1, r1, r1.dir, &mut links)
+            .await?;
+        let right = self
+            .level_links(&finals, &t2, r2, r2.dir.reverse(), &mut links)
+            .await?;
+        let mut hits = HashSet::new();
+        for (i, r) in rows.iter().enumerate() {
+            let Some((a, b)) = ends_of(r) else { continue };
+            let (Some(l), Some(rr)) = (left.get(&a), right.get(&b)) else {
+                continue;
+            };
+            let back: HashMap<u64, Vec<u64>> = rr.iter().fold(HashMap::new(), |mut m, (mid, e)| {
+                m.entry(*mid).or_default().push(*e);
+                m
+            });
+            if l.iter()
+                .any(|(mid, e1)| back.get(mid).is_some_and(|es| es.iter().any(|e2| e2 != e1)))
+            {
+                hits.insert(i);
+            }
+        }
+        Ok(Some(hits))
     }
 
     #[allow(clippy::option_option)] // unbound, bound to a non-node, bound to a node
@@ -539,6 +639,12 @@ impl Exec<'_> {
             let need = Self::map_need(pat.start.var.as_ref(), pe);
             self.late_needs(&mut rows, &need).await?;
         }
+        if pat.start.labels.is_some()
+            && let Some(v) = &pat.start.var
+        {
+            let need = HashMap::from([(v.clone(), Self::labels_need())]);
+            self.late_needs(&mut rows, &need).await?;
+        }
         let track = pat.var.is_some();
         // Start points.
         let mut cur: Vec<(Row, Arc<Node>)> = Vec::new();
@@ -634,9 +740,36 @@ impl Exec<'_> {
                     "full scan"
                 }
             ));
+            // Read late, the scan reads only what the clause is known to
+            // need of the node (nothing for `MATCH (n) RETURN count(n)`);
+            // a property map or a join on the rows' values needs it all.
+            let keys: Option<Vec<String>> =
+                if self.late && pat.start.props.is_none() && join.is_none() {
+                    match self.need_of(pat.start.var.as_ref(), None) {
+                        None => Some(Vec::new()),
+                        Some(super::late::Need::All) => None,
+                        Some(super::late::Need::Keys(ks)) => {
+                            Some(ks.into_iter().filter(|k| !k.starts_with('\u{1}')).collect())
+                        }
+                    }
+                } else {
+                    None
+                };
+            scan.keys.clone_from(&keys);
             let found = self.store.scan(&scan).await?;
             self.check_rows(found.len())?;
-            let nodes: Vec<Arc<Node>> = found.iter().map(|r| self.node_val(r)).collect();
+            let nodes: Vec<Arc<Node>> = match keys.as_deref() {
+                None => found.iter().map(|r| self.node_val(r)).collect(),
+                Some([]) => found.iter().map(|r| self.bare_node(r)).collect(),
+                Some(k) => found
+                    .iter()
+                    .map(|r| {
+                        let n = self.merged_node(r, Some(k));
+                        self.seen_nodes.insert(n.id, Arc::clone(&n));
+                        n
+                    })
+                    .collect(),
+            };
             let by_key: Option<(&RowJoin, HashMap<crate::value::Key, Vec<usize>>)> =
                 join.as_ref().map(|j| {
                     let mut m: HashMap<crate::value::Key, Vec<usize>> = HashMap::new();
@@ -907,6 +1040,249 @@ impl Exec<'_> {
         Ok(out)
     }
 
+    /// A far node pattern `(v:L {k: e})` with an index on `L.k`: the
+    /// nodes it can be, found through the index for every row's value of
+    /// `e`, restrict `v` ([`Exec::only`]) so the hop reads only links to
+    /// them (LDBC IC6's `(post)-[:HAS_TAG]->(t:Tag {id: knownTagId})`
+    /// read every tag of every post).
+    async fn only_by_index(
+        &mut self,
+        np: &NodePat,
+        pe: &Expr,
+        cur: &[(Row, Arc<Node>)],
+    ) -> Result<()> {
+        const MAX: usize = 10_000;
+        let (Some(v), Expr::Map(m), Some(label)) =
+            (&np.var, pe, np.labels.as_ref().and_then(|l| l.required()))
+        else {
+            return Ok(());
+        };
+        if self.only.contains_key(v) || cur.first().is_some_and(|(r, _)| r.contains_key(v)) {
+            return Ok(());
+        }
+        let label = label.to_owned();
+        let indexed: Vec<String> = self
+            .store
+            .indexes()
+            .iter()
+            .filter(|d| {
+                d.entity == crate::ast::Entity::Node
+                    && d.token == label
+                    && d.props.len() == 1
+                    && d.state == "online"
+            })
+            .map(|d| d.props[0].clone())
+            .collect();
+        let Some((k, e)) = m.iter().find(|(k, _)| indexed.contains(k)) else {
+            return Ok(());
+        };
+        let rows: Vec<Row> = cur.iter().map(|(r, _)| r.clone()).collect();
+        if !is_const(e) && !row_bound(e, &rows) {
+            return Ok(());
+        }
+        let mut vals: Vec<Json> = Vec::new();
+        for r in rows.iter().take(if is_const(e) { 1 } else { usize::MAX }) {
+            let Some(j) = scan_json(&eval(e, r, self.params)?) else {
+                return Ok(());
+            };
+            if !vals.contains(&j) {
+                vals.push(j);
+            }
+            if vals.len() > MAX {
+                return Ok(());
+            }
+        }
+        let Some(lid) = self.store.label_id(&label, false).await? else {
+            self.only.insert(v.clone(), Vec::new());
+            return Ok(());
+        };
+        let scan = Scan {
+            label: Some(lid),
+            props_eq: vec![(k.clone(), vals)],
+            limit: Some(MAX + 1),
+            keys: self.late.then(Vec::new),
+            ..Scan::default()
+        };
+        let found = self.store.scan(&scan).await?;
+        if found.len() > MAX {
+            return Ok(());
+        }
+        let mut ids: Vec<u64> = found.iter().map(|n| n.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        self.only.insert(v.clone(), ids);
+        Ok(())
+    }
+
+    /// For each node `(v:L)` of `patterns` the rows don't bind, with an
+    /// index on `L.k` and a conjunct `v.k = e` or `v.k IN e` whose `e` the
+    /// rows give (LDBC IC14's `b.id IN [startNode(r).id, endNode(r).id]`,
+    /// which its disjunction implies): the nodes the index finds for every
+    /// row's values restrict `v` ([`Exec::only`]), so hops that reach it
+    /// read only links to them.
+    async fn only_by_conj(
+        &mut self,
+        patterns: &[PathPattern],
+        conj: &[Expr],
+        rows: &mut [Row],
+    ) -> Result<()> {
+        const MAX: usize = 10_000;
+        if rows.is_empty() || rows.len() > MAX {
+            return Ok(());
+        }
+        let nodes: Vec<NodePat> = patterns
+            .iter()
+            .flat_map(|p| {
+                std::iter::once(p.start.clone()).chain(p.steps.iter().map(|(_, n)| n.clone()))
+            })
+            .collect();
+        for np in nodes {
+            let (Some(v), Some(label)) = (&np.var, np.labels.as_ref().and_then(|l| l.required()))
+            else {
+                continue;
+            };
+            if self.only.contains_key(v) || rows[0].contains_key(v) {
+                continue;
+            }
+            let label = label.to_owned();
+            let indexed: Vec<String> = self
+                .store
+                .indexes()
+                .iter()
+                .filter(|d| {
+                    d.entity == crate::ast::Entity::Node
+                        && d.token == label
+                        && d.props.len() == 1
+                        && d.state == "online"
+                })
+                .map(|d| d.props[0].clone())
+                .collect();
+            let found = conj.iter().find_map(|c| {
+                let Expr::Binary(op @ (BinOp::Eq | BinOp::In), a, e) = c else {
+                    return None;
+                };
+                let Expr::Prop(t, k) = &**a else { return None };
+                (matches!(&**t, Expr::Var(x) if x == v)
+                    && indexed.contains(k)
+                    && !is_const(e)
+                    && row_bound(e, rows))
+                .then(|| (k.clone(), (**e).clone(), *op == BinOp::In))
+            });
+            let Some((k, e, list)) = found else { continue };
+            let per_row = self.eval_rows(&e, rows).await?;
+            let mut vals: Vec<Json> = Vec::new();
+            let mut ok = true;
+            for x in per_row {
+                let xs = match (list, x) {
+                    (_, Value::Null) => vec![],
+                    (true, Value::List(l)) => l,
+                    (true, _) => {
+                        ok = false;
+                        break;
+                    }
+                    (false, x) => vec![x],
+                };
+                for x in xs {
+                    if x.is_null() {
+                        continue;
+                    }
+                    match scan_json(&x) {
+                        Some(j) if !vals.contains(&j) => vals.push(j),
+                        Some(_) => {}
+                        None => ok = false,
+                    }
+                }
+                if !ok || vals.len() > MAX {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let Some(lid) = self.store.label_id(&label, false).await? else {
+                continue;
+            };
+            let scan = Scan {
+                label: Some(lid),
+                props_eq: vec![(k, vals)],
+                limit: Some(MAX + 1),
+                keys: Some(Vec::new()),
+                ..Scan::default()
+            };
+            let found = self.store.scan(&scan).await?;
+            if found.len() > MAX {
+                continue;
+            }
+            let mut ids: Vec<u64> = found.iter().map(|n| n.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            self.only.insert(v.clone(), ids);
+        }
+        Ok(())
+    }
+
+    /// For each conjunct `v IN list` of `w` whose `v` the rows don't bind
+    /// and whose list they do: every row's list, when all of them are
+    /// node lists, as sorted ids (the nodes `v` may be).
+    async fn only_ids(&mut self, w: &Expr, rows: &mut [Row]) -> Result<HashMap<String, Vec<u64>>> {
+        let mut out = HashMap::new();
+        if rows.is_empty() {
+            return Ok(out);
+        }
+        for c in conjuncts(w) {
+            let Expr::Binary(BinOp::In, a, list) = c else {
+                continue;
+            };
+            let Expr::Var(v) = &**a else { continue };
+            if rows[0].contains_key(v) || !row_bound(list, rows) {
+                continue;
+            }
+            let lists = self.eval_rows(list, rows).await?;
+            let mut ids: Vec<u64> = Vec::new();
+            let mut ok = true;
+            for l in lists {
+                match l {
+                    Value::List(xs) => {
+                        for x in xs {
+                            match x {
+                                Value::Node(n) => ids.push(n.id),
+                                Value::Null => {}
+                                _ => ok = false,
+                            }
+                        }
+                    }
+                    Value::Null => {}
+                    _ => ok = false,
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if ok {
+                ids.sort_unstable();
+                ids.dedup();
+                out.insert(v.clone(), ids);
+            }
+        }
+        Ok(out)
+    }
+
+    /// A need for a node's labels alone.
+    fn labels_need() -> super::late::Need {
+        super::late::Need::Keys(std::collections::BTreeSet::from([
+            super::late::LABELS.to_owned()
+        ]))
+    }
+
+    /// The id of the one label `np` requires, if it has one and it exists.
+    async fn required_label(&mut self, np: &NodePat) -> Result<Option<u32>> {
+        match np.labels.as_ref().and_then(|l| l.required()) {
+            Some(l) => self.store.label_id(l, false).await,
+            None => Ok(None),
+        }
+    }
+
     /// What checking node pattern `{..}` map `pe` on `var` reads: the
     /// map's keys of the node, and what its values read of the rows.
     fn map_need(var: Option<&String>, pe: &Expr) -> HashMap<String, super::late::Need> {
@@ -925,22 +1301,154 @@ impl Exec<'_> {
     /// [`Exec::hop_edges`] without properties: links, and the far
     /// nodes' ids, hashes and labels (`far`; else stand-ins with the id
     /// and hash alone, for anonymous unlabelled nodes nothing reads).
-    async fn hop_light(&mut self, ids: &[u64], types: &[u32], dir: Dir, far: bool) -> Result<Hops> {
+    #[allow(clippy::too_many_arguments)] // the hop, its far node and its relationship
+    async fn hop_light(
+        &mut self,
+        ids: &[u64],
+        types: &[u32],
+        dir: Dir,
+        far: bool,
+        var: Option<&String>,
+        extra: Option<&super::late::Need>,
+        rel_var: Option<&String>,
+        label: Option<u32>,
+    ) -> Result<Hops> {
         let dirs: &[Dir] = match dir {
             Dir::Both => &[Dir::Out, Dir::In],
             Dir::Out => &[Dir::Out],
             Dir::In => &[Dir::In],
         };
+        // With the far nodes wanted, they come in the same statement where
+        // the store can (shards on one cluster), with the keys and filters
+        // the clause is known to need; the rest are read by id.
+        let need = self.need_of(var, extra);
+        let keys: Option<Vec<String>> = match &need {
+            None => Some(Vec::new()),
+            Some(super::late::Need::All) => None,
+            Some(super::late::Need::Keys(ks)) => Some(
+                ks.iter()
+                    .filter(|k| !k.starts_with('\u{1}'))
+                    .cloned()
+                    .collect(),
+            ),
+        };
+        let mut filter = self.filters_for(var);
+        // A label the far node pattern requires: the reads leave out the
+        // nodes without it (the gateway checks it again).
+        if let Some(l) = label {
+            filter.push((
+                format!("{}{l}", sprig_router::graph_route::LABEL_KEY),
+                CmpOp::Eq,
+                0.0,
+            ));
+        }
+        let only = var.and_then(|v| self.only.get(v)).cloned();
+        // A named far node nothing is known to need yet is bound without
+        // being read (its labels too); a later clause reads what it needs.
+        let far =
+            far || (var.is_some() && (need.is_some() || !filter.is_empty() || only.is_some()));
+        if only.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(HashMap::new());
+        }
+        let only = only.unwrap_or_default();
+        // The relationship's properties the clause is known to read, and
+        // its numeric filters, in the same statement.
+        let rel_need = rel_var.and_then(|v| self.prefetch.get(v)).cloned();
+        let rel_keys: Option<Vec<String>> = match &rel_need {
+            None => None,
+            Some(super::late::Need::All) => Some(Vec::new()),
+            Some(super::late::Need::Keys(ks)) => {
+                let k: Vec<String> = ks
+                    .iter()
+                    .filter(|k| !k.starts_with('\u{1}'))
+                    .cloned()
+                    .collect();
+                (!k.is_empty()).then_some(k)
+            }
+        };
+        let rel_filter = rel_var
+            .and_then(|v| self.push.get(v))
+            .cloned()
+            .unwrap_or_default();
+        let mut rel_props: HashMap<u64, Arc<Rel>> = HashMap::new();
         let mut raw: Vec<(u64, u64, u64, Link)> = Vec::new();
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
+        // Both ways in one round trip.
+        let dirs: &[Dir] = if dir == Dir::Both { &[Dir::Both] } else { dirs };
         for d in dirs {
-            for batch in ids.chunks(self.b.batch_nodes.max(1)) {
-                for l in self.store.links(batch, types, *d).await? {
-                    let (near, far_id, far_rk) = if *d == Dir::Out {
+            for batch in ids.chunks(self.id_batch()) {
+                // Joined far nodes save a round trip, but over many links
+                // the joins cost more in MariaDB than reading the nodes by
+                // id: only small frontiers join them.
+                let join = far && batch.len() <= JOIN_FAR_MAX;
+                let read_far =
+                    join || !only.is_empty() || rel_keys.is_some() || !rel_filter.is_empty();
+                let found: Vec<(crate::store::FarLink, bool)> = if *d == Dir::Both && read_far {
+                    let fr = crate::store::FarRead {
+                        keys: keys.as_deref(),
+                        filter: &filter,
+                        only: &only,
+                        join,
+                        rel_keys: rel_keys.as_deref(),
+                        rel_filter: &rel_filter,
+                    };
+                    self.store.links_far_both(batch, types, &fr).await?
+                } else if *d == Dir::Both {
+                    self.store
+                        .links_both(batch, types)
+                        .await?
+                        .into_iter()
+                        .map(|(l, out)| ((l, None, None), out))
+                        .collect()
+                } else if join || !only.is_empty() || rel_keys.is_some() || !rel_filter.is_empty() {
+                    let fr = crate::store::FarRead {
+                        keys: keys.as_deref(),
+                        filter: &filter,
+                        only: &only,
+                        join,
+                        rel_keys: rel_keys.as_deref(),
+                        rel_filter: &rel_filter,
+                    };
+                    self.store
+                        .links_far(batch, types, *d, &fr)
+                        .await?
+                        .into_iter()
+                        .map(|x| (x, *d == Dir::Out))
+                        .collect()
+                } else {
+                    self.store
+                        .links(batch, types, *d)
+                        .await?
+                        .into_iter()
+                        .map(|l| ((l, None, None), *d == Dir::Out))
+                        .collect()
+                };
+                for ((l, n, rp), out_link) in found {
+                    if let Some((props, types)) = rp
+                        && !rel_props.contains_key(&l.id)
+                    {
+                        let r = self.rel_from(&l, &props, types.as_ref(), rel_keys.as_deref());
+                        rel_props.insert(l.id, r);
+                    }
+                    let (near, far_id, far_rk) = if out_link {
                         (l.src, l.dst, l.dst_rk)
                     } else {
                         (l.dst, l.src, l.src_rk)
                     };
+                    if let Some(r) = n
+                        && !nodes.contains_key(&r.id)
+                    {
+                        let node = match keys.as_deref() {
+                            Some([]) => self.bare_node(&r),
+                            k => {
+                                let node = self.merged_node(&r, k);
+                                self.seen_nodes.insert(node.id, Arc::clone(&node));
+                                node
+                            }
+                        };
+                        nodes.insert(r.id, node);
+                    }
                     if seen.insert((near, l.id)) {
                         raw.push((near, far_id, far_rk, l));
                     }
@@ -948,22 +1456,14 @@ impl Exec<'_> {
                 self.check_time()?;
             }
         }
-        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
         if far {
-            let mut want: Vec<u64> = Vec::new();
-            for (_, f, _, _) in &raw {
-                if let Some(n) = self.seen_nodes.get(f) {
-                    nodes.insert(*f, Arc::clone(n));
-                } else {
-                    want.push(*f);
-                }
-            }
-            want.sort_unstable();
-            want.dedup();
-            for batch in want.chunks(self.b.batch_nodes.max(1)) {
-                for r in self.store.nodes_part(batch, Some(&[])).await? {
-                    nodes.insert(r.id, self.bare_node(&r));
-                }
+            let rest: Vec<u64> = raw
+                .iter()
+                .map(|(_, f, _, _)| *f)
+                .filter(|f| !nodes.contains_key(f))
+                .collect();
+            if !rest.is_empty() {
+                nodes.extend(self.read_nodes(&rest, var, extra, label).await?);
             }
         }
         let graph = self.store.graph_id();
@@ -981,10 +1481,10 @@ impl Exec<'_> {
                     rk,
                     labels: Vec::new(),
                     props: crate::value::Props::new(),
-                    partial: Some(Arc::from(Vec::<String>::new())),
+                    partial: Some(Arc::from(vec![super::late::NO_LABELS.to_owned()])),
                 })
             };
-            let rel = match self.seen_rels.get(&l.id) {
+            let rel = match rel_props.get(&l.id).or_else(|| self.seen_rels.get(&l.id)) {
                 Some(r) => Arc::clone(r),
                 None => Arc::new(Rel {
                     graph,
@@ -1004,6 +1504,59 @@ impl Exec<'_> {
             out.entry(near).or_default().push((rel, far));
         }
         Ok(out)
+    }
+
+    /// A relationship from its link and the properties read with it
+    /// (`keys`: those keys; `Some(&[])` or `None`: all).
+    fn rel_from(
+        &mut self,
+        l: &Link,
+        props: &serde_json::Value,
+        types: Option<&serde_json::Value>,
+        keys: Option<&[String]>,
+    ) -> Arc<Rel> {
+        let partial: crate::value::Partial = match keys {
+            Some(k) if !k.is_empty() => {
+                // With what the statement read of it before.
+                let mut have: Vec<String> = k.to_vec();
+                if let Some(old) = self.seen_rels.get(&l.id) {
+                    match &old.partial {
+                        None => return Arc::clone(old),
+                        Some(ok) => {
+                            for x in ok.iter() {
+                                if !have.contains(x) {
+                                    have.push(x.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(have.into())
+            }
+            _ => None,
+        };
+        let mut p = crate::value::props_from_json(props, types);
+        if let (Some(_), Some(old)) = (&partial, self.seen_rels.get(&l.id)) {
+            for (k, v) in &old.props {
+                p.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        let r = Arc::new(Rel {
+            graph: self.store.graph_id(),
+            id: l.id,
+            src: l.src,
+            dst: l.dst,
+            src_rk: l.src_rk,
+            dst_rk: l.dst_rk,
+            rtype: self
+                .store
+                .type_name(l.rtype)
+                .unwrap_or_else(|| format!("#{}", l.rtype)),
+            props: p,
+            partial,
+        });
+        self.seen_rels.insert(l.id, Arc::clone(&r));
+        r
     }
 
     /// [`Exec::late_needs`] for the rows of `cur` (and their nodes).
@@ -1026,12 +1579,15 @@ impl Exec<'_> {
     /// Nodes by id for binding to `np`: without properties when they're
     /// read late and `np` compares none here.
     async fn bind_nodes(&mut self, ids: &[u64], np: &NodePat) -> Result<HashMap<u64, Arc<Node>>> {
+        if self.late && np.props.is_none() {
+            let label = self.required_label(np).await?;
+            return self.read_nodes(ids, np.var.as_ref(), None, label).await;
+        }
         let mut out = HashMap::new();
-        let light = self.late && np.props.is_none();
         let mut want = Vec::new();
         for id in ids {
             match self.seen_nodes.get(id) {
-                Some(n) if light || n.partial.is_none() => {
+                Some(n) if n.partial.is_none() => {
                     out.insert(*id, Arc::clone(n));
                 }
                 _ => want.push(*id),
@@ -1039,44 +1595,59 @@ impl Exec<'_> {
         }
         want.sort_unstable();
         want.dedup();
-        for batch in want.chunks(self.b.batch_nodes.max(1)) {
-            if light {
-                for r in self.store.nodes_part(batch, Some(&[])).await? {
-                    out.insert(r.id, self.bare_node(&r));
-                }
-            } else {
-                for r in self.store.nodes(batch).await? {
-                    out.insert(r.id, self.node_val(&r));
-                }
+        for batch in want.chunks(self.id_batch()) {
+            for r in self.store.nodes(batch).await? {
+                out.insert(r.id, self.node_val(&r));
             }
         }
         Ok(out)
     }
 
-    /// Relationships by `(src_rk, id)`: without properties when they're
-    /// read late.
-    async fn rels_by_key(&mut self, keys: Vec<(u64, u64)>) -> Result<HashMap<u64, Arc<Rel>>> {
+    /// Relationships by `(src_rk, id)`: when read late, made from their
+    /// `links` without a read (properties come when a clause needs them);
+    /// else read whole.
+    async fn rels_by_key(
+        &mut self,
+        keys: Vec<(u64, u64)>,
+        links: &HashMap<u64, Link>,
+    ) -> Result<HashMap<u64, Arc<Rel>>> {
         let mut keys = keys;
         keys.sort_unstable();
         keys.dedup();
         let mut rels: HashMap<u64, Arc<Rel>> = HashMap::new();
-        keys.retain(|(_, id)| match self.seen_rels.get(id) {
-            Some(r) => {
+        let graph = self.store.graph_id();
+        keys.retain(|(_, id)| {
+            if let Some(r) = self.seen_rels.get(id) {
                 rels.insert(*id, Arc::clone(r));
-                false
+                return false;
             }
-            None => true,
+            if self.late
+                && let Some(l) = links.get(id)
+            {
+                rels.insert(
+                    *id,
+                    Arc::new(Rel {
+                        graph,
+                        id: l.id,
+                        src: l.src,
+                        dst: l.dst,
+                        src_rk: l.src_rk,
+                        dst_rk: l.dst_rk,
+                        rtype: self
+                            .store
+                            .type_name(l.rtype)
+                            .unwrap_or_else(|| format!("#{}", l.rtype)),
+                        props: crate::value::Props::new(),
+                        partial: Some(Arc::from(Vec::<String>::new())),
+                    }),
+                );
+                return false;
+            }
+            true
         });
-        let light = self.late;
-        for batch in keys.chunks(self.b.batch_nodes.max(1)) {
-            let part: Option<&[String]> = if light { Some(&[]) } else { None };
-            for e in self.store.edges_part(batch, part).await? {
-                let r = if light {
-                    self.bare_rel(&e)
-                } else {
-                    self.rel_val(&e)
-                };
-                rels.insert(e.id, r);
+        for batch in keys.chunks(self.id_batch()) {
+            for e in self.store.edges_at(batch).await? {
+                rels.insert(e.id, self.rel_val(&e));
             }
         }
         Ok(rels)
@@ -1161,11 +1732,38 @@ impl Exec<'_> {
         ));
         let mut cur = cur;
         let ids = Self::frontier(&cur);
-        let hops = if self.late && np.props.is_none() && rp.props.is_none() {
+        let hops = if self.late && rp.props.is_none() {
             // Links, and the far nodes' labels when the pattern names or
-            // labels them; properties are read when a clause needs them.
-            let far = np.var.is_some() || np.labels.is_some() || track;
-            self.hop_light(&ids, &types, rp.dir, far).await?
+            // labels them; properties are read when a clause needs them
+            // (here, the keys a property map on the far node compares).
+            let extra = match &np.props {
+                None => None,
+                Some(pe) => {
+                    let mut need = HashMap::new();
+                    super::late::needs(pe, true, &mut need);
+                    self.late_cur(&mut cur, &need).await?;
+                    self.only_by_index(np, pe, &cur).await?;
+                    Some(match pe {
+                        Expr::Map(m) => {
+                            super::late::Need::Keys(m.iter().map(|(k, _)| k.clone()).collect())
+                        }
+                        _ => super::late::Need::All,
+                    })
+                }
+            };
+            let far = np.labels.is_some() || np.props.is_some() || track;
+            let label = self.required_label(np).await?;
+            self.hop_light(
+                &ids,
+                &types,
+                rp.dir,
+                far,
+                np.var.as_ref(),
+                extra.as_ref(),
+                rp.var.as_ref(),
+                label,
+            )
+            .await?
         } else {
             // Property maps on the pattern compare far elements here.
             let mut need = HashMap::new();
@@ -1175,6 +1773,30 @@ impl Exec<'_> {
             self.late_cur(&mut cur, &need).await?;
             self.hop_edges(&ids, &types, rp.dir).await?
         };
+        // Far nodes a top-k MATCH can't keep any more (see `Exec::prune`).
+        let beaten: HashSet<u64> = match (&self.prune, &np.var) {
+            (Some(p), Some(v)) if p.var == *v && p.bound.is_some() => {
+                let mut scratch = Row::new();
+                let mut out = HashSet::new();
+                let mut seen_far: HashSet<u64> = HashSet::new();
+                for (_, far) in hops.values().flatten() {
+                    if !seen_far.insert(far.id) {
+                        continue;
+                    }
+                    scratch.insert(v.clone(), Value::Node(far.clone()));
+                    let ks: Option<Vec<Value>> = p
+                        .keys
+                        .iter()
+                        .map(|(e, _)| eval(e, &scratch, self.params).ok())
+                        .collect();
+                    if ks.is_some_and(|k| p.beaten(&k)) {
+                        out.insert(far.id);
+                    }
+                }
+                out
+            }
+            _ => HashSet::new(),
+        };
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(cands) = hops.get(&n.id) else {
@@ -1182,7 +1804,7 @@ impl Exec<'_> {
             };
             let used = Self::row_rels(&r);
             for (rel, far) in cands {
-                if used.contains(&rel.id) {
+                if used.contains(&rel.id) || beaten.contains(&far.id) {
                     continue;
                 }
                 if let Some(v) = &rp.var {
@@ -1537,7 +2159,7 @@ impl Exec<'_> {
             origins.iter().map(|n| (n.id, n.clone())).collect();
         node_ids.retain(|i| !nodes.contains_key(i));
         nodes.extend(self.bind_nodes(&node_ids, np).await?);
-        let rels = self.rels_by_key(rel_keys).await?;
+        let rels = self.rels_by_key(rel_keys, &links).await?;
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(trails) = done.get(&n.id) else {
@@ -1714,6 +2336,12 @@ impl Exec<'_> {
                 let need = Self::map_need(np.var.as_ref(), pe);
                 self.late_needs(&mut rows, &need).await?;
             }
+            if np.labels.is_some()
+                && let Some(v) = &np.var
+            {
+                let need = HashMap::from([(v.clone(), Self::labels_need())]);
+                self.late_needs(&mut rows, &need).await?;
+            }
         }
         let mut out = Vec::new();
         for r in rows {
@@ -1785,20 +2413,26 @@ impl Exec<'_> {
         };
         let mut raw: Vec<(u64, u64, Link)> = Vec::new();
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
-        for d in dirs {
-            for batch in ids.chunks(self.b.batch_nodes.max(1)) {
-                for l in self.store.links(batch, types, *d).await? {
-                    let (near, far) = if *d == Dir::Out {
-                        (l.src, l.dst)
-                    } else {
-                        (l.dst, l.src)
-                    };
-                    if seen.insert((near, l.id)) {
-                        raw.push((near, far, l));
+        let mut keep = |l: Link, out: bool, raw: &mut Vec<(u64, u64, Link)>| {
+            let (near, far) = if out { (l.src, l.dst) } else { (l.dst, l.src) };
+            if seen.insert((near, l.id)) {
+                raw.push((near, far, l));
+            }
+        };
+        for batch in ids.chunks(self.id_batch()) {
+            if dir == Dir::Both {
+                // Both ways in one round trip.
+                for (l, out) in self.store.links_both(batch, types).await? {
+                    keep(l, out, &mut raw);
+                }
+            } else {
+                for d in dirs {
+                    for l in self.store.links(batch, types, *d).await? {
+                        keep(l, *d == Dir::Out, &mut raw);
                     }
                 }
-                self.check_time()?;
             }
+            self.check_time()?;
         }
         if rp.props.is_some() {
             let mut keys: Vec<(u64, u64)> = raw.iter().map(|(_, _, l)| (l.src_rk, l.id)).collect();
@@ -1851,7 +2485,7 @@ impl Exec<'_> {
             .flat_map(|(_, rs)| rs.iter())
             .filter_map(|id| links.get(id).map(|l| (l.src_rk, l.id)))
             .collect();
-        let rels = self.rels_by_key(keys).await?;
+        let rels = self.rels_by_key(keys, links).await?;
         Ok(paths
             .into_iter()
             .filter_map(|(ns, rs)| {
@@ -2054,6 +2688,10 @@ impl Exec<'_> {
         self.materialize(out, &links, &[a, b]).await
     }
 }
+
+/// Frontiers up to this many nodes read their far nodes in the links
+/// statement.
+const JOIN_FAR_MAX: usize = 64;
 
 /// A path by ids: its nodes and edges in order.
 type IdPath = (Vec<u64>, Vec<u64>);

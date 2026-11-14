@@ -235,7 +235,7 @@ async fn copy_states(
     };
     if !known && !out.0.is_empty() {
         svc.authz.relations_changed(cat.tenant);
-        if let Err(e) = svc.authz.ensure(&svc, cat, &cluster).await {
+        if let Err(e) = Box::pin(svc.authz.ensure(&svc, cat, &cluster)).await {
             tracing::warn!(tenant = %cat.tenant, error = %e, "backend grants after a new copy not reconciled yet");
         }
     }
@@ -298,7 +298,21 @@ impl PassSession {
             return Ok(None);
         }
         let state = cat.ext.get::<InheritState>(sprig_inherit::MODULE);
-        if !sprig_inherit::maybe_inherit(text, state) {
+        // A change stream's visibility probe (RL64; `inherit_probe`).
+        let probe = super::inherit_probe::parse(text);
+        if probe == super::inherit_probe::Parsed::Forged {
+            let e = SprigError::standard(
+                1064,
+                *b"42000",
+                "You have an error in your SQL syntax: a visibility probe isn't a client statement",
+            );
+            return Ok(Some(self.fail(out, &e).await?));
+        }
+        let probe = match probe {
+            super::inherit_probe::Parsed::Probe(req) => Some(req),
+            _ => None,
+        };
+        if probe.is_none() && !sprig_inherit::maybe_inherit(text, state) {
             return Ok(None);
         }
         let Ok(sql) = std::str::from_utf8(text) else {
@@ -391,7 +405,21 @@ impl PassSession {
                 },
                 migrated,
             };
-            let h = Box::pin(sprig_inherit::handle(sql, &ctx, &mut runner)).await;
+            let h = match &probe {
+                Some(req) => {
+                    let col =
+                        |n: &str| crate::pipeline::text_column(n, runner.gw.cx.proto.collation);
+                    Box::pin(super::inherit_probe::run(
+                        &ctx,
+                        &mut runner,
+                        req,
+                        (col("i"), col("v")),
+                    ))
+                    .await
+                    .map(Handled::Rows)
+                }
+                None => Box::pin(sprig_inherit::handle(sql, &ctx, &mut runner)).await,
+            };
             if let Some(ts) = runner.gw.sess.tenant.as_deref_mut() {
                 (ts.types.internal, ts.types.typed_plan) = saved;
             }
@@ -554,10 +582,7 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
             sprig_inherit::RowCmd::Delete => &[Cmd::Select, Cmd::Delete],
         };
         let session = self.gw.cx.session.id;
-        self.gw
-            .sess
-            .rls_predicate(session, db, table, qual, cmds)
-            .await
+        Box::pin(self.gw.sess.rls_predicate(session, db, table, qual, cmds)).await
     }
 
     async fn commit(&mut self, change: &InheritChange) -> Result<()> {
@@ -609,13 +634,18 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
             };
             SprigError::new(SprigCode::BackendUnavailable, msg).with_source(e)
         })?;
+        // Back to the pool first: the reconcile below waits for the
+        // tenant's gate and then for a slot of this same pool (4 slots), so
+        // sessions holding a slot here while its holder waits for one
+        // stopped every catalog read on the cluster (rlsinherit2).
+        drop(conn);
         // A share view was made: accounts row-level security narrowed to
         // single relations need SELECT on it (rlsinherit).
         if let Some(ts) = self.gw.sess.tenant.as_deref()
             && let Some(cat) = ts.catalog().cloned()
         {
             svc.authz.relations_changed(ts.tenant);
-            if let Err(e) = svc.authz.ensure(&svc, &cat, &cluster).await {
+            if let Err(e) = Box::pin(svc.authz.ensure(&svc, &cat, &cluster)).await {
                 tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a new share view not reconciled yet");
             }
         }

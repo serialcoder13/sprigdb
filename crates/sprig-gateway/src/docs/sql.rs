@@ -141,6 +141,8 @@ const NOT_ALIAS: &[&str] = &[
 ///
 /// # Errors
 /// See [`Refusal`].
+#[must_use]
+#[allow(clippy::too_many_lines)] // one pass over the tokens, case by case
 pub fn analyze(text: &[u8], opts: &LexOptions) -> Option<Result<Analysis, Refusal>> {
     if !mentions(text) {
         return None;

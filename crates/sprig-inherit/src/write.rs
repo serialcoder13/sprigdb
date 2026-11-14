@@ -397,9 +397,12 @@ pub async fn update(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
                         .map_or_else(|| format!("{a}.{}", q(c)), |(_, v)| format!("({v})"))
                 })
                 .collect();
+            // Every field takes the merged record's new value, not only
+            // the overridden ones (the merge reads only those): a layer
+            // row stays a copy of its record, which MariaDB's row-level
+            // security triggers check as the update's new version (RL65).
             let upd: Vec<String> = o
                 .values()
-                .filter(|c| ctx.limits.override_record || assigned.iter().any(|(x, _)| x == c))
                 .map(|c| format!("{c} = VALUES({c})", c = q(c)))
                 .collect();
             let text = format!(
@@ -741,10 +744,21 @@ async fn delete_keys(
         .cloned()
         .collect();
     if !hide.is_empty() {
+        // A hide marker over an override takes the record's values too:
+        // the row-level security triggers check it as the deleted record
+        // (RL65).
+        let refresh = o.values().fold(String::new(), |mut acc, c| {
+            let c = q(c);
+            acc.push_str(&c);
+            acc.push_str(" = VALUES(");
+            acc.push_str(&c);
+            acc.push_str("), ");
+            acc
+        });
         r.exec(&format!(
             "INSERT INTO {} ({}, `_sprig_space`, `_sprig_state`, `_sprig_ovr`) SELECT {}, {}, \
-             'hide', 0 FROM ({}) AS `__sprig_h` ON DUPLICATE KEY UPDATE `_sprig_state` = 'hide', \
-             `_sprig_ovr` = 0",
+             'hide', 0 FROM ({}) AS `__sprig_h` ON DUPLICATE KEY UPDATE {refresh}`_sprig_state` = \
+             'hide', `_sprig_ovr` = 0",
             res.layer,
             cols(o, None),
             cols(o, Some("`__sprig_h`")),

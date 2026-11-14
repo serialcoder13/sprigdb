@@ -67,7 +67,7 @@ pub fn service() -> Option<Arc<DocsService>> {
 #[must_use]
 pub fn unavailable(why: impl Into<String>) -> SprigError {
     SprigError::new(
-        SprigCode::SearchUnavailable,
+        SprigCode::DocsUnavailable,
         format!("docs search is unavailable: {}", why.into()),
     )
 }
@@ -343,7 +343,7 @@ impl DocsService {
     /// first candidate cluster with the version loaded.
     ///
     /// # Errors
-    /// 39825 when docs are off or no cluster has the version.
+    /// 39989 when docs are off or no cluster has the version.
     pub async fn target(&self, tenant: Option<TenantId>, version: Option<&str>) -> Result<Target> {
         if !self.enabled() {
             return Err(unavailable("it is turned off (docs.enabled)"));

@@ -182,3 +182,4 @@ Collect these, and you will have what anyone needs to find the cause:
 - [Metrics reference](../reference/metrics.md)
 - [Monitoring](../operate/monitoring.md)
 - [sprigctl](../tools/sprigctl.md)
+- [Searching the docs](../tools/docs-search.md): find the page for an error code or a symptom from SQL or REST

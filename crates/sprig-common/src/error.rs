@@ -1075,6 +1075,25 @@ sprig_codes! {
     ShellUnreachable = 39987, "ER_SPRIG_SHELL_UNREACHABLE", "SprigShellUnreachable", SQLSTATE_GENERAL, false;
     /// sprig: a password login over plain HTTP to another host.
     ShellInsecureTransport = 39988, "ER_SPRIG_SHELL_INSECURE_TRANSPORT", "SprigShellInsecureTransport", SQLSTATE_GENERAL, false;
+    /// Docs search can't be answered: docs are turned off (`docs.enabled`),
+    /// no cluster has this release's docs pack loaded yet, or (for
+    /// `sprig_docs.embed`) the embedding model isn't available.
+    DocsUnavailable = 39989, "ER_SPRIG_DOCS_UNAVAILABLE", "SprigDocsUnavailable", SQLSTATE_RETRY, true;
+    /// No AI provider or model is configured for the assistant's role
+    /// (`ai.model.<role>` names no provider, or the provider is gone).
+    AiNotConfigured = 39990, "ER_SPRIG_AI_NOT_CONFIGURED", "SprigAiNotConfigured", SQLSTATE_GENERAL, false;
+    /// The assistants are off for the tenant (`ai.enabled`).
+    AiDisabled = 39991, "ER_SPRIG_AI_DISABLED", "SprigAiDisabled", SQLSTATE_GENERAL, false;
+    /// The tenant's or the user's daily AI token budget is used up.
+    AiBudgetExceeded = 39992, "ER_SPRIG_AI_BUDGET_EXCEEDED", "SprigAiBudgetExceeded", SQLSTATE_GENERAL, false;
+    /// The AI provider failed, was unreachable or timed out.
+    AiProviderError = 39993, "ER_SPRIG_AI_PROVIDER_ERROR", "SprigAiProviderError", SQLSTATE_GENERAL, true;
+    /// The model declined the request.
+    AiRefused = 39994, "ER_SPRIG_AI_REFUSED", "SprigAiRefused", SQLSTATE_GENERAL, false;
+    /// The request would send row data while `ai.share_data` is off.
+    AiEgressDenied = 39995, "ER_SPRIG_AI_EGRESS_DENIED", "SprigAiEgressDenied", SQLSTATE_GENERAL, false;
+    /// The model kept calling a tool outside its role, or with invalid input.
+    AiToolDenied = 39996, "ER_SPRIG_AI_TOOL_DENIED", "SprigAiToolDenied", SQLSTATE_GENERAL, false;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
@@ -1408,6 +1427,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::AdmissionBackoff
         | SprigCode::FeedHandoffPending
         | SprigCode::SearchUnavailable
+        | SprigCode::DocsUnavailable
         | SprigCode::SearchWaitTimeout
         | SprigCode::SearchIndexNotReady
         | SprigCode::ShardMapUnavailable
@@ -1428,7 +1448,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::PathPublishTimeout
         | SprigCode::RedisPubsubUnavailable
         | SprigCode::KafkaNotCoordinator
-        | SprigCode::ShellUnreachable => (Code::Unavailable, 503),
+        | SprigCode::ShellUnreachable
+        | SprigCode::AiProviderError => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
@@ -1596,7 +1617,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MqAccessRefused
         | SprigCode::MqResidency
         | SprigCode::ShellConfirmationRequired
-        | SprigCode::ShellInsecureTransport => (Code::PermissionDenied, 403),
+        | SprigCode::ShellInsecureTransport
+        | SprigCode::AiDisabled
+        | SprigCode::AiEgressDenied
+        | SprigCode::AiToolDenied => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
@@ -1621,7 +1645,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::RedisTooManyBlocked
         | SprigCode::RedisLuaBudgetExceeded
         | SprigCode::KafkaQuota
-        | SprigCode::TranslateLimit => (Code::ResourceExhausted, 429),
+        | SprigCode::TranslateLimit
+        | SprigCode::AiBudgetExceeded => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts | SprigCode::NoDcCapacity => {
             (Code::ResourceExhausted, 503)
         }
@@ -1631,6 +1656,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::MqMessageTooLarge => (Code::InvalidArgument, 413),
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
+        SprigCode::AiNotConfigured => (Code::FailedPrecondition, 412),
+        SprigCode::AiRefused => (Code::FailedPrecondition, 422),
         SprigCode::AdminUnauthenticated
         | SprigCode::OperatorLoginRequired
         | SprigCode::OperatorMfaRequired

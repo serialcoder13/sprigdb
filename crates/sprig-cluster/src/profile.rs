@@ -628,6 +628,7 @@ const FLAGS: &[Flag] = &[
         privileges.tenant_schemas_grant_option
     ),
     flag!("privileges.sys_schema_all", privileges.sys_schema_all),
+    flag!("privileges.docs_schema_all", privileges.docs_schema_all),
     flag!("privileges.create_user", privileges.create_user),
     flag!("privileges.process", privileges.process),
     flag!("privileges.connection_admin", privileges.connection_admin),

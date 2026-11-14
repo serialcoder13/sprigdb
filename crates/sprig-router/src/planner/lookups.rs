@@ -25,7 +25,7 @@ use sqlparser::parser::Parser;
 use super::{
     PlanCtx, R, Rel, col_rel, conjuncts, empty_select, ident_parts, key_literal, pass_sql, relation,
 };
-use crate::plan::{Claim, LookupProbe, Plan, Release, Target, ViaLookup};
+use crate::plan::{Claim, LookupProbe, LookupSet, Plan, Release, Target, ViaLookup};
 use crate::reject::{Reason, Rejection, reject};
 use crate::topology::{Group, KeyClass, KeyValue, LookupRef, TableEntry};
 
@@ -283,18 +283,175 @@ fn owner_rk(g: &Group, key: Option<&Expr>) -> R<u64> {
         .ok_or_else(|| Rejection::new(Reason::InsertKey, "a key value"))
 }
 
-/// An `UPDATE` must leave lookup values and primary keys alone (a changed
-/// value would need a claim and a release, so it is refused).
+/// An `UPDATE` must leave the primary key of a table with lookups alone
+/// (the lookup rows name their owners by it).
 pub(super) fn check_update(entry: &TableEntry, assigns: &dyn Fn(&str) -> bool) -> R<()> {
     for l in &entry.lookups {
-        if assigns(&l.column) || l.pk.iter().any(|c| assigns(c)) {
+        if l.pk.iter().any(|c| assigns(c)) {
             return reject(
                 Reason::Lookup,
-                "an UPDATE of a unique lookup's column or of the primary key",
+                "an UPDATE of the primary key of a table with a lookup index",
             );
         }
     }
     Ok(())
+}
+
+/// The reads an `UPDATE` of a lookup's column needs before it runs: per
+/// lookup it sets, the old value, primary key and key column of every row
+/// it changes, on each shard in `shards`, locked. Each row then claims the
+/// new value and releases its old one. The new value must be a literal of
+/// the column's class (or `NULL`); a parent member (no key column of its
+/// own) or a limited update is refused.
+pub(super) fn update_releases(
+    stmt: &Statement,
+    rel: &Rel<'_>,
+    entry: &TableEntry,
+    shards: &[usize],
+    limited: bool,
+) -> R<Vec<Release>> {
+    let Statement::Update(u) = stmt else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for l in &entry.lookups {
+        let set: Vec<&sqlparser::ast::Assignment> = u
+            .assignments
+            .iter()
+            .filter(|a| match &a.target {
+                sqlparser::ast::AssignmentTarget::ColumnName(n) => ident_parts(n)
+                    .and_then(|p| p.last().map(|i| i.value.eq_ignore_ascii_case(&l.column)))
+                    .unwrap_or(false),
+                sqlparser::ast::AssignmentTarget::Tuple(_) => false,
+            })
+            .collect();
+        let [a] = set.as_slice() else {
+            if set.is_empty() {
+                continue;
+            }
+            return reject(Reason::Lookup, "a lookup column assigned twice");
+        };
+        if limited {
+            return reject(
+                Reason::Lookup,
+                "an UPDATE with ORDER BY or LIMIT of a lookup index's column",
+            );
+        }
+        let Some(key) = entry.key() else {
+            return reject(
+                Reason::Lookup,
+                "an UPDATE of a lookup index's column on a table that follows its parent",
+            );
+        };
+        let part = l
+            .index
+            .columns
+            .first()
+            .map(|c| c.class)
+            .ok_or_else(|| Rejection::new(Reason::Lookup, "a column class"))?;
+        let value = value_of(&a.value, l.class, part).ok_or_else(|| {
+            Rejection::new(
+                Reason::Lookup,
+                format!("an UPDATE setting a lookup index's column to a non-literal: {}", a.value),
+            )
+        })?;
+        let mut items = vec![read_expr(&l.column, Some(part))];
+        items.extend(
+            l.pk.iter()
+                .zip(&l.index.owner_pk)
+                .map(|(n, c)| read_expr(n, Some(c.class))),
+        );
+        items.push(key_read_expr(key, entry.group.key_class));
+        let reads = locked_reads(
+            vec![u.table.clone()],
+            u.selection.clone(),
+            &items,
+            rel,
+            entry,
+            shards,
+        )?;
+        out.push(Release {
+            lookup: Arc::clone(l),
+            reads,
+            set: Some(LookupSet {
+                value: vec![value],
+                group: Arc::clone(&entry.group),
+            }),
+        });
+    }
+    Ok(out)
+}
+
+/// How an update's read selects the key column: as the router hashes it.
+fn key_read_expr(col: &str, class: KeyClass) -> String {
+    let c = format!("`{}`", col.replace('`', "``"));
+    match class {
+        KeyClass::Str { .. } => format!("HEX(CONVERT({c} USING utf8mb4))"),
+        KeyClass::Binary => format!("HEX({c})"),
+        _ => c,
+    }
+}
+
+/// A key column's value as an update's read returned it.
+#[must_use]
+pub(crate) fn decode_key(v: Option<&[u8]>, class: KeyClass) -> Option<KeyValue> {
+    let text = std::str::from_utf8(v?).ok()?;
+    Some(match class {
+        KeyClass::Str { .. } | KeyClass::Binary => KeyValue::Bytes(unhex(text)?),
+        _ => KeyValue::Int(text.parse().ok()?),
+    })
+}
+
+/// `SELECT <items> FROM <from> WHERE <selection> FOR UPDATE` on each shard
+/// in `shards`.
+fn locked_reads(
+    from: Vec<TableWithJoins>,
+    selection: Option<Expr>,
+    items: &[String],
+    rel: &Rel<'_>,
+    entry: &TableEntry,
+    shards: &[usize],
+) -> R<Vec<Target>> {
+    let proj = projection(&items.join(", "))
+        .ok_or_else(|| Rejection::new(Reason::Lookup, "a lookup read"))?;
+    let Some(mut sel) = empty_select(from, selection) else {
+        return reject(Reason::Lookup, "a lookup read");
+    };
+    sel.projection = proj;
+    let q = sqlparser::ast::Query {
+        with: None,
+        body: Box::new(SetExpr::Select(Box::new(sel))),
+        order_by: None,
+        limit_clause: None,
+        fetch: None,
+        locks: Vec::new(),
+        for_clause: None,
+        settings: None,
+        format_clause: None,
+        pipe_operators: Vec::new(),
+    };
+    let select = Statement::Query(Box::new(q));
+    Ok(shards
+        .iter()
+        .map(|&s| {
+            let loc = &entry.group.shards[s];
+            let mut m = HashMap::new();
+            m.insert(rel.loc, loc.schema.clone());
+            let mut by = HashMap::new();
+            by.insert(
+                (rel.default_schema.clone(), rel.table.clone()),
+                loc.schema.clone(),
+            );
+            let mut sql = pass_sql(&select, None, &m, &by);
+            sql.push_str(" FOR UPDATE");
+            Target {
+                cluster: loc.cluster.clone(),
+                shard: loc.shard,
+                sql,
+                at: entry.group.at(s),
+            }
+        })
+        .collect())
 }
 
 /// The reads a `DELETE` of `stmt` needs before it runs: per lookup, the
@@ -333,49 +490,11 @@ pub(super) fn delete_releases(
                 .zip(&l.index.owner_pk)
                 .map(|(n, c)| read_expr(n, Some(c.class))),
         );
-        let proj = projection(&items.join(", "))
-            .ok_or_else(|| Rejection::new(Reason::Lookup, "a lookup read"))?;
-        let Some(mut sel) = empty_select(from.clone(), d.selection.clone()) else {
-            return reject(Reason::Lookup, "a lookup read");
-        };
-        sel.projection = proj;
-        let q = sqlparser::ast::Query {
-            with: None,
-            body: Box::new(SetExpr::Select(Box::new(sel))),
-            order_by: None,
-            limit_clause: None,
-            fetch: None,
-            locks: Vec::new(),
-            for_clause: None,
-            settings: None,
-            format_clause: None,
-            pipe_operators: Vec::new(),
-        };
-        let select = Statement::Query(Box::new(q));
-        let reads = shards
-            .iter()
-            .map(|&s| {
-                let loc = &entry.group.shards[s];
-                let mut m = HashMap::new();
-                m.insert(rel.loc, loc.schema.clone());
-                let mut by = HashMap::new();
-                by.insert(
-                    (rel.default_schema.clone(), rel.table.clone()),
-                    loc.schema.clone(),
-                );
-                let mut sql = pass_sql(&select, None, &m, &by);
-                sql.push_str(" FOR UPDATE");
-                Target {
-                    cluster: loc.cluster.clone(),
-                    shard: loc.shard,
-                    sql,
-                    at: entry.group.at(s),
-                }
-            })
-            .collect();
+        let reads = locked_reads(from.clone(), d.selection.clone(), &items, rel, entry, shards)?;
         out.push(Release {
             lookup: Arc::clone(l),
             reads,
+            set: None,
         });
     }
     Ok(out)
@@ -647,7 +766,7 @@ mod tests {
         lookup_reason("INSERT INTO accounts SET aid = 1, email = 'a@x'");
         lookup_reason("INSERT INTO accounts (aid, cid) VALUES (1, 2)");
         lookup_reason("INSERT INTO accounts VALUES (1, CONCAT('a', '@x'), 1)");
-        lookup_reason("UPDATE accounts SET email = 'b@x' WHERE aid = 1");
+        lookup_reason("UPDATE accounts SET email = CONCAT(email, 'x') WHERE aid = 1");
         lookup_reason("DELETE FROM accounts WHERE cid = 1 LIMIT 1");
     }
 

@@ -21,6 +21,9 @@ struct State {
     lose: usize,
 }
 
+/// A change made to a cluster's rows behind the loader's back.
+type Tamper = Box<dyn Fn(&mut State)>;
+
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<State>>);
 
@@ -201,7 +204,7 @@ async fn loads_then_trusts_then_verifies_again_at_start() {
 #[tokio::test]
 async fn edited_missing_or_extra_rows_are_reloaded() {
     let (_, p) = pack("1.0.0", 12);
-    let edits: Vec<Box<dyn Fn(&mut State)>> = vec![
+    let edits: Vec<Tamper> = vec![
         Box::new(|st| {
             let r = st.rows.values_mut().next().unwrap();
             r.text = "edited".into();

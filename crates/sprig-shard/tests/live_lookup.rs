@@ -184,7 +184,7 @@ async fn run(s: Setup, label: &str) {
         .unwrap();
     let mut l = lookup_def();
     LookupCatalog.insert(&mut cat, &l).await.unwrap();
-    let report = direct::build(&pools0, &mut cat, &s.placement, &mut l, 100, || async {})
+    let report = direct::build(&pools0, &mut cat, &s.placement, &mut l, 100, || async { Ok(()) })
         .await
         .unwrap();
     assert_eq!(l.state, LookupState::Public);
@@ -585,7 +585,7 @@ async fn live_lookup_build_backfill_and_auto() {
     }
     let mut l = lookup_def();
     LookupCatalog.insert(&mut cat, &l).await.unwrap();
-    let err = direct::build(&p, &mut cat, &s.placement, &mut l, 64, || async {})
+    let err = direct::build(&p, &mut cat, &s.placement, &mut l, 64, || async { Ok(()) })
         .await
         .unwrap_err();
     assert_eq!(errno(&err), Some(1062), "{err}");
@@ -608,7 +608,7 @@ async fn live_lookup_build_backfill_and_auto() {
     .unwrap();
     let mut l = lookup_def();
     LookupCatalog.insert(&mut cat, &l).await.unwrap();
-    let rep = direct::build(&p, &mut cat, &s.placement, &mut l, 64, || async {})
+    let rep = direct::build(&p, &mut cat, &s.placement, &mut l, 64, || async { Ok(()) })
         .await
         .unwrap();
     assert_eq!((rep.rows, rep.inserted, rep.skipped), (299, 299, 0));
@@ -648,10 +648,10 @@ async fn live_lookup_build_backfill_and_auto() {
         }],
         lookup_def().owner_pk,
         GroupId(9),
-        77,
+        Some(77),
     );
     LookupCatalog.insert(&mut cat, &auto).await.unwrap();
-    let rep = direct::build(&p, &mut cat, &s.placement, &mut auto, 64, || async {})
+    let rep = direct::build(&p, &mut cat, &s.placement, &mut auto, 64, || async { Ok(()) })
         .await
         .unwrap();
     assert_eq!(rep.inserted, 299);

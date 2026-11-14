@@ -43,8 +43,8 @@ SHOW STREAMS;
 ```
 
 ```text output
-Stream	Kind	Partitions	Cleanup	Source	Key
-order_events	events	3	delete	NULL	customer_id
+Stream	Kind	Partitions	Cleanup	Source	Key	Lag_ms
+order_events	events	3	delete	NULL	customer_id	NULL
 ```
 
 ### ALTER STREAM
@@ -85,6 +85,7 @@ SHOW STREAMS [{FROM | IN} db_name]
 | `Cleanup` | `delete` or `compact` |
 | `Source` | For a change topic: the table |
 | `Key` | The `KEY` columns, comma-separated |
+| `Lag_ms` | How far the stream's sequencer is behind, in milliseconds: how long committed records wait before they get offsets. `NULL` while no sequencer is running for the stream, as just after `CREATE STREAM` or with no worker |
 
 Streams you hold no `SELECT` on are left out.
 

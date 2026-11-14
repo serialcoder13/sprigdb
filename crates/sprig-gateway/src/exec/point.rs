@@ -17,7 +17,8 @@
 //!   with the session's policy predicates, the recheck fails when the role
 //!   set or policy version changed (1615, prepared again by the general
 //!   path), and the backend connection reads through the session's policy
-//!   views as every statement does ([`BackendSession::execute`]);
+//!   views as every statement does
+//!   ([`BackendSession::execute`](crate::backend::BackendSession::execute));
 //! - **routing**: a tenant with grouped tables goes through the router:
 //!   always the general path. Whether it has any is kept per (catalog
 //!   version, home, map generation);
@@ -142,6 +143,9 @@ impl PassSession {
         let Some(bs) = self.bs.as_mut() else {
             return fallback;
         };
+        // The connection stays with the session between its point reads
+        // (until the front end returns it when the client goes quiet).
+        bs.set_keep(true);
         let client_bound = params.new_params_bound;
         let mut build = |b: &BackendStmt| execute_payload(b, 0, &values, client_bound);
         if bs.execute(&info, &sql, &mut build).await.is_err() {

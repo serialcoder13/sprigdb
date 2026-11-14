@@ -95,7 +95,7 @@ impl PassSession {
         }
         let result = match &r {
             Ok(_) => "ok",
-            Err(e) if e.code() == Some(SprigCode::SearchUnavailable) => "unavailable",
+            Err(e) if e.code() == Some(SprigCode::DocsUnavailable) => "unavailable",
             Err(_) => "error",
         };
         metrics::counter!("sprig_docs_search_total", "result" => result).increment(1);

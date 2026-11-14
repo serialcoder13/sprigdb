@@ -26,10 +26,12 @@
 //!   change stream, and one database-wide change stream.
 //!
 //! Then `SPRIG_SFC_WRITERS` (4) SQL sessions per tenant run
-//! `SPRIG_SFC_TXNS` (300) transactions in all, each inserting one row into
+//! `SPRIG_SFC_TXNS` (1,200) transactions in all, each inserting one row into
 //! `ord` and each `s<j>` (every seventh rolls back), while one writer per
-//! collection inserts `SPRIG_SFC_DOCS` (150) documents `{_id: i, seq: i}`
-//! in order. A sampler counts `Binlog Dump` threads on the node every
+//! collection inserts `SPRIG_SFC_DOCS` (400) documents `{_id: i, seq: i}`
+//! in order; SQL writers pause `SPRIG_SFC_PACE_MS` (10) between
+//! transactions, document writers `SPRIG_SFC_DOC_PACE_MS` (40), so the
+//! kills land while both write. A sampler counts `Binlog Dump` threads on the node every
 //! 0.5 s (and, with `SPRIG_SFC_METRICS`, each process's
 //! `sprig_feed_binlog_dumps` by kind). Checks:
 //!
@@ -38,8 +40,10 @@
 //! - each search index holds exactly its table's rows;
 //! - each change stream saw each document once, in insert order, across
 //!   the gateway's `kill -9` (the client resumes from its last token);
-//! - at most `SPRIG_SFC_EXPECT_DUMPS` (2: one per process) dumps on the
-//!   node at any sample, and no process ever had a dump of kind `tenant`.
+//! - with `SPRIG_SFC_METRICS`: no process ever had more than one `shared`
+//!   dump per node, or any dump of kind `tenant`. The node's own count is
+//!   reported (samples above `SPRIG_SFC_EXPECT_DUMPS`, 2): it also holds,
+//!   for a moment, dumps a killed process or a reopened hub left behind.
 
 #![allow(
     clippy::unwrap_used,
@@ -56,7 +60,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::change_stream::event::ResumeToken;
 use mongodb::{Client, Collection};
@@ -121,8 +124,8 @@ async fn dumps(node: &str) -> u64 {
     n.unwrap_or(0)
 }
 
-/// `sprig_feed_binlog_dumps` of one process by kind (summed over nodes).
-async fn dump_gauges(addr: &str) -> BTreeMap<String, f64> {
+/// `sprig_feed_binlog_dumps` of one process by `(kind, node)`.
+async fn dump_gauges(addr: &str) -> BTreeMap<(String, String), f64> {
     let mut out = BTreeMap::new();
     let Ok(Ok(mut s)) =
         tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await
@@ -142,12 +145,15 @@ async fn dump_gauges(addr: &str) -> BTreeMap<String, f64> {
         let Some((labels, value)) = rest.split_once("} ") else {
             continue;
         };
-        let kind = labels
-            .split(',')
-            .find_map(|l| l.strip_prefix("kind=\""))
-            .map(|k| k.trim_end_matches('"').to_owned())
-            .unwrap_or_default();
-        *out.entry(kind).or_default() += value.trim().parse::<f64>().unwrap_or(0.0);
+        let label = |name: &str| {
+            labels
+                .split(',')
+                .find_map(|l| l.strip_prefix(&format!("{name}=\"")))
+                .map(|k| k.trim_end_matches('"').to_owned())
+                .unwrap_or_default()
+        };
+        *out.entry((label("kind"), label("node"))).or_default() +=
+            value.trim().parse::<f64>().unwrap_or(0.0);
     }
     out
 }
@@ -196,12 +202,9 @@ async fn follow(
     let mut resumes = 0u64;
     let mut first = true;
     'outer: loop {
-        let client = match Client::with_uri_str(&client_uri).await {
-            Ok(c) => c,
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
+        let Ok(client) = Client::with_uri_str(&client_uri).await else {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
         };
         let db = client.database(DB);
         let opened = match (&coll, &token) {
@@ -218,9 +221,7 @@ async fn follow(
         let mut s = match opened {
             Ok(s) => s.with_type::<Document>(),
             Err(e) => {
-                if first {
-                    panic!("change stream didn't open: {e}");
-                }
+                assert!(!first, "change stream didn't open: {e}");
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
@@ -236,19 +237,23 @@ async fn follow(
             if done || stop.load(Ordering::Relaxed) {
                 break 'outer;
             }
-            match tokio::time::timeout(Duration::from_secs(2), s.next()).await {
-                Err(_) => {
+            // `next_if_any` returns after one `getMore` (never cancelled
+            // half-way, which the driver doesn't allow).
+            match s.next_if_any().await {
+                Ok(None) => {
                     if let Some(t) = s.resume_token() {
                         token = Some(t);
                     }
+                    if !s.is_alive() {
+                        break;
+                    }
                 }
-                Ok(None) => break,
-                Ok(Some(Err(e))) => {
+                Err(e) => {
                     println!("change stream {coll:?} broke ({e}); resuming");
                     resumes += 1;
                     break;
                 }
-                Ok(Some(Ok(ev))) => {
+                Ok(Some(ev)) => {
                     if ev.get_str("operationType") == Ok("insert") {
                         let c = ev
                             .get_document("ns")
@@ -295,9 +300,11 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
     let indexes = num("SPRIG_SFC_INDEXES", 3);
     let streams = num("SPRIG_SFC_STREAMS", 8);
     let writers = num("SPRIG_SFC_WRITERS", 4);
-    let txns = num("SPRIG_SFC_TXNS", 300);
-    let docs = num("SPRIG_SFC_DOCS", 150);
+    let txns = num("SPRIG_SFC_TXNS", 1_200);
+    let docs = num("SPRIG_SFC_DOCS", 400);
     let expect_dumps = num("SPRIG_SFC_EXPECT_DUMPS", 2);
+    let pace = num("SPRIG_SFC_PACE_MS", 10);
+    let doc_pace = num("SPRIG_SFC_DOC_PACE_MS", 40);
     let pools: Vec<Pool> = tenants
         .iter()
         .map(|t| pool(&gw, t, writers as usize + 2))
@@ -391,19 +398,20 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
         let (node, metrics, stop) = (node.clone(), metrics.clone(), Arc::clone(&stop_sampler));
         tokio::spawn(async move {
             let mut hist: BTreeMap<u64, u64> = BTreeMap::new();
-            let mut tenant_kind_max = 0f64;
-            let mut catchup_max = 0f64;
+            // Per process and node, the most dumps of each kind seen.
+            let mut most: BTreeMap<(String, String, String), f64> = BTreeMap::new();
             while !stop.load(Ordering::Relaxed) {
                 let n = dumps(&node).await;
                 *hist.entry(n).or_default() += 1;
                 for m in &metrics {
-                    let g = dump_gauges(m).await;
-                    tenant_kind_max = tenant_kind_max.max(*g.get("tenant").unwrap_or(&0.0));
-                    catchup_max = catchup_max.max(*g.get("catchup").unwrap_or(&0.0));
+                    for ((kind, node), v) in dump_gauges(m).await {
+                        let e = most.entry((m.clone(), kind, node)).or_default();
+                        *e = e.max(v);
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            (hist, tenant_kind_max, catchup_max)
+            (hist, most)
         })
     };
 
@@ -474,6 +482,7 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
                         stmts.push(format!("INSERT INTO s{j} VALUES ({id}, 'row write {id}')"));
                     }
                     stmts.push(if rollback { "ROLLBACK" } else { "COMMIT" }.to_owned());
+                    tokio::time::sleep(Duration::from_millis(pace)).await;
                     let mut ok = true;
                     for s in &stmts {
                         if c.query_drop(s).await.is_err() {
@@ -527,7 +536,7 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
                                 break;
                             }
                         }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        tokio::time::sleep(Duration::from_millis(doc_pace)).await;
                     }
                 }
             }));
@@ -572,20 +581,18 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
     );
 
     // 4. Change streams: each document once, in order.
-    let deadline = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(deadline);
+    // After 120 s every follower stops and reports what it saw.
+    {
+        let stop = Arc::clone(&stop_streams);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
     let mut failures = Vec::new();
     let mut resumes = 0u64;
     for (name, f) in followers {
-        let r = tokio::select! {
-            r = f => r.unwrap(),
-            () = &mut deadline => {
-                stop_streams.store(true, Ordering::Relaxed);
-                failures.push(format!("{name}: not complete in time"));
-                continue;
-            }
-        };
-        let (seen, n) = r;
+        let (seen, n) = f.await.unwrap();
         resumes += n;
         let colls: Vec<String> = if name.ends_with(".*") {
             (0..streams).map(|k| format!("c{k}")).collect()
@@ -596,9 +603,14 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
             let got = seen.get(&c).cloned().unwrap_or_default();
             let want: Vec<i64> = (0..docs as i64).collect();
             if got != want {
+                let mut sorted = got.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
                 failures.push(format!(
-                    "{name} {c}: {} events, first differences {:?}",
+                    "{name} {c}: {} events ({} distinct, last {:?}), first differences {:?}",
                     got.len(),
+                    sorted.len(),
+                    got.last(),
                     got.iter()
                         .zip(&want)
                         .filter(|(a, b)| a != b)
@@ -652,25 +664,34 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
         // 6. Search: each index holds exactly its table's rows.
         for j in 0..indexes {
             let mut last = Vec::new();
+            let mut error = String::new();
             let want: Vec<i64> = committed[ti].iter().copied().collect();
-            for _ in 0..60 {
+            for _ in 0..120 {
                 let r: Result<Vec<i64>, _> = c
                     .query(format!(
                         "SELECT id FROM sprig_search('ix{j}', 'row write', \
                          JSON_OBJECT('limit', 100000, 'consistency', 'latest')) AS s ORDER BY id"
                     ))
                     .await;
-                if let Ok(ids) = r {
-                    last = ids;
-                    if last == want {
-                        break;
+                match r {
+                    Ok(ids) => {
+                        last = ids;
+                        if last == want {
+                            break;
+                        }
                     }
+                    Err(e) => error = e.to_string(),
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             if last != want {
+                let shown: Vec<mysql_async::Row> = c
+                    .query(format!("SHOW SEARCH INDEXES FROM s{j}"))
+                    .await
+                    .unwrap_or_default();
+                let shown: Vec<String> = shown.iter().map(|r| format!("{r:?}")).collect();
                 failures.push(format!(
-                    "{t}: ix{j} holds {} rows, the table {}",
+                    "{t}: ix{j} holds {} rows, the table {} (last error: {error}; {shown:?})",
                     last.len(),
                     want.len()
                 ));
@@ -681,18 +702,33 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
 
     // 7. Dumps.
     stop_sampler.store(true, Ordering::Relaxed);
-    let (hist, tenant_kind_max, catchup_max) = sampler.await.unwrap();
-    let max = hist.keys().max().copied().unwrap_or(0);
+    let (hist, most) = sampler.await.unwrap();
+    let above = hist
+        .iter()
+        .filter(|(n, _)| **n > expect_dumps)
+        .map(|(_, c)| c)
+        .sum::<u64>();
+    // The node's count includes dumps a killed process left (MariaDB ends
+    // them when it next writes to them) and a reopened hub's old one for
+    // a moment, so the check is each process's own count.
     println!(
-        "Binlog Dump threads on the node per sample: {hist:?}; now {}; per process: \
-         most catch-up dumps {catchup_max}, most per-tenant dumps {tenant_kind_max}",
+        "Binlog Dump threads on the node per sample: {hist:?} ({above} samples above \
+         {expect_dumps}); now {}",
         dumps(&node).await
     );
-    if max > expect_dumps {
-        failures.push(format!("{max} dumps on the node at once"));
+    for ((process, kind, node), v) in &most {
+        println!("  {process}: most {kind} dumps on {node}: {v}");
+        let bad = match kind.as_str() {
+            "shared" => *v > 1.0,
+            "tenant" => *v > 0.0,
+            _ => false,
+        };
+        if bad {
+            failures.push(format!("{process}: {v} {kind} dumps on {node} at once"));
+        }
     }
-    if tenant_kind_max > 0.0 {
-        failures.push(format!("{tenant_kind_max} per-tenant dumps in a process"));
+    if metrics.is_empty() && hist.keys().max().copied().unwrap_or(0) > expect_dumps {
+        failures.push("more dumps on the node than processes".to_owned());
     }
     // Clean up.
     for p in &pools {

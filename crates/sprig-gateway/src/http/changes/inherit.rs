@@ -19,9 +19,18 @@
 //!     an insert whose fields come from s' or below    → insert
 //!     else                                            → update (after: the
 //!                                                       merged record)
-//!   absent: the layer row's before or after image was visible to the
-//!     subscriber → delete; else nothing
+//!   absent: the record was visible to the subscriber just before the
+//!     change → delete; else nothing (decision RL64)
 //! ```
+//!
+//! "Visible before" is what the stream last knew of the key ([`Seen`]:
+//! the record read after its last event, while the tenant's catalog
+//! version holds), else, for a key the stream hasn't seen change, a probe
+//! in the subscriber's session (`exec::inherit_probe`): its merged view
+//! with the changed row as it was before, filtered by its policies. A
+//! `delete` thus never reveals a key the subscriber couldn't see: one a
+//! nearer space hid or overrode out of its policies, one outside a
+//! share's filter, one its policies never showed.
 //!
 //! The emitted record is the merged one read at map time, by design:
 //! events of one key in one batch carry its state at the end of the batch.
@@ -53,6 +62,8 @@ pub(super) struct Mapped {
     /// The space whose layer changed; `None` for a copy (a level above the
     /// tenant's root).
     pub space: Option<SpaceId>,
+    /// A copy row's `_sprig_share`.
+    pub share: Option<Value>,
 }
 
 /// How an event is handled.
@@ -142,7 +153,16 @@ impl Mapper {
         }
         let mut key = Map::new();
         let mut space = None;
+        let mut share = None;
         for (n, v) in &e.key.0 {
+            if n == "_sprig_share" {
+                if let Value::Object(m) = sprig_streams::envelope::image_json(&sprig_feed::Image(
+                    vec![(n.clone(), v.clone())],
+                )) {
+                    share = m.get(n).cloned();
+                }
+                continue;
+            }
             if n == "_sprig_space" {
                 space = match sprig_streams::envelope::image_json(&sprig_feed::Image(vec![(
                     n.clone(),
@@ -175,7 +195,11 @@ impl Mapper {
             }
         }
         e.table.clone_from(&obj.table);
-        Class::Inherit(Mapped { key, space })
+        Class::Inherit(Mapped {
+            key,
+            space,
+            share: copy.and(share),
+        })
     }
 
     /// A parent tenant's event: its root space's layer rows of a table this
@@ -212,7 +236,16 @@ impl Mapper {
                 key.extend(m);
             }
         }
-        Class::Inherit(Mapped { key, space: None })
+        Class::Inherit(Mapped {
+            key,
+            space: None,
+            share: None,
+        })
+    }
+
+    /// The tenant catalog's version (policies and grants change it).
+    pub(super) fn version(&self) -> u64 {
+        self.cat.version
     }
 
     /// The names of the spaces strictly above `s` in the tenant, and the
@@ -389,22 +422,20 @@ pub(super) async fn read(
 }
 
 /// The event an inheritable object's change is to the subscriber, given
-/// its merged record now (`None`: not in its view) and whether the layer
-/// row's images were visible to it. `None`: nothing to send.
-#[allow(clippy::too_many_arguments)]
+/// its merged record now (`None`: not in its view) and whether the record
+/// was visible to it just before the change. `None`: nothing to send.
 pub(super) fn decide(
     mapper: &Mapper,
     e: &ChangeEvent,
     m: &Mapped,
     rec: Option<&Record>,
-    before_seen: bool,
-    after_seen: bool,
+    was_visible: bool,
     full: bool,
     out: &mut super::WatchEvent,
 ) -> bool {
     out.key = Value::Object(m.key.clone()).to_string();
     let Some((row, origins)) = rec else {
-        if before_seen || after_seen {
+        if was_visible {
             out.op = "delete".into();
             return true;
         }
@@ -477,6 +508,112 @@ pub(super) fn decide(
         Op::Ddl(_) | Op::Truncate => return false,
     }
     true
+}
+
+/// The most keys [`Seen`] holds; past it, it starts again (probes cover
+/// the keys it forgot).
+const SEEN_MAX: usize = 100_000;
+
+/// What the stream last knew of each key's visibility (RL64): set from the
+/// record read after each of the key's events, cleared when the tenant's
+/// catalog version moves (a policy or grant may have changed what the
+/// subscriber sees).
+#[derive(Debug, Default)]
+pub(super) struct Seen {
+    version: u64,
+    keys: HashMap<String, bool>,
+}
+
+impl Seen {
+    /// Starts a batch read at catalog `version`.
+    pub(super) fn at(&mut self, version: u64) {
+        if version != self.version {
+            self.keys.clear();
+            self.version = version;
+        }
+    }
+
+    /// The key's visibility after its last event, if the stream knows it.
+    pub(super) fn get(&self, id: &str) -> Option<bool> {
+        self.keys.get(id).copied()
+    }
+
+    /// Records the key's visibility after an event.
+    pub(super) fn set(&mut self, id: String, visible: bool) {
+        if self.keys.len() >= SEEN_MAX && !self.keys.contains_key(&id) {
+            self.keys.clear();
+        }
+        self.keys.insert(id, visible);
+    }
+}
+
+/// The probe of event `e` (mapped as `m`): its record before the change
+/// ([`crate::exec::inherit_probe`]).
+pub(super) fn probe_item(e: &ChangeEvent, m: &Mapped) -> crate::exec::inherit_probe::ProbeItem {
+    let img = |i: Option<&sprig_feed::Image>| match i.map(sprig_streams::envelope::image_json) {
+        Some(Value::Object(o)) => Some(o),
+        _ => None,
+    };
+    let before = img(e.before.as_ref());
+    let columns = if before.is_none() {
+        img(e.after.as_ref())
+            .map(|a| a.keys().cloned().collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    crate::exec::inherit_probe::ProbeItem {
+        table: e.table.clone(),
+        key: m.key.clone(),
+        space: m.space.filter(|_| m.share.is_none()).map(|s| s.0),
+        share: m.share.clone(),
+        before,
+        columns,
+    }
+}
+
+/// Runs `req` in the subscriber's session: whether each probe's record was
+/// visible to it before its change (`None`: its view doesn't read the
+/// changed row).
+///
+/// # Errors
+/// The statement's.
+pub(super) async fn probe(
+    core: &Core,
+    caller: &Caller,
+    req: &crate::exec::inherit_probe::ProbeRequest,
+) -> Result<Vec<Option<bool>>> {
+    let (tx, rx) = mpsc::channel(4);
+    let engine = std::sync::Arc::clone(&core.engine);
+    let call = SqlCall {
+        database: req.db.clone(),
+        sql: crate::exec::inherit_probe::statement(req),
+        multi: false,
+    };
+    let c = caller.clone();
+    let task = tokio::spawn(async move { engine.run(&c, call, None, tx).await });
+    let resp = collect(rx, 64 << 20, None).await;
+    let _ = task.await;
+    let resp = resp?;
+    let rows: Vec<Vec<Option<String>>> = resp
+        .results
+        .first()
+        .map(|r| {
+            r.rows
+                .iter()
+                .map(|row| {
+                    row.values
+                        .iter()
+                        .map(|v| {
+                            sprig_api::results::cell_bytes(v, false)
+                                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::exec::inherit_probe::answer(req, &rows))
 }
 
 /// Tails the feeds of `tenant`'s ancestors that its inheritable objects

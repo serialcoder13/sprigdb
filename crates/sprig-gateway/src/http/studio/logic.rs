@@ -633,7 +633,7 @@ fn diagnostic(e: &SprigError) -> Value {
 }
 
 /// `Logic.Compile` for one declaration (see the module docs).
-async fn compile(
+pub(super) async fn compile(
     core: &Arc<Core>,
     caller: &Caller,
     db: &str,

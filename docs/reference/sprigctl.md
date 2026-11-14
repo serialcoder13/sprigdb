@@ -33,6 +33,7 @@ Commands:
   space            Spaces and shares
   inherit          Inherited tables, shares, tree-wide ids and the references that refuse deletes
   txn              In-doubt distributed transactions
+  ai               The AI assistants: providers
   sink             Sinks: list, show, pause, resume, reset, dead letters, connections
   graph            Graphs
   search           Search indexes and their copies on workers
@@ -3047,6 +3048,173 @@ Usage: sprigctl txn resolve [OPTIONS] <dtid>
 
 Arguments:
   <dtid>  The transaction's dtid (32 hex digits, as `txn list` prints it)
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+### `sprigctl ai`
+
+```text
+The AI assistants: providers
+
+Usage: sprigctl ai [OPTIONS] <COMMAND>
+
+Commands:
+  provider  AI providers the assistants call
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+#### `sprigctl ai provider`
+
+```text
+AI providers the assistants call
+
+Usage: sprigctl ai provider [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add or replace a provider; its key is sealed and never shown again
+  list    List providers (keys are never shown)
+  test    Make one tiny call to a provider
+  remove  Remove a provider
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+##### `sprigctl ai provider add`
+
+```text
+Add or replace a provider; its key is sealed and never shown again
+
+Usage: sprigctl ai provider add [OPTIONS] --kind <kind> <name>
+
+Arguments:
+  <name>  The provider's name: 1 to 64 of a-z, 0-9, _ and -
+
+Options:
+      --endpoint <endpoint>
+          Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --kind <kind>
+          anthropic (the Messages API) or openai (any OpenAI-compatible Chat Completions server: OpenAI, Azure OpenAI, Ollama, vLLM, Mistral, Groq) [possible values: anthropic, openai]
+      --base-url <base-url>
+          The API's base URL (default https://api.anthropic.com or https://api.openai.com/v1)
+      --token-file <token-file>
+          A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>
+          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --key-header <key-header>
+          openai only: how the key is sent (api_key for Azure OpenAI) [possible values: bearer, api_key, none]
+      --client-cert <client-cert>
+          For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --query <query>
+          openai only: a query string for every call, such as api-version=2024-10-21
+      --client-key <client-key>
+          The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --provider-ca-file <provider-ca-file>
+          A CA file to trust instead of the public roots (a TLS-inspecting proxy)
+      --dc <dc>
+          Data center to act in
+      --key-file <key-file>
+          Read the API key from this file; - reads standard input
+      --no-key
+          The provider takes no key (a local server such as Ollama)
+  -o, --output <output>
+          Output format [default: table] [possible values: table, json, yaml]
+      --dry-run
+          Show what would change
+      --keep-key
+          Replacing a provider: keep the key it has
+      --yes
+          Don't ask for confirmation
+  -h, --help
+          Print help
+```
+
+##### `sprigctl ai provider list`
+
+```text
+List providers (keys are never shown)
+
+Usage: sprigctl ai provider list [OPTIONS]
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+##### `sprigctl ai provider test`
+
+```text
+Make one tiny call to a provider
+
+Usage: sprigctl ai provider test [OPTIONS] --model <model> <name>
+
+Arguments:
+  <name>  The provider's name: 1 to 64 of a-z, 0-9, _ and -
+
+Options:
+      --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]
+      --model <model>              The model to call, as the provider names it
+      --token-file <token-file>    A file holding the Admin API bearer token [env: SPRIGCTL_TOKEN_FILE=]
+      --ca-file <ca-file>          For an https:// endpoint: the CA (PEM) its certificate is checked against [env: SPRIGCTL_CA_FILE=]
+      --client-cert <client-cert>  For an https:// endpoint that requires one: a client certificate (PEM) [env: SPRIGCTL_CLIENT_CERT=]
+      --client-key <client-key>    The private key (PEM) of --client-cert [env: SPRIGCTL_CLIENT_KEY=]
+      --dc <dc>                    Data center to act in
+  -o, --output <output>            Output format [default: table] [possible values: table, json, yaml]
+      --dry-run                    Show what would change
+      --yes                        Don't ask for confirmation
+  -h, --help                       Print help
+```
+
+##### `sprigctl ai provider remove`
+
+```text
+Remove a provider
+
+Usage: sprigctl ai provider remove [OPTIONS] <name>
+
+Arguments:
+  <name>  The provider's name: 1 to 64 of a-z, 0-9, _ and -
 
 Options:
       --endpoint <endpoint>        Admin API endpoint [default: http://127.0.0.1:7480] [env: SPRIGCTL_ENDPOINT=]

@@ -124,6 +124,27 @@ fn deletes_and_replay_are_idempotent() {
     assert_eq!(ix.payloads().unwrap(), vec![Some("p2".to_owned()); 2]);
 }
 
+/// Found live (r9feed2): a copy that applied updates again after a
+/// worker's `kill -9` holds deleted documents until a merge; they count in
+/// a term's `doc_freq`, so global BM25 statistics must count them in the
+/// documents too, or Tantivy's `doc_count >= doc_freq` assertion panics.
+#[test]
+fn global_scoring_counts_deleted_documents_like_tantivy() {
+    let ix = sample(1);
+    for id in 1..=5 {
+        ix.upsert(&row(id, "Running shoe", "", "acme", 1.0))
+            .unwrap();
+    }
+    ix.commit("p2").unwrap();
+    // One document updated again: its old version stays in its segment,
+    // deleted, until a merge.
+    ix.upsert(&row(1, "Running shoe", "", "acme", 2.0)).unwrap();
+    ix.commit("p3").unwrap();
+    let q = parse_query_string("shoe", &[]).unwrap();
+    assert_eq!(ix.top(&q, 10, Scoring::Global, 50).unwrap().len(), 5);
+    assert_eq!(ix.num_docs(), 5);
+}
+
 #[test]
 fn facets_and_window() {
     let ix = sample(2);

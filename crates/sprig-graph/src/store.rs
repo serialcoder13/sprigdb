@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use sprig_common::Result;
+use sprig_router::graph_route::CmpOp;
 use sprig_shard::{KeyClass, KeySpec, KeyValue, hash_key};
 
 use crate::ast::{Dir, Entity, IndexKind, Schema};
@@ -96,6 +97,10 @@ pub struct Scan {
     pub limit: Option<usize>,
     /// Paging (streamed results): only ids above this one, in id order.
     pub after: Option<u64>,
+    /// Only these property keys (`None`: all), as
+    /// [`GraphStore::nodes_part`] reads them; stores without late reads
+    /// give all.
+    pub keys: Option<Vec<String>>,
 }
 
 /// One row of a reach (CTE) call.
@@ -141,6 +146,28 @@ impl From<&EdgeRow> for Link {
         }
     }
 }
+
+/// What [`GraphStore::links_far`] reads of the far nodes, and which it
+/// may leave out (a superset the caller rechecks).
+#[derive(Debug, Clone, Copy)]
+pub struct FarRead<'a> {
+    /// Property keys (`None`: all).
+    pub keys: Option<&'a [String]>,
+    /// Numeric comparisons of properties the far node must pass.
+    pub filter: &'a [(String, CmpOp, f64)],
+    /// When not empty, the only far nodes wanted.
+    pub only: &'a [u64],
+    /// Read the far nodes (else links alone, restricted to `only`).
+    pub join: bool,
+    /// The relationships' property keys to read too (`Some(&[])`: all).
+    pub rel_keys: Option<&'a [String]>,
+    /// Numeric comparisons of the relationships' properties.
+    pub rel_filter: &'a [(String, CmpOp, f64)],
+}
+
+/// A link [`GraphStore::links_far`] gives: the link, its far node when
+/// read, and its relationship's properties and types when read.
+pub type FarLink = (Link, Option<NodeRow>, Option<(Json, Option<Json>)>);
 
 /// Which id counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +300,19 @@ pub trait GraphStore: Send {
         self.nodes(ids).await
     }
 
+    /// [`GraphStore::nodes_part`], leaving out (or not) nodes that fail
+    /// `filter`: numeric comparisons of properties, a superset the
+    /// caller rechecks.
+    async fn nodes_where(
+        &mut self,
+        ids: &[u64],
+        keys: Option<&[String]>,
+        filter: &[(String, CmpOp, f64)],
+    ) -> Result<Vec<NodeRow>> {
+        let _ = filter;
+        self.nodes_part(ids, keys).await
+    }
+
     /// Edges by `(src_rk, id)` with only `keys` of their properties, as
     /// [`GraphStore::nodes_part`].
     async fn edges_part(
@@ -282,6 +322,67 @@ pub trait GraphStore: Send {
     ) -> Result<Vec<EdgeRow>> {
         let _ = keys;
         self.edges_at(at).await
+    }
+
+    /// [`GraphStore::links`] both ways in one step where the store can:
+    /// each link with `true` when it goes out of `from`.
+    async fn links_both(&mut self, from: &[u64], types: &[u32]) -> Result<Vec<(Link, bool)>> {
+        let mut v: Vec<(Link, bool)> = self
+            .links(from, types, Dir::Out)
+            .await?
+            .into_iter()
+            .map(|l| (l, true))
+            .collect();
+        v.extend(
+            self.links(from, types, Dir::In)
+                .await?
+                .into_iter()
+                .map(|l| (l, false)),
+        );
+        Ok(v)
+    }
+
+    /// [`GraphStore::links_far`] both ways in one step where the store
+    /// can: each link with `true` when it goes out of `from`.
+    async fn links_far_both(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        far: &FarRead<'_>,
+    ) -> Result<Vec<(FarLink, bool)>> {
+        let mut v: Vec<(FarLink, bool)> = self
+            .links_far(from, types, Dir::Out, far)
+            .await?
+            .into_iter()
+            .map(|l| (l, true))
+            .collect();
+        v.extend(
+            self.links_far(from, types, Dir::In, far)
+                .await?
+                .into_iter()
+                .map(|l| (l, false)),
+        );
+        Ok(v)
+    }
+
+    /// [`GraphStore::links`] with the far nodes read in the same step
+    /// where the store can (`keys` of their properties: `None` all;
+    /// links to far nodes failing `filter` may be left out). A link
+    /// without its node is for the caller to read by id.
+    async fn links_far(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        dir: Dir,
+        far: &FarRead<'_>,
+    ) -> Result<Vec<FarLink>> {
+        let _ = far;
+        Ok(self
+            .links(from, types, dir)
+            .await?
+            .into_iter()
+            .map(|l| (l, None, None))
+            .collect())
     }
 
     /// Edges by id whose sources' routing hashes are known: `(src_rk,

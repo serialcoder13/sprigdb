@@ -62,6 +62,7 @@ pub mod model;
 pub mod moves;
 pub mod msg;
 pub mod plan;
+pub mod probe;
 pub mod reference;
 pub mod rewrite;
 pub mod settings;

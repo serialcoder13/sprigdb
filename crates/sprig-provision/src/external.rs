@@ -513,6 +513,13 @@ pub fn classify(c: &Classify<'_>) -> (Vec<String>, Vec<String>) {
                 .to_owned(),
         );
     }
+    // The docs pack's schema: without it only docs search is off.
+    if !p.docs_schema_all {
+        advisories.push(format!(
+            "sprig_ctl can't manage __sprig_docs; docs search is off on this cluster until: {}",
+            sprig_cluster::probe::grants::DOCS_CTL_GRANT
+        ));
+    }
     advisories.extend(
         p.missing_ctl_grants()
             .into_iter()

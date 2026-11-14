@@ -21,6 +21,7 @@
     clippy::expect_used,
     clippy::too_many_lines,
     clippy::cast_precision_loss,
+    clippy::many_single_char_names,
     missing_docs
 )]
 
@@ -304,8 +305,8 @@ async fn sql_reads_and_refuses_writes() {
             eprintln!("embed: {p:?}");
         }
         Err(err) => {
-            // No model on this gateway: 39825 (docs search unavailable).
-            assert_eq!(code(&err), 39825, "{err}");
+            // No model on this gateway: 39989 (docs unavailable).
+            assert_eq!(code(&err), 39989, "{err}");
             eprintln!("embed: unavailable here ({err})");
         }
     }

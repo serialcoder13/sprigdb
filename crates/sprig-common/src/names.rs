@@ -48,6 +48,10 @@ pub const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "performance_schema
 /// in; no tenant database can take the name.
 pub const DOCS_DATABASE: &str = "sprig_docs";
 
+/// The system schema the docs pack is loaded into on every cluster
+/// (`sprig_ctl` owns it; tenants read it as [`DOCS_DATABASE`]).
+pub const DOCS_SCHEMA: &str = "__sprig_docs";
+
 /// Grant pattern covering every tenant schema, for `sprig_ctl`.
 pub const TENANT_SCHEMAS_GRANT_PATTERN: &str = "t%";
 

@@ -35,10 +35,12 @@
 //!   the hub started under `gather` ago and delivered nothing → it moves
 //!     its start back to from (a worker's restart: every sequencer comes
 //!     back at once, each from its own checkpoint)
-//!   a new subscription keeping its tenant whole, within the ring's reach
-//!     → the dump reopens wider at from and reads those groups again;
-//!     everyone skips what they had (r9feed2: a stream or trigger that
-//!     read the cluster's position a moment before the hub read on)
+//!   a new subscription keeping its tenant whole, up to REPLAY_GROUPS
+//!     behind → the dump reopens wider at from and reads those groups
+//!     again (a replay under way is extended); everyone skips what they
+//!     had, the ring keeps what it held (r9feed2: a stream or trigger that
+//!     read the cluster's position a moment before the hub read on, or a
+//!     gateway's streams resuming after its restart)
 //!   else → a private catch-up dump for the tenant alone (at most
 //!     `max_catchup` per cluster; the others wait for one), which hands
 //!     over to the hub as soon as the ring covers its position
@@ -117,6 +119,22 @@ pub enum Kept {
     /// Everything: rows of every schema of the tenant (its catalog too),
     /// its DDL and statement-format DML.
     All,
+}
+
+/// Groups (of any tenant) a replay reads again at most: about a second of
+/// a busy cluster's binlog, read without waiting for anyone.
+pub const REPLAY_GROUPS: u64 = 20_000;
+
+/// How many groups `from` is behind `pos`, by GTID sequence numbers (the
+/// most over `pos`'s domains; a domain `from` lacks: `u64::MAX`).
+fn behind(from: &GtidPos, pos: &GtidPos) -> u64 {
+    pos.iter()
+        .map(|g| {
+            from.get(g.domain)
+                .map_or(u64::MAX, |f| g.seq.saturating_sub(f.seq))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Whether group `g` lies after `from` (a domain `from` lacks: yes).
@@ -327,9 +345,12 @@ struct HubState {
     /// groups up to `pos` again.
     replay: Option<GtidPos>,
     /// Reading groups again up to here: each subscription skips what it
-    /// had, and the ring keeps what it held (tenants added by the replay
-    /// count as kept whole from here).
+    /// had, and the ring's entries get the parts of the tenants the wider
+    /// dump keeps now.
     replay_until: Option<GtidPos>,
+    /// The ring entry the replay's next group fills in (the ring holds
+    /// groups in binlog order, and a replay reads them in the same order).
+    replay_cursor: usize,
 }
 
 impl HubState {
@@ -344,11 +365,18 @@ impl HubState {
         }
     }
 
-    /// The ring's groups after `from` for `tenant`, as `kept` sees them.
-    fn backlog(&self, tenant: TenantId, kept: &Kept, from: &GtidPos) -> VecDeque<SourceItem> {
+    /// The ring's groups after `from` up to `upto` for `tenant`, as `kept`
+    /// sees them.
+    fn backlog(
+        &self,
+        tenant: TenantId,
+        kept: &Kept,
+        from: &GtidPos,
+        upto: &GtidPos,
+    ) -> VecDeque<SourceItem> {
         self.ring
             .iter()
-            .filter(|e| after(from, &e.gtid))
+            .filter(|e| after(from, &e.gtid) && !after(upto, &e.gtid))
             .filter_map(|e| {
                 let (_, part) = e.parts.iter().find(|(t, _)| *t == tenant)?;
                 view(part, kept).map(SourceItem::Txn)
@@ -376,17 +404,47 @@ impl HubState {
         }
     }
 
-    /// The dump read up to `pos`. A replay doesn't move `self.pos` back
-    /// (subscriptions from there on are served as before); it ends once
-    /// `pos` reaches where it began.
+    /// The dump read up to `pos`; a replay ends once it reaches where it
+    /// began.
     fn advance(&mut self, pos: &GtidPos) {
         if self.replay_until.as_ref().is_some_and(|u| pos.reached(u)) {
             self.replay_until = None;
         }
-        self.pos = Some(match (&self.pos, &self.replay_until) {
-            (Some(p), Some(_)) => newer(p, pos),
-            _ => pos.clone(),
-        });
+        self.pos = Some(pos.clone());
+    }
+
+    /// A group read again by a replay: its ring entry gets the parts of
+    /// the tenants the wider dump keeps now (the others' parts stay), or
+    /// is added where it belongs when it had no kept rows before.
+    fn fill(&mut self, gtid: Gtid, after_pos: GtidPos, parts: Vec<(TenantId, RawTxn)>) {
+        let c = self.replay_cursor;
+        if let Some(e) = self.ring.get_mut(c)
+            && e.gtid == gtid
+        {
+            let mut merged = parts;
+            for (t, p) in std::mem::take(&mut e.parts) {
+                if !merged.iter().any(|(x, _)| *x == t) {
+                    merged.push((t, p));
+                }
+            }
+            let bytes: usize = merged.iter().map(|(_, p)| approx_bytes(p)).sum();
+            self.ring_bytes = self.ring_bytes - e.bytes + bytes;
+            e.parts = merged;
+            e.bytes = bytes;
+        } else {
+            let bytes = parts.iter().map(|(_, p)| approx_bytes(p)).sum();
+            self.ring_bytes += bytes;
+            self.ring.insert(
+                c,
+                RingEntry {
+                    gtid,
+                    after: after_pos,
+                    parts,
+                    bytes,
+                },
+            );
+        }
+        self.replay_cursor = c + 1;
     }
 
     /// Asks for a reopen (a stronger request is never weakened).
@@ -398,6 +456,7 @@ impl HubState {
         self.ring.clear();
         self.ring_bytes = 0;
         self.ring_start = at.clone();
+        self.replay_cursor = 0;
     }
 
     fn register(
@@ -548,7 +607,7 @@ impl Hub {
         let covered =
             from.reached(&st.ring_start) && since.as_ref().is_some_and(|s| from.reached(s));
         if covered {
-            let backlog = st.backlog(tenant, kept, from);
+            let backlog = st.backlog(tenant, kept, from, &pos);
             if backlog.len() <= opts.max_backlog {
                 metrics::counter!("sprig_feed_resumes_total", "tier" => "ring").increment(1);
                 st.register(tenant, kept.clone(), pos, tx, Arc::clone(&detached));
@@ -585,13 +644,13 @@ impl Hub {
         }
         // A new subscription keeping its tenant whole, a little behind the
         // hub (it read the cluster's position, or its checkpoint, a moment
-        // before the hub read on): the dump reopens wider anyway, so it
-        // reopens at `from` and reads those groups again instead of
-        // opening a catch-up dump (r9feed2). Within the ring's reach and
-        // `max_backlog` groups only, one replay at a time.
-        let near = from.reached(&st.ring_start)
-            && st.ring.iter().filter(|e| after(from, &e.gtid)).count() <= opts.max_backlog;
-        if first && whole && near && st.rewind.is_none() && st.replay_until.is_none() {
+        // before the hub read on; or a gateway's change streams resuming
+        // after a restart): the dump reopens wider anyway, so it reopens
+        // at `from` and reads those groups again instead of opening a
+        // catch-up dump (r9feed2). Up to `REPLAY_GROUPS` groups back; a
+        // replay under way is extended (each subscription skips what it
+        // had).
+        if first && whole && st.rewind.is_none() && behind(from, &pos) <= REPLAY_GROUPS {
             let r = match &st.replay {
                 Some(r) => older(r, from),
                 None => from.clone(),
@@ -756,19 +815,26 @@ impl Hub {
                         st.reset_ring(&pos);
                         self.scope(&mut st, &pos, false)
                     } else if let Some(b) = back {
-                        // Read again from `b`: the ring keeps what it has,
-                        // so tenants this reopen adds count as kept whole
-                        // from where the hub was.
+                        // Read again from `b`; the ring's entries after it
+                        // get the new tenants' parts as the groups come
+                        // again, so they count as kept whole from `b`.
                         let until = match st.replay_until.take() {
                             Some(u) => newer(&u, &pos),
                             None => pos.clone(),
                         };
-                        let s = self.scope(&mut st, &until, false);
                         tracing::debug!(cluster = %self.cluster, from = %b, until = %until, "shared feed reader reads a few groups again for a new whole tenant");
                         pos = older(&pos, &b);
+                        st.pos = Some(pos.clone());
+                        st.replay_cursor = st
+                            .ring
+                            .iter()
+                            .position(|e| after(&pos, &e.gtid))
+                            .unwrap_or(st.ring.len());
                         st.replay_until = Some(until);
-                        s
+                        self.scope(&mut st, &pos, false)
                     } else {
+                        // A replay under way goes on from `pos` and fills
+                        // in the ring after it.
                         self.scope(&mut st, &pos, false)
                     };
                     scope = Some(s);
@@ -867,10 +933,14 @@ impl Hub {
                     }
                     st.delivered |= sent;
                     let after_pos = t.after();
-                    // A replay's groups are in the ring already (as the
-                    // old scope kept them), or weren't kept.
+                    // A replay's groups are in the ring already, as the
+                    // old scope kept them: fill in the new parts.
                     let again = st.replay_until.as_ref().is_some_and(|u| !after(u, &t.gtid));
-                    if !parts.is_empty() && !again {
+                    if again {
+                        if !parts.is_empty() && after(&st.ring_start, &t.gtid) {
+                            st.fill(t.gtid, after_pos.clone(), parts);
+                        }
+                    } else if !parts.is_empty() {
                         let bytes = parts.iter().map(|(_, p)| approx_bytes(p)).sum();
                         st.ring_bytes += bytes;
                         st.ring.push_back(RingEntry {

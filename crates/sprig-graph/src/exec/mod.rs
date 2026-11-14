@@ -33,10 +33,13 @@ use std::time::{Duration, Instant};
 
 use sprig_common::{Result, SprigCode, SprigError};
 
-use crate::ast::{Clause, Explain, Expr, MapItem, PathPattern, Projection, Query, SubqueryKind};
+use crate::ast::{
+    BinOp, Clause, Explain, Expr, MapItem, PathPattern, Projection, Query, SubqueryKind,
+};
 use crate::eval::{Params, Row, eval};
 use crate::store::{EdgeRow, GraphStore, NodeRow};
 use crate::value::{Key, Node, Rel, Value, props_from_json};
+use sprig_router::graph_route::CmpOp;
 
 /// The traversal budgets of one statement.
 #[derive(Debug, Clone)]
@@ -299,6 +302,11 @@ async fn run_with(
         late: ex_late(store_late, q),
         seen_nodes: HashMap::new(),
         seen_rels: HashMap::new(),
+        prefetch: HashMap::new(),
+        push: HashMap::new(),
+        only: HashMap::new(),
+        profile: q.explain == Explain::Profile,
+        prune: None,
     };
     if q.explain == Explain::Explain {
         let mut plan = explain(q);
@@ -349,6 +357,150 @@ async fn run_with(
         notifications: notifications(q),
         late_error: ex.late_error.take().map(Arc::new),
     })
+}
+
+/// The numeric comparisons of `where_`'s conjuncts a node read may
+/// filter on: `v.k op c` (either way round) with `c` a constant or
+/// parameter that is an integer below 2^52 in size or a finite float.
+fn pushed(where_: &Expr, params: &Params) -> HashMap<String, Vec<(String, CmpOp, f64)>> {
+    let mut out: HashMap<String, Vec<(String, CmpOp, f64)>> = HashMap::new();
+    for c in matcher::conjuncts(where_) {
+        let Expr::Binary(op, a, b) = c else { continue };
+        let op = match op {
+            BinOp::Lt => CmpOp::Lt,
+            BinOp::Le => CmpOp::Le,
+            BinOp::Gt => CmpOp::Gt,
+            BinOp::Ge => CmpOp::Ge,
+            BinOp::Eq => CmpOp::Eq,
+            _ => continue,
+        };
+        let flip = |o: CmpOp| match o {
+            CmpOp::Lt => CmpOp::Gt,
+            CmpOp::Le => CmpOp::Ge,
+            CmpOp::Gt => CmpOp::Lt,
+            CmpOp::Ge => CmpOp::Le,
+            CmpOp::Eq => CmpOp::Eq,
+            CmpOp::NotNumBelow => CmpOp::NotNumAbove,
+            CmpOp::NotNumAbove => CmpOp::NotNumBelow,
+        };
+        let (v, k, e, op) = match (&**a, &**b) {
+            (Expr::Prop(t, k), e) if matches!(&**t, Expr::Var(_)) => (t, k, e, op),
+            (e, Expr::Prop(t, k)) if matches!(&**t, Expr::Var(_)) => (t, k, e, flip(op)),
+            _ => continue,
+        };
+        let Expr::Var(v) = &**v else { continue };
+        if !matches!(e, Expr::Lit(_) | Expr::Param(_)) {
+            continue;
+        }
+        let x = match eval(e, &Row::new(), params) {
+            Ok(Value::Int(i)) if i.unsigned_abs() < (1u64 << 52) => {
+                #[allow(clippy::cast_precision_loss)] // below 2^52: exact
+                let f = i as f64;
+                f
+            }
+            Ok(Value::Float(f)) if f.is_finite() => f,
+            _ => continue,
+        };
+        out.entry(v.clone()).or_default().push((k.clone(), op, x));
+    }
+    out
+}
+
+/// [`Exec::prune`] for projection `p` after a `MATCH` whose incoming rows
+/// look like `first`: when every sort key, aliases replaced by their
+/// items, reads the same one variable the rows don't bind yet.
+fn prune_of(p: &Projection, first: Option<&Row>) -> Option<Prune> {
+    let mut var: Option<String> = None;
+    let mut keys = Vec::new();
+    for (e, asc) in &p.order {
+        let e = match e {
+            Expr::Var(v) => p
+                .items
+                .iter()
+                .find(|(_, a)| a == v)
+                .map_or_else(|| e.clone(), |(ie, _)| ie.clone()),
+            other => other.clone(),
+        };
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Var(v) => {
+                if p.items.iter().any(|(_, a)| a == v) && !matches!(&e, Expr::Var(_)) {
+                    ok = false;
+                }
+                match &var {
+                    None => var = Some(v.clone()),
+                    Some(w) if w == v => {}
+                    Some(_) => ok = false,
+                }
+            }
+            Expr::Pattern(_) | Expr::Subquery(..) | Expr::Slot(_) => ok = false,
+            _ => {}
+        });
+        if !ok || e.has_aggregate() {
+            return None;
+        }
+        keys.push((e, *asc));
+    }
+    let var = var?;
+    if first.is_some_and(|r| r.contains_key(&var)) {
+        return None;
+    }
+    Some(Prune {
+        var,
+        keys,
+        bound: None,
+    })
+}
+
+/// Incoming rows per chunk of a `MATCH` that keeps only its best rows
+/// ([`Exec::match_top`]).
+const MATCH_CHUNK: usize = 128;
+
+/// What a `MATCH` with `where_`, followed by `next`, is known to read of
+/// the nodes it binds: its `WHERE`'s needs, and the next projection's sort
+/// keys (through the items they name by alias) and `WHERE` (a `WITH`'s).
+fn prefetch_hint(where_: Option<&Expr>, next: Option<&Clause>) -> HashMap<String, late::Need> {
+    let mut need = HashMap::new();
+    if let Some(w) = where_ {
+        late::needs(w, true, &mut need);
+    }
+    // A projection without LIMIT evaluates its items for every row: what
+    // they read is read with the nodes (a RETURN reads whole what it
+    // returns whole).
+    if let Some(c @ (Clause::With(p) | Clause::Return(p))) = next
+        && p.limit.is_none()
+    {
+        for (e, _) in &p.items {
+            late::needs(e, true, &mut need);
+            if let (Clause::Return(_), Expr::Var(v)) = (c, e) {
+                late::add(&mut need, v, late::Need::All);
+            }
+        }
+        if let Some(w) = &p.where_ {
+            late::needs(w, true, &mut need);
+        }
+    }
+    if let Some(Clause::With(p) | Clause::Return(p)) = next
+        && !p.order.is_empty()
+    {
+        let order: Vec<&Expr> = p.order.iter().map(|(e, _)| e).collect();
+        let on = late::needs_of(&order);
+        for (v, n) in &on {
+            match p.items.iter().find(|(_, a)| a == v) {
+                Some((Expr::Var(x), _)) => late::add(&mut need, x, n.clone()),
+                Some((e, _)) => late::needs(e, false, &mut need),
+                None => late::add(&mut need, v, n.clone()),
+            }
+        }
+        for (e, _) in &p.order {
+            if let Expr::Var(v) = e
+                && let Some((ie, _)) = p.items.iter().find(|(_, a)| a == v)
+            {
+                late::needs(ie, true, &mut need);
+            }
+        }
+    }
+    need
 }
 
 /// Whether `q` reads properties late: a read-only statement on a store
@@ -516,6 +668,45 @@ pub(crate) struct Exec<'a> {
     /// The best-read copy of each node and relationship read late.
     pub(crate) seen_nodes: HashMap<u64, Arc<Node>>,
     pub(crate) seen_rels: HashMap<u64, Arc<Rel>>,
+    /// While a `MATCH` runs: what its `WHERE` and the next projection's
+    /// sort keys read of its variables, read with the nodes it binds.
+    pub(crate) prefetch: HashMap<String, late::Need>,
+    /// While a `MATCH` runs: numeric comparisons its `WHERE` makes of its
+    /// variables' properties, pushed into the reads of the nodes it binds.
+    pub(crate) push: HashMap<String, Vec<(String, CmpOp, f64)>>,
+    /// While a `MATCH` runs: the only nodes a variable it binds may be
+    /// (its `WHERE`'s `v IN list` over every incoming row's list), sorted.
+    pub(crate) only: HashMap<String, Vec<u64>>,
+    /// `PROFILE`: each clause's time and rows go into the plan.
+    pub(crate) profile: bool,
+    /// While a `MATCH` keeps only its best rows ([`Exec::match_top`]):
+    /// hops that bind the one variable the sort keys read skip far nodes
+    /// already worse than the last row kept.
+    pub(crate) prune: Option<Prune>,
+}
+
+/// [`Exec::prune`]: the variable, the sort keys over it alone with their
+/// directions, and the keys of the last row kept so far.
+pub(crate) struct Prune {
+    pub(crate) var: String,
+    pub(crate) keys: Vec<(Expr, bool)>,
+    pub(crate) bound: Option<Vec<Value>>,
+}
+
+impl Prune {
+    /// Whether `ks` sorts strictly after the bound (so its row can't be
+    /// kept).
+    pub(crate) fn beaten(&self, ks: &[Value]) -> bool {
+        let Some(b) = &self.bound else { return false };
+        for (i, (_, asc)) in self.keys.iter().enumerate() {
+            let o = ks[i].order(&b[i]);
+            let o = if *asc { o } else { o.reverse() };
+            if o != std::cmp::Ordering::Equal {
+                return o == std::cmp::Ordering::Greater;
+            }
+        }
+        false
+    }
 }
 
 /// The variables of `row` that none of `rest` names: what
@@ -571,6 +762,19 @@ impl Exec<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// `PROFILE`'s line for clause `prev` (its index, start and SQL time
+    /// then), which left `rows` rows.
+    fn clause_line(&mut self, prev: Option<(usize, Instant, u64)>, rows: usize) {
+        if let Some((k, t, sql)) = prev {
+            let line = format!(
+                "Clause {k}: {rows} rows, {} ms, of which {} ms SQL",
+                t.elapsed().as_millis(),
+                self.store.stats().sql_us.saturating_sub(sql) / 1000
+            );
+            self.plan.push(line);
+        }
     }
 
     pub(crate) fn check_rows(&self, n: usize) -> Result<()> {
@@ -775,6 +979,21 @@ impl Exec<'_> {
 
     /// One lifted predicate's or subquery's value for each of `rows`.
     async fn lifted_values(&mut self, l: &Lifted, rows: &mut [Row]) -> Result<Vec<Value>> {
+        // Patterns inside an expression are matches of their own: the
+        // enclosing MATCH's hints don't apply to them.
+        let prefetch = std::mem::take(&mut self.prefetch);
+        let push = std::mem::take(&mut self.push);
+        let only = std::mem::take(&mut self.only);
+        let prune = self.prune.take();
+        let r = Box::pin(self.lifted_values_in(l, rows)).await;
+        self.prefetch = prefetch;
+        self.push = push;
+        self.only = only;
+        self.prune = prune;
+        r
+    }
+
+    async fn lifted_values_in(&mut self, l: &Lifted, rows: &mut [Row]) -> Result<Vec<Value>> {
         let elements = |rows: &[Row],
                         lists: Vec<Value>,
                         var: &str|
@@ -816,34 +1035,90 @@ impl Exec<'_> {
                 let Some((patterns, where_, map)) = comprehension(q) else {
                     return Ok(Vec::new());
                 };
-                let mut tagged: Vec<Row> = rows
+                if rows.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // The outer variables the comprehension reads: rows equal
+                // on them get the same list, so it runs once per distinct
+                // combination (LDBC IC14 ran it for every relationship of
+                // every shortest path, the same relationships many times).
+                let mut used: Vec<String> = Vec::new();
+                {
+                    let mut names: Vec<String> = patterns.iter().flat_map(pattern_vars).collect();
+                    let mut take = |e: &Expr| {
+                        e.walk(&mut |x| {
+                            if let Expr::Var(v) = x {
+                                names.push(v.clone());
+                            }
+                        });
+                    };
+                    if let Some(w) = where_ {
+                        take(w);
+                    }
+                    take(map);
+                    for p in patterns {
+                        for np in std::iter::once(&p.start).chain(p.steps.iter().map(|(_, n)| n)) {
+                            if let Some(pe) = &np.props {
+                                take(pe);
+                            }
+                        }
+                        for (rp, _) in &p.steps {
+                            if let Some(pe) = &rp.props {
+                                take(pe);
+                            }
+                        }
+                    }
+                    for n in names {
+                        if !n.starts_with(' ') && rows[0].contains_key(&n) && !used.contains(&n) {
+                            used.push(n);
+                        }
+                    }
+                }
+                let mut group_of: Vec<usize> = Vec::with_capacity(rows.len());
+                let mut firsts: Vec<usize> = Vec::new();
+                let mut seen: HashMap<Vec<Key>, usize> = HashMap::new();
+                for (i, r) in rows.iter().enumerate() {
+                    let k: Vec<Key> = used
+                        .iter()
+                        .map(|v| r.get(v).map_or(Key::Null, Value::key))
+                        .collect();
+                    let g = *seen.entry(k).or_insert_with(|| {
+                        firsts.push(i);
+                        firsts.len() - 1
+                    });
+                    group_of.push(g);
+                }
+                let mut tagged: Vec<Row> = firsts
                     .iter()
                     .enumerate()
-                    .map(|(i, r)| {
-                        let mut t: Row = r
+                    .map(|(g, &i)| {
+                        // Only what the comprehension reads: the rows it
+                        // multiplies don't carry the outer row's paths and
+                        // lists.
+                        let mut t: Row = rows[i]
                             .iter()
-                            .filter(|(k, _)| !k.starts_with(' '))
+                            .filter(|(k, _)| used.contains(k))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
-                        t.insert(" pcrow".into(), Value::Int(i64::try_from(i).unwrap_or(0)));
+                        t.insert(" pcrow".into(), Value::Int(i64::try_from(g).unwrap_or(0)));
                         t
                     })
                     .collect();
-                if tagged.is_empty() {
-                    return Ok(Vec::new());
-                }
                 tagged =
                     Box::pin(self.match_clause(tagged, patterns, where_, false, false)).await?;
                 let vals = self.eval_rows(map, &mut tagged).await?;
-                let mut out: Vec<Vec<Value>> = vec![Vec::new(); rows.len()];
+                let mut per_group: Vec<Vec<Value>> = vec![Vec::new(); firsts.len()];
                 for (r, v) in tagged.iter().zip(vals) {
                     if let Some(Value::Int(i)) = r.get(" pcrow")
-                        && let Some(o) = usize::try_from(*i).ok().and_then(|i| out.get_mut(i))
+                        && let Some(o) = usize::try_from(*i).ok().and_then(|i| per_group.get_mut(i))
                     {
                         o.push(v);
                     }
                 }
-                out.into_iter().map(Value::List).collect()
+                group_of
+                    .into_iter()
+                    .map(|g| Value::List(per_group[g].clone()))
+                    .collect()
             }
             Lifted::Subquery(k, q) => {
                 let mut v = Vec::with_capacity(rows.len());
@@ -1336,8 +1611,13 @@ impl Exec<'_> {
         let mut rows = rows;
         let mut scope = scope;
         let n = clauses.len();
+        let mut prev: Option<(usize, Instant, u64)> = None;
         for (i, c) in clauses.iter().enumerate() {
             self.check_time()?;
+            if self.profile {
+                self.clause_line(prev, rows.len());
+                prev = Some((i, Instant::now(), self.store.stats().sql_us));
+            }
             match c {
                 Clause::Match {
                     optional,
@@ -1353,9 +1633,40 @@ impl Exec<'_> {
                             }
                         }
                     }
-                    rows = self
-                        .match_clause(rows, patterns, where_.as_ref(), *optional, mult_ok)
-                        .await?;
+                    if self.late {
+                        self.prefetch = prefetch_hint(where_.as_ref(), clauses.get(i + 1));
+                        self.push = where_
+                            .as_ref()
+                            .map(|w| pushed(w, self.params))
+                            .unwrap_or_default();
+                    }
+                    let top = if self.late && rows.len() > MATCH_CHUNK {
+                        self.topk_of(clauses.get(i + 1))?
+                    } else {
+                        None
+                    };
+                    let r = match top {
+                        Some((p, n)) => {
+                            self.match_top(
+                                rows,
+                                patterns,
+                                where_.as_ref(),
+                                *optional,
+                                mult_ok,
+                                p,
+                                n,
+                            )
+                            .await
+                        }
+                        None => {
+                            self.match_clause(rows, patterns, where_.as_ref(), *optional, mult_ok)
+                                .await
+                        }
+                    };
+                    self.prefetch.clear();
+                    self.push.clear();
+                    self.only.clear();
+                    rows = r?;
                     for p in patterns {
                         for v in pattern_vars(p) {
                             if !scope.contains(&v) {
@@ -1416,6 +1727,9 @@ impl Exec<'_> {
                     let (cols, mut out) = r?;
                     // What the statement returns is read in full.
                     self.late_rows(&mut out).await?;
+                    if self.profile {
+                        self.clause_line(prev, out.len());
+                    }
                     return Ok((cols, out));
                 }
                 Clause::Create(pats) => {
@@ -1638,6 +1952,94 @@ impl Exec<'_> {
 
     /// `WITH` / `RETURN`: the column names and rows.
     #[allow(clippy::too_many_lines)] // grouping, sorting and paging in one place
+    /// The projection after a `MATCH` and its row count, when the
+    /// projection keeps only its first rows in an order of plain items
+    /// (`ORDER BY ... LIMIT n`, no aggregate, `DISTINCT`, `*`, pattern
+    /// or a `WITH`'s `WHERE`): the `MATCH` may then keep only those.
+    fn topk_of<'c>(&self, next: Option<&'c Clause>) -> Result<Option<(&'c Projection, usize)>> {
+        let p = match next {
+            Some(Clause::Return(p)) => p,
+            Some(Clause::With(p)) if p.where_.is_none() => p,
+            _ => return Ok(None),
+        };
+        if p.distinct
+            || p.star
+            || p.order.is_empty()
+            || p.items
+                .iter()
+                .any(|(e, _)| e.has_aggregate() || has_deep(e))
+            || p.order
+                .iter()
+                .any(|(e, _)| e.has_aggregate() || has_deep(e))
+        {
+            return Ok(None);
+        }
+        let Some(l) = self.const_int(p.limit.as_ref(), "LIMIT")? else {
+            return Ok(None);
+        };
+        let skip = self.const_int(p.skip.as_ref(), "SKIP")?.unwrap_or(0);
+        Ok(Some((p, skip.saturating_add(l))))
+    }
+
+    /// A `MATCH` followed by a projection that keeps its first `n` rows
+    /// ([`Exec::topk_of`]): the incoming rows go through in chunks, and
+    /// after each only the best `n` rows so far are kept (ties in input
+    /// order, as the projection's sort has them), so the clause never
+    /// holds every row (LDBC IC9 matched a hundred thousand messages to
+    /// keep twenty).
+    #[allow(clippy::too_many_arguments)]
+    async fn match_top(
+        &mut self,
+        rows: Vec<Row>,
+        patterns: &[PathPattern],
+        where_: Option<&Expr>,
+        optional: bool,
+        mult_ok: bool,
+        p: &Projection,
+        n: usize,
+    ) -> Result<Vec<Row>> {
+        let mut kept: Vec<(Vec<Value>, usize, Row)> = Vec::new();
+        let mut pos = 0usize;
+        let mut rows = rows;
+        // Sort keys that read one variable the MATCH binds (aliases
+        // replaced by their items): far nodes of that variable already
+        // worse than the last row kept needn't become rows. Not under
+        // OPTIONAL MATCH, where a row with no match would appear instead.
+        self.prune = if optional {
+            None
+        } else {
+            prune_of(p, rows.first())
+        };
+        while !rows.is_empty() {
+            let rest = rows.split_off(MATCH_CHUNK.min(rows.len()));
+            let chunk = std::mem::replace(&mut rows, rest);
+            let mut out = self
+                .match_clause(chunk, patterns, where_, optional, mult_ok)
+                .await?;
+            let keys = self.sort_keys(&mut out, &p.items, p).await?;
+            for (k, r) in keys.into_iter().zip(out) {
+                kept.push((k, pos, r));
+                pos += 1;
+            }
+            if kept.len() > n.saturating_mul(2).max(MATCH_CHUNK) {
+                Self::keep_top(&mut kept, p, n);
+            }
+            if kept.len() >= n
+                && n > 0
+                && let Some(pr) = &mut self.prune
+            {
+                Self::keep_top(&mut kept, p, n);
+                pr.bound = kept.last().map(|(k, _, _)| k.clone());
+            }
+        }
+        self.prune = None;
+        Self::keep_top(&mut kept, p, n);
+        self.plan.push(format!(
+            "Top {n}: the MATCH kept only the rows the next projection keeps, in chunks of {MATCH_CHUNK} incoming rows"
+        ));
+        Ok(kept.into_iter().map(|(_, _, r)| r).collect())
+    }
+
     /// The first `n` of `rows` in `p`'s order (ties in input order),
     /// with what `items` read of them: the sort keys (and the items they
     /// name by alias) are read and evaluated for every row, the rest of
@@ -1650,6 +2052,28 @@ impl Exec<'_> {
         n: usize,
     ) -> Result<Vec<Row>> {
         let mut rows = rows;
+        let keys = self.sort_keys(&mut rows, items, p).await?;
+        let mut keyed: Vec<(Vec<Value>, usize, Row)> = keys
+            .into_iter()
+            .zip(rows)
+            .enumerate()
+            .map(|(pos, (k, r))| (k, pos, r))
+            .collect();
+        Self::keep_top(&mut keyed, p, n);
+        let mut kept: Vec<Row> = keyed.into_iter().map(|(_, _, r)| r).collect();
+        let exprs: Vec<&Expr> = items.iter().map(|(e, _)| e).collect();
+        self.late(&mut kept, &exprs).await?;
+        Ok(kept)
+    }
+
+    /// `p`'s sort keys for each of `rows` (reading what they need first);
+    /// the keys may name items by alias.
+    async fn sort_keys(
+        &mut self,
+        rows: &mut [Row],
+        items: &[(Expr, String)],
+        p: &Projection,
+    ) -> Result<Vec<Vec<Value>>> {
         let order: Vec<&Expr> = p.order.iter().map(|(e, _)| e).collect();
         // Items the sort keys name by alias.
         let mut named: Vec<usize> = Vec::new();
@@ -1676,19 +2100,48 @@ impl Exec<'_> {
                 (other, n) => late::needs(other, n.is_none(), &mut need),
             }
         }
-        self.late_needs(&mut rows, &need).await?;
-        let mut keyed: Vec<(Vec<Value>, usize, Row)> = Vec::with_capacity(rows.len());
-        for (pos, r) in rows.into_iter().enumerate() {
-            let ks = if named.is_empty() {
+        self.late_needs(rows, &need).await?;
+        // Each key: its own expression, or (a bare alias) its item's; only
+        // keys that use an alias inside a larger expression need the row
+        // with the items added.
+        let direct: Option<Vec<&Expr>> = order
+            .iter()
+            .map(|e| {
+                if let Expr::Var(v) = e {
+                    return Some(items.iter().find(|(_, a)| a == v).map_or(*e, |(ie, _)| ie));
+                }
+                let mut uses = false;
+                e.walk(&mut |x| {
+                    if let Expr::Var(v) = x
+                        && items.iter().any(|(_, a)| a == v)
+                    {
+                        uses = true;
+                    }
+                });
+                (!uses).then_some(*e)
+            })
+            .collect();
+        let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+        for (n, r) in rows.iter().enumerate() {
+            if n % 4096 == 4095 {
+                tokio::task::yield_now().await;
+            }
+            let ks = if let Some(d) = &direct {
+                let mut ks = Vec::with_capacity(d.len());
+                for e in d {
+                    ks.push(eval(e, r, self.params)?);
+                }
+                ks
+            } else if named.is_empty() {
                 let mut ks = Vec::with_capacity(order.len());
                 for e in &order {
-                    ks.push(self.eval_full(e, &r).await?);
+                    ks.push(self.eval_full(e, r).await?);
                 }
                 ks
             } else {
                 let mut m = r.clone();
                 for &i in &named {
-                    let v = self.eval_full(&items[i].0, &r).await?;
+                    let v = self.eval_full(&items[i].0, r).await?;
                     m.insert(items[i].1.clone(), v);
                 }
                 let mut ks = Vec::with_capacity(order.len());
@@ -1697,8 +2150,14 @@ impl Exec<'_> {
                 }
                 ks
             };
-            keyed.push((ks, pos, r));
+            out.push(ks);
         }
+        Ok(out)
+    }
+
+    /// Keeps the first `n` of `keyed` (keys, input position, row) in
+    /// `p`'s order, sorted; ties keep their input order.
+    fn keep_top(keyed: &mut Vec<(Vec<Value>, usize, Row)>, p: &Projection, n: usize) {
         let cmp = |a: &(Vec<Value>, usize, Row), b: &(Vec<Value>, usize, Row)| {
             for (i, (_, asc)) in p.order.iter().enumerate() {
                 let o = a.0[i].order(&b.0[i]);
@@ -1718,10 +2177,6 @@ impl Exec<'_> {
             }
             _ => keyed.sort_unstable_by(cmp),
         }
-        let mut kept: Vec<Row> = keyed.into_iter().map(|(_, _, r)| r).collect();
-        let exprs: Vec<&Expr> = items.iter().map(|(e, _)| e).collect();
-        self.late(&mut kept, &exprs).await?;
-        Ok(kept)
     }
 
     async fn project(

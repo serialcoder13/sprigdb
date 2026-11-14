@@ -795,6 +795,14 @@ impl SessionExec for LimitedSession {
         self.inner.point_read(cx, stmt, params).await
     }
 
+    fn holds_idle(&self) -> bool {
+        self.inner.holds_idle()
+    }
+
+    fn release_idle(&mut self) {
+        self.inner.release_idle();
+    }
+
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,

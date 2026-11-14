@@ -285,7 +285,7 @@ fn read_secret(file: Option<&String>, env: &str, prompt: &str) -> Result<String,
     prompt_line(prompt, true)
 }
 
-fn prompt_line(prompt: &str, hidden: bool) -> Result<String, Failed> {
+pub(crate) fn prompt_line(prompt: &str, hidden: bool) -> Result<String, Failed> {
     if !std::io::stdin().is_terminal() {
         return Err(Failed(format!(
             "{} needed and no terminal to ask on",

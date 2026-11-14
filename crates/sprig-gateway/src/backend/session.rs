@@ -297,6 +297,14 @@ pub struct BackendSession {
     /// The held connection (thread id) and when its database-level
     /// grants were last refreshed with a `USE`.
     grants_seen: Option<(u64, std::time::Instant)>,
+    /// Keep the last statement's connection for the next one
+    /// ([`Self::set_keep`]).
+    keep: bool,
+    /// That connection: not a pin; the next statement uses it only when
+    /// its route chooses the same node, and it goes back to the pool on
+    /// [`Self::release_kept`]. Boxed: a lease holds its connection inline,
+    /// and futures that own a session would grow by its size.
+    kept: Option<Box<BackendLease>>,
 }
 
 impl std::fmt::Debug for BackendSession {
@@ -352,6 +360,7 @@ fn internal(e: &ClientError) -> SprigError {
 /// reach another statement.
 impl Drop for BackendSession {
     fn drop(&mut self) {
+        self.release_kept();
         if !self.in_flight() {
             return;
         }
@@ -415,7 +424,79 @@ impl BackendSession {
             explicit_ids_next: false,
             trace_ctx: None,
             redo: None,
+            keep: false,
+            kept: None,
         }
+    }
+
+    /// Keeps each statement's connection for the session's next statement
+    /// instead of returning it to the pool (MongoDB sessions, whose point
+    /// reads then skip the pool's lease and release). It isn't a pin: a
+    /// statement whose route chooses another node, or a connection the
+    /// pool wouldn't reuse (in a transaction, too old, its account's grants
+    /// changed), takes the pool's way. Turning it off returns the kept
+    /// connection.
+    pub fn set_keep(&mut self, on: bool) {
+        self.keep = on;
+        if !on {
+            self.release_kept();
+        }
+    }
+
+    /// Whether a connection is kept for the next statement.
+    #[must_use]
+    pub fn holds_kept(&self) -> bool {
+        self.kept.is_some()
+    }
+
+    /// Returns the kept connection to the pool (the session went idle).
+    pub fn release_kept(&mut self) {
+        if let Some(l) = self.kept.take() {
+            let limits = self.backends.limits(&self.target.cluster);
+            self.backends.pools.release(*l, Release::Reuse, limits);
+        }
+    }
+
+    /// The kept connection, when it is to `node` of `view`'s cluster for
+    /// this session's account and options and the pool would hand it out
+    /// again; otherwise it goes back to the pool.
+    fn take_kept(&mut self, view: &ClusterView, node: &NodeRef) -> Option<BackendLease> {
+        let mut l = *self.kept.take()?;
+        let key = l.key();
+        let same = key.cluster == view.id
+            && key.node == node.node
+            && key.account == self.target.user
+            && key.found_rows == self.opts.found_rows
+            && key.mariadb_caps == self.opts.mariadb_caps.bits();
+        let limits = self.backends.limits(&self.target.cluster);
+        let retired = self
+            .backends
+            .pools
+            .retired_at(&key.account)
+            .is_some_and(|at| {
+                std::time::Instant::now()
+                    .checked_sub(l.conn_ref().age())
+                    .is_none_or(|opened| opened < at)
+            });
+        let conn = l.conn();
+        let usable = !retired
+            && conn.client.is_idle()
+            && !conn.client.in_transaction()
+            && !conn.client.closed_while_idle()
+            && conn.age() < limits.max_lifetime;
+        if same && usable {
+            return Some(l);
+        }
+        self.backends.pools.release(
+            l,
+            if usable {
+                Release::Reuse
+            } else {
+                Release::Discard
+            },
+            limits,
+        );
+        None
     }
 
     /// The client-visible session state.
@@ -1006,6 +1087,12 @@ impl BackendSession {
                 }
             }
         }
+        if ok && self.keep && cur.error.is_none() {
+            // Kept for the session's next statement (`set_keep`).
+            self.release_kept();
+            self.kept = Some(Box::new(cur.lease));
+            return Ok(o);
+        }
         let limits = self.backends.limits(&self.target.cluster);
         self.backends.pools.release(
             cur.lease,
@@ -1352,7 +1439,7 @@ impl BackendSession {
     /// writer is retried until the deadline.
     #[allow(clippy::too_many_lines)]
     async fn route_lease(
-        &self,
+        &mut self,
         view: &ClusterView,
         info: &StmtInfo,
         settings: &BackendSettings,
@@ -1450,7 +1537,12 @@ impl BackendSession {
                     }
                 }
             };
-            match self.lease(view, &node, settings, deadline).await {
+            if let Some(l) = self.take_kept(view, &node) {
+                return Ok((l, route, wait));
+            }
+            // Boxed: the pool's acquire (with its connect) is large, and a
+            // kept connection skips it.
+            match Box::pin(self.lease(view, &node, settings, deadline)).await {
                 Ok(l) => return Ok((l, route, wait)),
                 Err(AcquireError::Timeout) => return Err(pool_timeout()),
                 Err(AcquireError::Connect(e)) => {
@@ -2010,6 +2102,7 @@ impl BackendSession {
         if self.cur.is_some() {
             let _ = self.finish().await;
         }
+        self.release_kept();
         if let Some((mut lease, _)) = self.held.take() {
             let ok = lease.conn().reset().await.is_ok();
             let limits = self.backends.limits(&self.target.cluster);
@@ -2042,6 +2135,7 @@ impl BackendSession {
             return;
         }
         drop(self.cur.take());
+        self.release_kept();
         if let Some((lease, _)) = self.held.take() {
             let limits = self.backends.limits(&self.target.cluster);
             self.backends.pools.release(lease, Release::Discard, limits);
@@ -2079,6 +2173,7 @@ impl BackendSession {
         if let Some(cur) = self.cur.take() {
             drop(cur);
         }
+        self.release_kept();
         if let Some((lease, _)) = self.held.take() {
             let limits = self.backends.limits(&self.target.cluster);
             self.backends.pools.release(lease, Release::Discard, limits);

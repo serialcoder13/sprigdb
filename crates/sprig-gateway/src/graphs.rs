@@ -1126,6 +1126,7 @@ impl GatewayGraphs {
             .ok_or_else(|| not_found(db, &c.name))?;
         let sources = self.mapped_sources(&cat, row.db_id, &c.def)?;
         for (t, o) in &sources {
+            inheritable_source(&cat, t, *o)?;
             if !can_read(*o) {
                 return Err(SprigError::standard(
                     1142,
@@ -1334,6 +1335,10 @@ impl GatewayGraphs {
                     .map_err(|e| SprigError::internal(format!("mapped graph definition: {e}")))?;
             let mut ok = true;
             for (t, o) in self.mapped_sources(cat, g.db_id, &def)? {
+                if let Err(e) = inheritable_source(cat, &t, o) {
+                    rc.end().await;
+                    return Err(e);
+                }
                 if !self.allows(grants, cat, &g.db, g.db_id, Some(o), Action::Select) {
                     rc.end().await;
                     return Err(denied(&format!("table '{}.{t}'", g.db)));
@@ -1981,6 +1986,30 @@ async fn delete_group<Q: Queryable + Send>(q: &mut Q, cat: &str, group: u32) -> 
         )
         .await
         .map_err(backend_error)?;
+    }
+    Ok(())
+}
+
+/// 39908 when mapped-graph source `table` (object `o`) is inheritable
+/// (chapter 42): a mapped graph reads the table's rows as they are stored,
+/// which for an inheritable table are every space's layer rows (overrides,
+/// hide markers, other spaces' records), not a space's merged records, so
+/// neither inheritance nor the reader's row-level security would apply to
+/// them (decision rlsinherit). Checked when the graph is made and at every
+/// read, since a table can become inheritable later.
+fn inheritable_source(cat: &TenantCatalog, table: &str, o: u64) -> Result<()> {
+    let inheritable = cat
+        .ext
+        .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
+        .is_some_and(|st| st.object(sprig_common::ids::ObjectId(o)).is_some());
+    if inheritable {
+        return Err(SprigError::new(
+            SprigCode::GraphDefinitionInvalid,
+            format!(
+                "table '{table}' is inheritable: a mapped graph can't read it yet (its rows are \
+                 every space's layers, not a space's merged records)"
+            ),
+        ));
     }
     Ok(())
 }

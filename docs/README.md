@@ -34,7 +34,7 @@ Every page's front matter names its audience:
 | `performance/` | Automatic indexing, plans, workload, sharding advice |
 | `security/` | Accounts, grants, row-level security, TLS, API keys, residency |
 | `operate/` | Deploying, clusters, data centres, failover, backups, upgrades, monitoring |
-| `tools/` | Studio, `sprig` and `sprigctl` |
+| `tools/` | Studio, `sprig`, `sprigctl`, searching the docs and the AI assistants |
 | `troubleshooting/` | By symptom |
 | `reference/` | Settings, error codes, metrics, the REST API and the command-line tools, **generated from the code**. Never edit these by hand |
 | `errors-what-to-do.toml` | What each error code means and what to do about it; merged into `reference/errors.md` |

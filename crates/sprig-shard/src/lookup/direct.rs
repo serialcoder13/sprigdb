@@ -232,32 +232,43 @@ pub struct BuildReport {
     /// Values already present (claimed by writers meanwhile, or shared by
     /// owners of a non-unique lookup).
     pub skipped: u64,
+    /// Owner rows the verification found without their lookup row, or
+    /// with a stale routing hash, and repaired (rows a writer committed
+    /// after the back-fill read their range, or a rebuild's old hashes).
+    pub repaired: u64,
 }
 
-#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // the build's steps, in order
-/// Builds `l`: creates the table on every lookup
-/// shard, `write_only`, back-fills every owner shard in primary-key
-/// chunks of `chunk` rows, checks that every owner's value points at it
-/// (else a real duplicate: drops `l` and fails with 1062), then `public`.
-/// `catalog` is a connection to the tenant catalog; `wait_gateways` is
-/// called after `write_only` and must return once every gateway has the
-/// catalog version that shows it.
+/// `innodb_lock_wait_timeout` of the back-fill's locking reads.
+const BACKFILL_LOCK_WAIT_SECS: u64 = 10;
+/// Attempts of one back-fill chunk on 1205 or 1213.
+const BACKFILL_RETRIES: u32 = 20;
+
+async fn move_state(
+    catalog: &mut Conn,
+    l: &mut LookupIndex,
+    from: LookupState,
+    to: LookupState,
+) -> Result<()> {
+    if !LookupCatalog.set_state(catalog, l.id, from, to).await? {
+        return Err(SprigError::new(
+            SprigCode::LookupUnavailable,
+            format!(
+                "lookup index {} left state {} while it was being built",
+                l.index_name,
+                from.as_str()
+            ),
+        ));
+    }
+    l.state = to;
+    Ok(())
+}
+
+/// Creates `l`'s table (and the shard schema, with its decision table) on
+/// every lookup shard.
 ///
 /// # Errors
-/// 1062 on a real duplicate; MariaDB's errors.
-pub async fn build<W, F>(
-    pools: &Pools,
-    catalog: &mut Conn,
-    p: &dyn LookupPlacement,
-    l: &mut LookupIndex,
-    chunk: usize,
-    wait_gateways: W,
-) -> Result<BuildReport>
-where
-    W: FnOnce() -> F + Send,
-    F: std::future::Future<Output = ()> + Send,
-{
-    let cat = LookupCatalog;
+/// MariaDB's errors.
+pub async fn create_tables(pools: &Pools, p: &dyn LookupPlacement, l: &LookupIndex) -> Result<()> {
     for t in p.lookup_shards() {
         let mut c = conn(pools, &t.cluster).await?;
         c.query_drop(format!(
@@ -266,56 +277,163 @@ where
         ))
         .await
         .map_err(db_err)?;
+        c.query_drop(sprig_catalog::ddl::dtx_table_sql(&t.schema))
+            .await
+            .map_err(db_err)?;
         c.query_drop(l.create_table_sql(&t.schema))
             .await
             .map_err(db_err)?;
     }
-    cat.set_state(catalog, l.id, LookupState::Building, LookupState::WriteOnly)
-        .await?;
-    l.state = LookupState::WriteOnly;
-    wait_gateways().await;
-    cat.set_state(
-        catalog,
-        l.id,
-        LookupState::WriteOnly,
-        LookupState::Backfilling,
-    )
-    .await?;
-    l.state = LookupState::Backfilling;
-    let mut report = BuildReport::default();
-    let spec = l.spec()?;
+    Ok(())
+}
+
+#[allow(clippy::many_single_char_names)] // the build's steps, in order
+/// Builds `l` from whatever state it is in, so a build a crash stopped
+/// resumes where it was:
+///
+/// ```text
+/// building     create the table on every lookup shard → write_only, publish
+/// write_only   → backfilling (writers already claim and release)
+/// backfilling  back-fill every owner shard (primary-key chunks of `chunk`
+///              rows, read LOCK IN SHARE MODE so writes in flight finish
+///              first, INSERT IGNORE), then verify: every owner row's value
+///              must name that owner; a missing row or a stale hash is
+///              repaired with a claim, a value another live owner holds is a
+///              real duplicate (drop the lookup, 1062)
+///              → public, publish
+/// ```
+///
+/// `catalog` is a connection to the tenant catalog (its default
+/// database). `publish` runs after each state change writers must see: it
+/// raises the catalog version and returns once every gateway can have
+/// loaded it. Each chunk touches `updated_at`, so another job can tell a
+/// running build from a dead one ([`super::admin::BUILD_LEASE`]).
+///
+/// # Errors
+/// 1062 on a real duplicate (the lookup is dropped); MariaDB's errors.
+pub async fn build<W, F>(
+    pools: &Pools,
+    catalog: &mut Conn,
+    p: &dyn LookupPlacement,
+    l: &mut LookupIndex,
+    chunk: usize,
+    mut publish: W,
+) -> Result<BuildReport>
+where
+    W: FnMut() -> F + Send,
+    F: std::future::Future<Output = Result<()>> + Send,
+{
+    if l.state == LookupState::Building {
+        create_tables(pools, p, l).await?;
+        move_state(catalog, l, LookupState::Building, LookupState::WriteOnly).await?;
+        publish().await?;
+    }
+    if l.state == LookupState::WriteOnly {
+        move_state(catalog, l, LookupState::WriteOnly, LookupState::Backfilling).await?;
+    }
+    if l.state != LookupState::Backfilling {
+        return Err(SprigError::internal(format!(
+            "lookup index {} is {}, not being built",
+            l.index_name,
+            l.state.as_str()
+        )));
+    }
+    let mut report = backfill(pools, catalog, p, l, chunk).await?;
+    match verify(pools, catalog, p, l, chunk).await {
+        Ok(n) => report.repaired = n,
+        Err(e) if errno(&e) == Some(1062) => {
+            drop_with(pools, catalog, p, l, &mut publish).await?;
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    }
+    move_state(catalog, l, LookupState::Backfilling, LookupState::Public).await?;
+    publish().await?;
+    Ok(report)
+}
+
+/// The owner columns a build reads: the values, the primary key, the
+/// routing hash.
+fn owner_select(l: &LookupIndex, o: &Target, cond: &str, chunk: usize, lock: bool) -> String {
     let vcols: Vec<String> = l.columns.iter().map(|c| quote(&c.name)).collect();
     let pk_cols: Vec<String> = l.owner_pk.iter().map(|c| quote(&c.name)).collect();
-    let nv = vcols.len();
-    let np = pk_cols.len();
+    format!(
+        "SELECT {}, {}, _sprig_rk FROM {} {cond} ORDER BY {} LIMIT {chunk}{}",
+        vcols.join(", "),
+        pk_cols.join(", "),
+        fq(o, &l.owner_table),
+        pk_cols.join(", "),
+        if lock { " LOCK IN SHARE MODE" } else { "" }
+    )
+}
+
+fn after_cond(l: &LookupIndex, after: Option<&Vec<Value>>) -> (String, Vec<Value>) {
+    match after {
+        None => (String::new(), Vec::new()),
+        Some(k) => {
+            let pk_cols: Vec<String> = l.owner_pk.iter().map(|c| quote(&c.name)).collect();
+            (
+                format!(
+                    "WHERE ({}) > ({})",
+                    pk_cols.join(", "),
+                    vec!["?"; pk_cols.len()].join(", ")
+                ),
+                k.clone(),
+            )
+        }
+    }
+}
+
+/// One chunk of owner rows, read in a short transaction with share locks:
+/// a write in flight on those rows finishes (and commits or rolls back)
+/// before the chunk is read, so the back-fill sees it.
+async fn locked_chunk(oc: &mut Conn, sql: &str, prm: Vec<Value>) -> Result<Vec<Row>> {
+    let mut tries = 0;
+    loop {
+        oc.query_drop("BEGIN").await.map_err(db_err)?;
+        let r: std::result::Result<Vec<Row>, _> = oc.exec(sql, Params::Positional(prm.clone())).await;
+        match r {
+            Ok(rows) => {
+                oc.query_drop("COMMIT").await.map_err(db_err)?;
+                return Ok(rows);
+            }
+            Err(e) => {
+                let _ = oc.query_drop("ROLLBACK").await;
+                let e = db_err(e);
+                tries += 1;
+                if matches!(errno(&e), Some(1205 | 1213)) && tries < BACKFILL_RETRIES {
+                    tokio::time::sleep(Duration::from_millis(50 * u64::from(tries))).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+}
+
+#[allow(clippy::many_single_char_names)]
+async fn backfill(
+    pools: &Pools,
+    catalog: &mut Conn,
+    p: &dyn LookupPlacement,
+    l: &LookupIndex,
+    chunk: usize,
+) -> Result<BuildReport> {
+    let mut report = BuildReport::default();
+    let spec = l.spec()?;
+    let nv = l.columns.len();
+    let np = l.owner_pk.len();
     for o in p.owner_shards() {
         let mut oc = conn(pools, &o.cluster).await?;
+        oc.query_drop(format!(
+            "SET SESSION innodb_lock_wait_timeout = {BACKFILL_LOCK_WAIT_SECS}"
+        ))
+        .await
+        .map_err(db_err)?;
         let mut after: Option<Vec<Value>> = None;
         loop {
-            let (cond, prm) = match &after {
-                None => (String::new(), Vec::new()),
-                Some(k) => (
-                    format!(
-                        "WHERE ({}) > ({})",
-                        pk_cols.join(", "),
-                        vec!["?"; np].join(", ")
-                    ),
-                    k.clone(),
-                ),
-            };
-            let rows: Vec<Row> = oc
-                .exec(
-                    format!(
-                        "SELECT {}, {}, _sprig_rk FROM {} {cond} ORDER BY {} LIMIT {chunk}",
-                        vcols.join(", "),
-                        pk_cols.join(", "),
-                        fq(&o, &l.owner_table),
-                        pk_cols.join(", ")
-                    ),
-                    Params::Positional(prm),
-                )
-                .await
-                .map_err(db_err)?;
+            let (cond, prm) = after_cond(l, after.as_ref());
+            let rows = locked_chunk(&mut oc, &owner_select(l, &o, &cond, chunk, true), prm).await?;
             if rows.is_empty() {
                 break;
             }
@@ -325,6 +443,9 @@ where
                 let vals: Vec<Value> = (0..nv).map(|i| r[i].clone()).collect();
                 if vals.contains(&Value::NULL) {
                     continue;
+                }
+                if r[nv + np] == Value::NULL {
+                    return Err(rk_missing(l));
                 }
                 let h = hash_values(&spec, l, &vals)?;
                 let mut ins = vals;
@@ -350,15 +471,49 @@ where
                     }
                 }
             }
+            LookupCatalog.touch(catalog, l.id).await?;
         }
     }
-    if l.unique {
-        verify(pools, catalog, p, l).await?;
-    }
-    cat.set_state(catalog, l.id, LookupState::Backfilling, LookupState::Public)
-        .await?;
-    l.state = LookupState::Public;
     Ok(report)
+}
+
+fn rk_missing(l: &LookupIndex) -> SprigError {
+    SprigError::new(
+        SprigCode::LookupUnavailable,
+        format!(
+            "{} has rows without their routing hash (_sprig_rk) yet; build lookup index {} \
+             once its group's back-fill is done",
+            l.owner_table, l.index_name
+        ),
+    )
+}
+
+/// A value read back from MariaDB as the key value a client would send:
+/// strings by their bytes (UTF-8 on the wire), numbers exactly.
+fn owned_of(class: crate::key::KeyClass, v: &Value) -> crate::key::KeyValueOwned {
+    use crate::key::{KeyClass, KeyValueOwned};
+    match (class, v) {
+        (_, Value::NULL) => KeyValueOwned::Null,
+        (_, Value::Int(i)) => KeyValueOwned::Int(i128::from(*i)),
+        (_, Value::UInt(u)) => KeyValueOwned::Int(i128::from(*u)),
+        (KeyClass::Numeric, Value::Bytes(b)) => {
+            let t = String::from_utf8_lossy(b).into_owned();
+            match t.parse::<i128>() {
+                Ok(i) => KeyValueOwned::Int(i),
+                Err(_) => KeyValueOwned::Decimal(t),
+            }
+        }
+        (KeyClass::String { .. }, Value::Bytes(b)) => KeyValueOwned::Str {
+            bytes: b.clone(),
+            charset: crate::collation::Charset::Utf8mb4,
+        },
+        (_, Value::Bytes(b)) => KeyValueOwned::Bytes(b.clone()),
+        (_, Value::Double(d)) => KeyValueOwned::Double(*d),
+        (_, other) => KeyValueOwned::Str {
+            bytes: other.as_sql(true).into_bytes(),
+            charset: crate::collation::Charset::Utf8mb4,
+        },
+    }
 }
 
 /// Hashes values read back from MariaDB, as the gateway would hash the
@@ -370,27 +525,18 @@ fn hash_values(
     l: &LookupIndex,
     vals: &[Value],
 ) -> Result<crate::key::RoutingHash> {
-    use crate::key::{KeyClass, KeyValueOwned};
+    use crate::key::KeyValueOwned;
     let owned: Vec<KeyValueOwned> = l
         .columns
         .iter()
         .zip(vals)
         .map(|(c, v)| match (c.class, v) {
-            (_, Value::Int(i)) => KeyValueOwned::Int(i128::from(*i)),
-            (_, Value::UInt(u)) => KeyValueOwned::Int(i128::from(*u)),
-            (KeyClass::Numeric, Value::Bytes(b)) => {
+            // An integer read as text by the text protocol hashes as the
+            // integer, as before.
+            (crate::key::KeyClass::Numeric, Value::Bytes(b)) => {
                 KeyValueOwned::Decimal(String::from_utf8_lossy(b).into_owned())
             }
-            (KeyClass::String { .. }, Value::Bytes(b)) => KeyValueOwned::Str {
-                bytes: b.clone(),
-                charset: crate::collation::Charset::Utf8mb4,
-            },
-            (_, Value::Bytes(b)) => KeyValueOwned::Bytes(b.clone()),
-            (_, Value::Double(d)) => KeyValueOwned::Double(*d),
-            (_, other) => KeyValueOwned::Str {
-                bytes: other.as_sql(true).into_bytes(),
-                charset: crate::collation::Charset::Utf8mb4,
-            },
+            _ => owned_of(c.class, v),
         })
         .collect();
     let refs: Vec<_> = owned.iter().map(KeyValueOwned::as_ref).collect();
@@ -399,81 +545,193 @@ fn hash_values(
     Ok(routing_hash(&buf))
 }
 
-#[allow(clippy::many_single_char_names)]
-/// Step 4: every owner's value points at that owner; otherwise the value
-/// belongs to another live owner, a real duplicate: drop and fail.
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+/// Step 4, in chunks: every owner row's value names that owner under its
+/// current routing hash. Rows that don't are claimed now, as a writer
+/// would: a missing lookup row is inserted, an orphan or our own row under
+/// an old hash is taken over, and a value another live owner holds (the
+/// claim's locking owner check) is a real duplicate: 1062. Returns the rows
+/// repaired.
 async fn verify(
     pools: &Pools,
     catalog: &mut Conn,
     p: &dyn LookupPlacement,
-    l: &mut LookupIndex,
-) -> Result<()> {
+    l: &LookupIndex,
+    chunk: usize,
+) -> Result<u64> {
+    use crate::key::{KeyValueOwned, RoutingHash};
     let spec = l.spec()?;
+    let nv = l.columns.len();
+    let np = l.owner_pk.len();
+    let mut repaired = 0;
+    let pk_cols: Vec<String> = l
+        .owner_pk
+        .iter()
+        .map(|c| quote(&format!("owner_{}", c.name)))
+        .collect();
     let vcols: Vec<String> = l.columns.iter().map(|c| quote(&c.name)).collect();
-    let pk_cols: Vec<String> = l.owner_pk.iter().map(|c| quote(&c.name)).collect();
-    let nv = vcols.len();
     for o in p.owner_shards() {
         let mut oc = conn(pools, &o.cluster).await?;
-        let rows: Vec<Row> = oc
-            .query(format!(
-                "SELECT {}, {} FROM {}",
-                vcols.join(", "),
-                pk_cols.join(", "),
-                fq(&o, &l.owner_table)
-            ))
-            .await
-            .map_err(db_err)?;
-        for r in rows {
-            let vals: Vec<Value> = (0..nv).map(|i| r[i].clone()).collect();
-            if vals.contains(&Value::NULL) {
-                continue;
-            }
-            let pk: Vec<Value> = (nv..nv + pk_cols.len()).map(|i| r[i].clone()).collect();
-            let t = p.lookup_target(hash_values(&spec, l, &vals)?)?;
-            let mut prm = vals.clone();
-            prm.extend(pk);
-            let mut c = conn(pools, &t.cluster).await?;
-            let n: Option<u64> = c
-                .exec_first(
-                    format!(
-                        "SELECT COUNT(*) FROM {} WHERE {} AND {}",
-                        fq(&t, &l.physical()),
-                        l.value_where(),
-                        l.owner_match()
-                    ),
-                    Params::Positional(prm),
-                )
+        let mut after: Option<Vec<Value>> = None;
+        loop {
+            let (cond, prm) = after_cond(l, after.as_ref());
+            let rows: Vec<Row> = oc
+                .exec(owner_select(l, &o, &cond, chunk, false), Params::Positional(prm))
                 .await
                 .map_err(db_err)?;
-            if n != Some(1) {
-                let shown = vals
-                    .iter()
-                    .map(|v| v.as_sql(true))
-                    .collect::<Vec<_>>()
-                    .join("-");
-                drop_lookup(pools, catalog, p, l).await?;
-                return Err(SprigError::standard(
-                    1062,
-                    *b"23000",
-                    format!("Duplicate entry {shown} for key '{}'", l.index_name),
-                ));
+            if rows.is_empty() {
+                break;
             }
+            after = rows
+                .last()
+                .map(|r| (nv..nv + np).map(|i| r[i].clone()).collect());
+            // Owner rows by lookup shard: (values, primary key, hash).
+            let mut by_shard: BTreeMap<Target, Vec<(Vec<Value>, Vec<Value>, Value)>> =
+                BTreeMap::new();
+            for r in &rows {
+                let vals: Vec<Value> = (0..nv).map(|i| r[i].clone()).collect();
+                if vals.contains(&Value::NULL) {
+                    continue;
+                }
+                if r[nv + np] == Value::NULL {
+                    return Err(rk_missing(l));
+                }
+                let pk: Vec<Value> = (nv..nv + np).map(|i| r[i].clone()).collect();
+                let t = p.lookup_target(hash_values(&spec, l, &vals)?)?;
+                by_shard
+                    .entry(t)
+                    .or_default()
+                    .push((vals, pk, r[nv + np].clone()));
+            }
+            for (t, owners) in by_shard {
+                // The lookup rows that name these owners exactly.
+                let tuple = vec!["?"; nv + np + 1].join(", ");
+                let mut prm = Vec::new();
+                for (v, pk, rk) in &owners {
+                    prm.extend(v.iter().cloned());
+                    prm.extend(pk.iter().cloned());
+                    prm.push(rk.clone());
+                }
+                let mut c = conn(pools, &t.cluster).await?;
+                let found: Vec<Row> = c
+                    .exec(
+                        format!(
+                            "SELECT {}, owner_rk FROM {} WHERE ({}, {}, owner_rk) IN ({})",
+                            pk_cols.join(", "),
+                            fq(&t, &l.physical()),
+                            vcols.join(", "),
+                            pk_cols.join(", "),
+                            vec![format!("({tuple})"); owners.len()].join(", ")
+                        ),
+                        Params::Positional(prm),
+                    )
+                    .await
+                    .map_err(db_err)?;
+                let have: std::collections::HashSet<String> = found
+                    .into_iter()
+                    .map(|r| {
+                        let pk: Vec<Value> = (0..np).map(|i| r[i].clone()).collect();
+                        let rk: u64 = r.get(np).unwrap_or_default();
+                        owner_key(&pk, rk)
+                    })
+                    .collect();
+                for (vals, pk, rk) in owners {
+                    let rk: u64 = mysql_async::from_value_opt(rk).unwrap_or_default();
+                    if have.contains(&owner_key(&pk, rk)) {
+                        continue;
+                    }
+                    let value: Vec<KeyValueOwned> = l
+                        .columns
+                        .iter()
+                        .zip(&vals)
+                        .map(|(col, v)| owned_of(col.class, v))
+                        .collect();
+                    let owner = super::OwnerRef {
+                        pk: l
+                            .owner_pk
+                            .iter()
+                            .zip(&pk)
+                            .map(|(col, v)| owned_of(col.class, v))
+                            .collect(),
+                        rk: RoutingHash(rk),
+                    };
+                    if l.unique {
+                        let mut txn = DirectTxn::new(Arc::clone(pools), BACKFILL_LOCK_WAIT_SECS);
+                        let r = super::claim(&mut txn, p, l, &value, &owner).await;
+                        match r {
+                            Ok(super::ClaimResult::ConflictCounted) => {
+                                txn.rollback().await;
+                                let shown = vals
+                                    .iter()
+                                    .map(|v| v.as_sql(true))
+                                    .collect::<Vec<_>>()
+                                    .join("-");
+                                return Err(SprigError::standard(
+                                    1062,
+                                    *b"23000",
+                                    format!("Duplicate entry {shown} for key '{}'", l.index_name),
+                                ));
+                            }
+                            Ok(_) => {
+                                txn.commit().await?;
+                            }
+                            Err(e) => {
+                                txn.rollback().await;
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        let h = hash_values(&spec, l, &vals)?;
+                        let mut ins = vals.clone();
+                        ins.extend(pk.iter().cloned());
+                        ins.push(Value::UInt(rk));
+                        ins.push(Value::UInt(h.0));
+                        let sql = format!(
+                            "{} ON DUPLICATE KEY UPDATE owner_rk = VALUES(owner_rk), prev_rk = NULL",
+                            l.insert_sql(&t.schema, false)
+                        );
+                        c.exec_drop(sql, Params::Positional(ins))
+                            .await
+                            .map_err(db_err)?;
+                    }
+                    repaired += 1;
+                }
+            }
+            LookupCatalog.touch(catalog, l.id).await?;
         }
     }
-    Ok(())
+    Ok(repaired)
 }
 
-/// Drops `l`: `dropping`, then the table on every lookup shard, then the
-/// catalog row.
+/// An owner's primary key and hash as one comparable text.
+fn owner_key(pk: &[Value], rk: u64) -> String {
+    let mut k = pk
+        .iter()
+        .map(|v| v.as_sql(true))
+        .collect::<Vec<_>>()
+        .join("\u{1}");
+    k.push('\u{2}');
+    k.push_str(&rk.to_string());
+    k
+}
+
+/// Drops `l` while gateways may still maintain it: `dropping` (writers stop
+/// claiming), `publish`, then the table on every lookup shard and the
+/// catalog row, `publish` again.
 ///
 /// # Errors
-/// MariaDB's errors.
-pub async fn drop_lookup(
+/// MariaDB's errors; `publish`'s.
+pub async fn drop_with<W, F>(
     pools: &Pools,
     catalog: &mut Conn,
     p: &dyn LookupPlacement,
     l: &mut LookupIndex,
-) -> Result<()> {
+    publish: &mut W,
+) -> Result<()>
+where
+    W: FnMut() -> F + Send,
+    F: std::future::Future<Output = Result<()>> + Send,
+{
     catalog
         .exec_drop(
             "UPDATE lookup_indexes SET state = 'dropping', updated_at = UTC_TIMESTAMP(6)
@@ -483,6 +741,7 @@ pub async fn drop_lookup(
         .await
         .map_err(db_err)?;
     l.state = LookupState::Dropping;
+    publish().await?;
     for t in p.lookup_shards() {
         let mut c = conn(pools, &t.cluster).await?;
         c.query_drop(format!("DROP TABLE IF EXISTS {}", fq(&t, &l.physical())))
@@ -492,7 +751,22 @@ pub async fn drop_lookup(
     catalog
         .exec_drop("DELETE FROM lookup_indexes WHERE lookup_id = ?", (l.id.0,))
         .await
-        .map_err(db_err)
+        .map_err(db_err)?;
+    publish().await
+}
+
+/// Drops `l`: `dropping`, then the table on every lookup shard, then the
+/// catalog row (no gateway is told; [`drop_with`] tells them).
+///
+/// # Errors
+/// MariaDB's errors.
+pub async fn drop_lookup(
+    pools: &Pools,
+    catalog: &mut Conn,
+    p: &dyn LookupPlacement,
+    l: &mut LookupIndex,
+) -> Result<()> {
+    drop_with(pools, catalog, p, l, &mut || async { Ok(()) }).await
 }
 
 #[allow(clippy::many_single_char_names, clippy::too_many_lines)] // one pass, in order

@@ -59,7 +59,7 @@ fn ddl_and_names() {
         l.columns.clone(),
         l.owner_pk.clone(),
         GroupId(9),
-        5,
+        Some(5),
     );
     assert!(a.index_name.starts_with("sprig_auto_") && a.index_name.len() == 19);
     assert_eq!(

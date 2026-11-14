@@ -1404,6 +1404,15 @@ async fn late_reads_answer_as_whole_reads() {
         "MATCH (a:Person)-[:KNOWS]->(b) RETURN a {.name, .age} AS m, b ORDER BY m.name SKIP 1 LIMIT 2",
         "MATCH (a:Person)-[:KNOWS]->(b) WITH collect(b) AS bs
          RETURN [x IN bs WHERE x.age > 30 | x.name] AS old, reduce(t = 0, x IN bs | t + coalesce(x.age, 0)) AS ages",
+        // Far nodes bound without being read (nothing needs them yet).
+        "MATCH (a:Person)-[:BOUGHT]->(p) WITH a, count(p) AS n RETURN a.name, n ORDER BY a.name",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WITH a, collect(p) AS ps UNWIND ps AS x
+         RETURN a.name, labels(x) AS l, x:Product AS isp ORDER BY a.name",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WITH DISTINCT p MATCH (p:Product)<-[:BOUGHT]-(b)
+         RETURN p.name, b.name ORDER BY p.name, b.name",
+        "MATCH (a:Person)-[:KNOWS]->(b) WITH b MATCH (b:Product) RETURN count(*) AS c",
+        "MATCH (a:Person {name: 'Alice'})-[:BOUGHT]->(p) WITH p RETURN p",
+        "MATCH (a:Person)-[:KNOWS]->(b) WITH a, b WHERE b:Person RETURN a.name, b.name ORDER BY a.name",
     ];
     for shards in [1, 4] {
         let mut whole = social(shards).await;
@@ -1413,6 +1422,200 @@ async fn late_reads_answer_as_whole_reads() {
             let b = q(&mut late, c).await;
             assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
             assert_eq!(a.columns, b.columns, "{c}");
+        }
+    }
+}
+
+/// Elements reached through a path's `nodes()` are read before a
+/// comprehension reads their properties (LDBC IC14's `[n IN nodes(path) | n.id]`).
+#[tokio::test]
+async fn late_reads_follow_path_functions() {
+    let mut whole = social(4).await;
+    let mut late = social(4).await.with_late_reads();
+    for c in [
+        "MATCH path = allShortestPaths((a:Person {name: 'Alice'})-[:KNOWS*0..]-(b:Person {name: 'Carol'}))
+         WITH collect(path) AS paths UNWIND paths AS path WITH path, relationships(path) AS rels
+         RETURN [n IN nodes(path) | n.name] AS names, [r IN rels | r.since] AS since",
+        "MATCH p = (a:Person {name: 'Alice'})-[:KNOWS*2]->(b) RETURN head(nodes(p)).name AS h, max(b).name AS m",
+    ] {
+        let a = q(&mut whole, c).await;
+        let b = q(&mut late, c).await;
+        assert_eq!(show(&a), show(&b), "{c}");
+    }
+}
+
+/// Numeric comparisons of a `MATCH`'s `WHERE` filter the far nodes as
+/// they are read; the answers stay those of whole reads.
+#[tokio::test]
+async fn pushed_filters_answer_as_whole_reads() {
+    let mut whole = social(4).await;
+    let mut late = social(4).await.with_late_reads();
+    for c in [
+        "MATCH (a:Person)-[:KNOWS]->(b) WHERE b.age >= 30 AND 40 > b.age RETURN a.name, b.name ORDER BY a.name",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WHERE p.price < 50 RETURN a.name, p.name ORDER BY a.name, p.name",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WHERE p.price = 10.5 OR p.price = 1 RETURN p.name ORDER BY p.name",
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b) WHERE b.age > 26 RETURN b.name ORDER BY b.name",
+        "MATCH (a:Person)-[:KNOWS]->(b) WHERE b.age > 30 AND (a)-[:BOUGHT]->() RETURN a.name, b.name ORDER BY a.name",
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) WHERE b.age > 30 RETURN a.name, b.name ORDER BY a.name",
+        "MATCH (p:Product) WITH p ORDER BY p.name WITH collect(p) AS ps
+         MATCH (a:Person)-[:BOUGHT]->(q) WHERE q IN ps[0..2] RETURN a.name, q.name ORDER BY a.name, q.name",
+        "MATCH (p:Product) WITH collect(p) AS ps MATCH (a:Person)-[:BOUGHT]->(q) WHERE q IN [] RETURN count(*)",
+        "MATCH (a:Person) WITH a, [(a)-[:BOUGHT]->(x) | x] AS mine
+         OPTIONAL MATCH (a)-[:KNOWS]->(b)-[:BOUGHT]->(y) WHERE y IN mine RETURN a.name, b.name, y.name ORDER BY a.name",
+        "MATCH (a:Person)-[:KNOWS]->(b {age: 35}) RETURN a.name, b.name",
+        "MATCH (a:Person)-[:KNOWS]->(b)-[:BOUGHT]->(:Product {name: 'Pen'}) RETURN a.name, b.name ORDER BY a.name",
+    ] {
+        let a = q(&mut whole, c).await;
+        let b = q(&mut late, c).await;
+        assert_eq!(show(&a), show(&b), "{c}");
+    }
+}
+
+#[tokio::test]
+async fn late_reads_disconnected_matches() {
+    for late in [false, true] {
+        let mut s = MemStore::new(4);
+        if late {
+            s = s.with_late_reads();
+        }
+        q(
+            &mut s,
+            "CREATE (a:A), (b:B), (c:C) CREATE (a)-[:T]->(b), (a)-[:T]->(c)",
+        )
+        .await;
+        let o = q(&mut s, "MATCH (a)-->(b) MATCH (c)-->(d) RETURN a, b, c, d").await;
+        let mut got = show(&o);
+        got.sort();
+        assert_eq!(got.len(), 4, "{late}");
+        assert!(got.iter().all(|r| !r.contains("(: ")), "{late}: {got:?}");
+    }
+}
+
+/// A `MATCH` over many incoming rows followed by `ORDER BY ... LIMIT`
+/// keeps only the best rows, chunk by chunk, with the same answer.
+#[tokio::test]
+async fn top_rows_of_a_chunked_match() {
+    let setup = "UNWIND range(1, 300) AS i CREATE (p:P {id: i})
+                 WITH p, i UNWIND range(1, 4) AS j CREATE (p)-[:W]->(:M {id: i * 10 + j, x: (i * 7 + j * 13) % 50})";
+    let cases = [
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) RETURN p.id AS p, m.id AS m, m.x AS x ORDER BY x DESC, m LIMIT 7",
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) WHERE m.x < 10 RETURN m.id AS mid ORDER BY m.x, mid SKIP 3 LIMIT 5",
+        "MATCH (p:P) WITH p ORDER BY p.id MATCH (p)-[:W]->(m) WITH p, m ORDER BY m.x LIMIT 9 RETURN p.id, m.id",
+        "MATCH (p:P) WITH p OPTIONAL MATCH (p)-[:W]->(m) WHERE m.x > 45 RETURN p.id AS p, m.id AS m ORDER BY m DESC, p LIMIT 6",
+    ];
+    for shards in [1, 4] {
+        let mut whole = MemStore::new(shards);
+        let mut late = MemStore::new(shards).with_late_reads();
+        q(&mut whole, setup).await;
+        q(&mut late, setup).await;
+        for c in cases {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}
+
+/// A far node pattern with an indexed property restricts the hop to the
+/// nodes the index finds; the answers stay those of whole reads.
+#[tokio::test]
+async fn indexed_far_maps_answer_as_whole_reads() {
+    for shards in [1, 4] {
+        let mut whole = social(shards).await;
+        let mut late = social(shards).await.with_late_reads();
+        for s in [&mut whole, &mut late] {
+            q(s, "CREATE INDEX FOR (n:Product) ON (n.name)").await;
+        }
+        for c in [
+            "MATCH (a:Person)-[:BOUGHT]->(p:Product {name: 'Pen'}) RETURN a.name ORDER BY a.name",
+            "MATCH (x:Product {name: 'Desk'}) WITH x.name AS nm
+             MATCH (a:Person)-[:BOUGHT]->(p:Product {name: nm}) RETURN a.name, p.price ORDER BY a.name",
+            "MATCH (a:Person)-[:BOUGHT]->(p:Product {name: 'Nothing'}) RETURN count(*) AS c",
+            "UNWIND ['Pen', 'Lamp'] AS nm MATCH (a:Person)-[:BOUGHT]->(p:Product {name: nm})
+             RETURN nm, a.name ORDER BY nm, a.name",
+        ] {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}
+
+/// A two-hop pattern predicate between bound ends answers as matching
+/// the pattern does.
+#[tokio::test]
+async fn two_hop_predicates_meet_in_the_middle() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let pred = q(
+            &mut s,
+            "MATCH (a:Person), (b:Person) WHERE (a)-[:BOUGHT]->()<-[:BOUGHT]-(b)
+             RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        )
+        .await;
+        let walk = q(
+            &mut s,
+            "MATCH (a:Person)-[:BOUGHT]->()<-[:BOUGHT]-(b:Person)
+             RETURN DISTINCT a.name AS a, b.name AS b ORDER BY a, b",
+        )
+        .await;
+        assert_eq!(show(&pred), show(&walk), "{shards} shard(s)");
+        assert!(!show(&pred).is_empty());
+        let both = q(
+            &mut s,
+            "MATCH (a:Person) WITH a, [x IN [a] WHERE (x)-[:KNOWS]->()-[:KNOWS]->(a)] AS l
+             RETURN a.name AS a, size(l) AS n ORDER BY a",
+        )
+        .await;
+        assert_eq!(show(&both).len(), 5);
+    }
+}
+
+/// The running top-k bound drops only numbers worse than it: strings and
+/// missing values, which Cypher orders apart from numbers, stay.
+#[tokio::test]
+async fn top_rows_keep_values_the_bound_cannot_judge() {
+    let setup = "UNWIND range(1, 300) AS i CREATE (p:P {id: i})
+                 WITH p, i UNWIND range(1, 3) AS j
+                 CREATE (p)-[:W]->(:M {id: i * 10 + j,
+                   x: CASE WHEN i % 97 = 0 THEN 'text' WHEN i % 89 = 0 THEN null ELSE (i * 7 + j * 13) % 50 END})";
+    let cases = [
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) RETURN m.id AS mid, m.x AS x ORDER BY m.x DESC, mid LIMIT 9",
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) RETURN m.id AS mid, m.x AS x ORDER BY m.x, mid LIMIT 9",
+    ];
+    for shards in [1, 4] {
+        let mut whole = MemStore::new(shards);
+        let mut late = MemStore::new(shards).with_late_reads();
+        q(&mut whole, setup).await;
+        q(&mut late, setup).await;
+        for c in cases {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}
+
+/// `WHERE v.k = e` (or `IN`) with `e` from the incoming rows restricts
+/// far node `v` through an index on its label; answers as whole reads.
+#[tokio::test]
+async fn indexed_far_conjuncts_answer_as_whole_reads() {
+    for shards in [1, 4] {
+        let mut whole = social(shards).await;
+        let mut late = social(shards).await.with_late_reads();
+        for s in [&mut whole, &mut late] {
+            q(s, "CREATE INDEX FOR (n:Product) ON (n.name)").await;
+        }
+        for c in [
+            "UNWIND ['Pen', 'Desk'] AS nm MATCH (a:Person)-[:BOUGHT]->(p:Product) WHERE p.name = nm
+             RETURN nm, a.name ORDER BY nm, a.name",
+            "MATCH (x:Product) WITH x ORDER BY x.name WITH collect(x.name) AS names
+             MATCH (a:Person)-[:BOUGHT]->(p:Product) WHERE p.name IN names[0..2] OR p.name IN names[1..3]
+             RETURN a.name, p.name ORDER BY a.name, p.name",
+        ] {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
         }
     }
 }

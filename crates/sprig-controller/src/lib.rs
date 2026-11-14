@@ -115,6 +115,8 @@ pub mod txn_resolver;
 pub mod users;
 pub mod workload_rollup;
 pub mod write_load;
+// AI providers in the Admin API and the payload purge.
+pub mod ai_admin;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -390,6 +392,13 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             ..autoindex_loop::Cadence::default()
         },
     );
+    // The AI assistants' exact payloads past `ai.audit_payload_days`.
+    let ai_purge = ai_admin::AiPurgeLoop::new(
+        Directory::new(Arc::clone(&stores.global)),
+        Arc::new(locator.clone()),
+        dc.clone(),
+        Some(settings.live.clone()),
+    );
     // Rollup and retention of the workload tables.
     let workload_rollup = workload_rollup::WorkloadRollup::new(
         Directory::new(Arc::clone(&stores.global)),
@@ -573,6 +582,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(reconciler))
         .with_loop(Loop::new(auto_index))
         .with_loop(Loop::new(workload_rollup))
+        .with_loop(Loop::new(ai_purge))
         .with_loop(Loop::new(Arc::clone(&balancer)))
         .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
         // Tenants follow their traffic.
@@ -720,6 +730,15 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     for (name, path) in &cfg.controller.service_token_files {
         services.push((name.clone(), http::load_token(path)?));
     }
+    // AI providers: keys sealed with the master key file's `ai` keys.
+    let ai_admin = Arc::new(ai_admin::AiAdmin::new(
+        Arc::clone(&stores.global),
+        match &cfg.controller.workload_key_file {
+            Some(p) => Some(Arc::new(sprig_workload::keyring::MasterKeyring::from_file(p)?)
+                as Arc<dyn sprig_ai::keys::AiKeyring>),
+            None => None,
+        },
+    )?);
     let named = operators.switched().await.unwrap_or(false);
     // Admin API over TLS: HTTPS when a certificate is set.
     let admin_tls = http::tls_config(&cfg.controller)?;
@@ -781,6 +800,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         http::router_guarded(svc)
             .merge(recs)
             .merge(operators::http::router(operators))
+            .merge(ai_admin::router(ai_admin))
             .layer(axum::middleware::from_fn_with_state(
                 guard,
                 operators::guard::layer,

@@ -388,6 +388,16 @@ pub trait SessionExec: Send {
     ) -> Result<PointRead> {
         Ok(PointRead::Fallback)
     }
+
+    /// Whether the session keeps a backend connection between statements
+    /// (after [`Self::point_read`]); the front end returns it with
+    /// [`Self::release_idle`] when its client goes quiet.
+    fn holds_idle(&self) -> bool {
+        false
+    }
+
+    /// Returns a backend connection kept between statements to its pool.
+    fn release_idle(&mut self) {}
 }
 
 /// What [`SessionExec::point_read`] found.
@@ -619,6 +629,14 @@ impl SessionExec for HookedSession {
         params: &ExecuteParams,
     ) -> Result<PointRead> {
         self.inner.point_read(cx, stmt, params).await
+    }
+
+    fn holds_idle(&self) -> bool {
+        self.inner.holds_idle()
+    }
+
+    fn release_idle(&mut self) {
+        self.inner.release_idle();
     }
 
     async fn execute(

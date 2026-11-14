@@ -224,8 +224,8 @@ async fn point_reads_fall_back_when_something_changes() {
     // A session whose point reads were prepared before the policy never
     // sees the other owner's document again. (Its prepared reads are
     // refused with 39366 instead of being prepared again under the policy,
-    // on the general path too and before S154: a known gap, reported in
-    // S157. A plain `find` of the same session is filtered.)
+    // on the general path too, and before the point path existed: a known
+    // gap. A plain `find` of the same session is filtered.)
     let hidden_or_refused = |r: &Read| matches!(r, Ok(None) | Err(39366));
     let r = read_until(&dc, 4, 10, hidden_or_refused).await;
     check(

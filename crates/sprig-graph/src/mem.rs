@@ -255,7 +255,45 @@ impl GraphStore for MemStore {
             .into_iter()
             .map(|mut n| {
                 n.props = only(&n.props, keys);
-                n.types = n.types.as_ref().map(|t| only(t, keys));
+
+                n
+            })
+            .collect())
+    }
+
+    async fn nodes_where(
+        &mut self,
+        ids: &[u64],
+        keys: Option<&[String]>,
+        filter: &[(String, sprig_router::graph_route::CmpOp, f64)],
+    ) -> Result<Vec<NodeRow>> {
+        use sprig_router::graph_route::CmpOp;
+        let mut rows = self.nodes(ids).await?;
+        // As MariaDB does it: a JSON number against the number; anything
+        // else (missing, strings) fails.
+        rows.retain(|n| {
+            filter.iter().all(|(k, op, x)| {
+                if let Some(id) = k.strip_prefix(sprig_router::graph_route::LABEL_KEY) {
+                    return id.parse::<u32>().is_ok_and(|id| n.labels.contains(&id));
+                }
+                let v = n.props.get(k).and_then(serde_json::Value::as_f64);
+                match op {
+                    CmpOp::NotNumBelow => v.is_none_or(|v| v >= *x),
+                    CmpOp::NotNumAbove => v.is_none_or(|v| v <= *x),
+                    CmpOp::Lt => v.is_some_and(|v| v < *x),
+                    CmpOp::Le => v.is_some_and(|v| v <= *x),
+                    CmpOp::Gt => v.is_some_and(|v| v > *x),
+                    CmpOp::Ge => v.is_some_and(|v| v >= *x),
+                    CmpOp::Eq => v.is_some_and(|v| (v - *x).abs() == 0.0),
+                }
+            })
+        });
+        let Some(keys) = keys else { return Ok(rows) };
+        Ok(rows
+            .into_iter()
+            .map(|mut n| {
+                n.props = only(&n.props, keys);
+
                 n
             })
             .collect())
@@ -272,7 +310,7 @@ impl GraphStore for MemStore {
             .into_iter()
             .map(|mut e| {
                 e.props = only(&e.props, keys);
-                e.types = e.types.as_ref().map(|t| only(t, keys));
+
                 e
             })
             .collect())
@@ -304,7 +342,13 @@ impl GraphStore for MemStore {
             {
                 continue;
             }
-            out.push(n.clone());
+            let mut n = n.clone();
+            if self.late
+                && let Some(keys) = &s.keys
+            {
+                n.props = only(&n.props, keys);
+            }
+            out.push(n);
             if s.limit.is_some_and(|l| out.len() >= l) {
                 break;
             }
